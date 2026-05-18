@@ -63,15 +63,13 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         try
         {
-            // Keep the FileStream open via PEReader; reads are lazy.
-            var stream = File.Open(fullPath, new FileStreamOptions
-            {
-                Mode = FileMode.Open,
-                Access = FileAccess.Read,
-                Share = FileShare.Read | FileShare.Delete,
-                Options = FileOptions.RandomAccess,
-            });
-            var pe = new PEReader(stream);
+            // Read the bytes once and back the PEReader with a MemoryStream so the file on disk
+            // stays unlocked. Required for the Tier-1 watcher to be able to observe rewrites on
+            // Windows, where File.Move(overwrite: true) needs the destination to be free of
+            // open writable handles. Per the spike, fixture-sized assemblies cost ~tens of KB
+            // resident — well within the Tier-1 budget.
+            var bytes = File.ReadAllBytes(fullPath);
+            var pe = new PEReader(new MemoryStream(bytes, writable: false));
             if (!pe.HasMetadata)
             {
                 pe.Dispose();
