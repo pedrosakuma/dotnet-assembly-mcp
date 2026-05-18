@@ -37,7 +37,7 @@ Together they form a complete loop:
 
 A CPU hotspot identified by `dotnet-diagnostics-mcp` is described by a method identity that this server can resolve into a signature, attributes, body, and call graph — without the agent ever having to read the repo.
 
-The handoff contract is being designed in [`dotnet-diagnostics-mcp#18`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/18).
+The handoff contract is being designed in [`dotnet-diagnostics-mcp#18`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/18); the consumer-side spec lives here in [`docs/handoff-contract.md`](./docs/handoff-contract.md).
 
 ## Where it complements SourceLink
 
