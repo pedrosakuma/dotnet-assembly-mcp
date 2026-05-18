@@ -182,3 +182,48 @@ From there the agent can drill into `decompile_method(handle)` or `find_callers(
 - Producer-side design issue: [`pedrosakuma/dotnet-diagnostics-mcp#18`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/18)
 - PE metadata tokens: <https://learn.microsoft.com/dotnet/api/system.reflection.metadata.metadatatokens>
 - ECMA-335, §II.22.26 (`MethodDef` table), §II.24.2.6 (`#GUID` heap / MVID)
+
+---
+
+## 8. Implementation notes
+
+### 8.1 Metadata library
+
+**Chosen:** [`System.Reflection.Metadata`](https://learn.microsoft.com/dotnet/api/system.reflection.metadata) (BCL).
+
+Decided via a comparison spike (#2) that implemented the same small surface
+(`Open`, `Resolve(mvid, token)`, `ListMethods`, `GetIlBytes`, `ScanIl`) against
+three candidates and ran them against a `net9.0` fixture from a `net10.0`
+runner. All three libraries produced byte-identical IL summary results
+(outbound calls, field refs, string literals, tokens), confirming correctness
+parity. SRM dominated on perf and footprint, by wide margins:
+
+| Library | Open (ms) | ListMethods (ms) | Alloc/run (B) | Resident ×10 (B) |
+|---|---:|---:|---:|---:|
+| Mono.Cecil  | 0.077 | 0.428 | 100,712 | 698,128 |
+| AsmResolver | 0.549 | 1.006 | 158,088 | 1,180,648 |
+| **SRM**     | **0.063** | **0.055** | **24,528** | **83,784** |
+
+Decision rationale:
+
+- **In-box on net10** — zero NuGet dependency, no supply-chain surface for the
+  most-loaded component of the server.
+- **Lowest overhead** — for a server whose Tier-1 indexes are resident across
+  potentially many assemblies, a ~10× advantage in resident memory and ~8×
+  advantage in list time materially changes capacity planning.
+- **Free interop with `ICSharpCode.Decompiler`** — the decompiler is built on
+  `MetadataReader` internally, so the Tier-3 decompile path can reuse the same
+  `PEReader` we already hold, avoiding a second PE parse per method.
+- **Stable** — `System.Reflection.Metadata` ships with the runtime; no
+  third-party release cadence to track.
+
+Trade-off accepted:
+
+- SRM is more verbose. The spike adapter is ~210 LOC vs ~100 for Cecil /
+  AsmResolver, mostly because IL operand decoding and signature
+  pretty-printing have to be written explicitly. This is a one-time cost paid
+  in the consumer-side resolver; the verbosity is encapsulated and does not
+  leak into the contract or the MCP tool surface.
+
+The spike code lives on the throwaway `spike/metadata-lib` branch and is not
+intended to merge into `main`.
