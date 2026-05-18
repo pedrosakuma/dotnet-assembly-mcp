@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>DotnetAssemblyMcp.Core</RootNamespace>
+    <AssemblyName>DotnetAssemblyMcp.Core</AssemblyName>
+    <Description>Static .NET assembly navigation primitives. Reads metadata via System.Reflection.Metadata; has no MCP dependencies.</Description>
+  </PropertyGroup>
+</Project>

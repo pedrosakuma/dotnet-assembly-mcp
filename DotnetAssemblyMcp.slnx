@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DotnetAssemblyMcp.Core/DotnetAssemblyMcp.Core.csproj" />
+    <Project Path="src/DotnetAssemblyMcp.Server/DotnetAssemblyMcp.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DotnetAssemblyMcp.Core.Tests/DotnetAssemblyMcp.Core.Tests.csproj" />
+    <Project Path="tests/fixtures/SampleLib/SampleLib.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,24 @@
+## .NET build output
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+.vs/
+.idea/
+
+## NuGet
+*.nupkg
+.nuget/
+
+## IDE / OS
+.DS_Store
+Thumbs.db
+*.swp
+
+## Test output
+TestResults/
+coverage*.xml
+*.coverage
+
+## Local sample data — do not check in
+tests/external/

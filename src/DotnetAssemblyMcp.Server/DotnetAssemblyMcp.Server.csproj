@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <UserSecretsId>dotnet-assembly-mcp-server</UserSecretsId>
+    <Description>MCP server exposing dotnet-assembly-mcp Core navigation primitives via Streamable HTTP transport.</Description>
+    <RootNamespace>DotnetAssemblyMcp.Server</RootNamespace>
+    <AssemblyName>DotnetAssemblyMcp.Server</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotnetAssemblyMcp.Core\DotnetAssemblyMcp.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\docs\handoff-contract.md" Link="Resources\handoff-contract.md" />
+  </ItemGroup>
+
+</Project>
