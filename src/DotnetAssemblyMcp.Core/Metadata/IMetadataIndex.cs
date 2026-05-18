@@ -41,6 +41,16 @@ public interface IMetadataIndex
     /// outbound calls, field accesses, type uses and string literals. No decompilation.
     /// </summary>
     IlScanReadResult ScanIl(MethodIdentity identity);
+
+    /// <summary>
+    /// Tier-4 reverse-call lookup: returns every method in the callee's own module whose IL
+    /// emits a call/callvirt/newobj/ldftn/ldvirtftn to <paramref name="callee"/>. The index
+    /// is built lazily per module and cached both in memory and at
+    /// <c>~/.cache/dotnet-assembly-mcp/&lt;mvid&gt;.xref</c> (rebuilt when the underlying file
+    /// changes). Cross-module callers are out of scope for this iteration and tracked
+    /// separately.
+    /// </summary>
+    FindCallersReadResult FindCallers(MethodIdentity callee);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

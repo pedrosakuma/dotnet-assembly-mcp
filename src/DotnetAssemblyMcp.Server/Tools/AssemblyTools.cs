@@ -268,6 +268,45 @@ public sealed class AssemblyTools
                 }));
     }
 
+    [McpServerTool(
+        Name = "find_callers",
+        Title = "Find callers of a method (same module)",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Returns every method in the callee's own module whose IL emits a direct call to it " +
+        "(call / callvirt / newobj / ldftn / ldvirtftn / generic MethodSpec). The reverse index " +
+        "is built lazily per module and cached at ~/.cache/dotnet-assembly-mcp/<mvid>.xref so " +
+        "subsequent queries are O(callers). Cross-module callers are out of scope for now.")]
+    public static AssemblyResult<FindCallersResult> FindCallers(
+        IMetadataIndex index,
+        [Description("ModuleVersionId GUID of the callee, as a string ('D' format).")] string moduleVersionId,
+        [Description("Callee MethodDef metadata token (table 0x06). Accepts decimal or hex.")] string metadataToken)
+    {
+        if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
+            return AssemblyResult.Fail<FindCallersResult>(err!.Message, err,
+                new NextActionHint("list_assemblies", "Inspect loaded modules."));
+
+        var result = index.FindCallers(identity);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<FindCallersResult>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var r = result.Result!;
+        var cacheTag = r.FromCache ? " (cached)" : " (built)";
+        return AssemblyResult.Ok(
+            r,
+            $"{r.Callers.Count} caller(s) in {r.ModulesSearched} module{cacheTag}.",
+            new NextActionHint("scan_method_il", "Inspect a specific caller's outbound references.",
+                new Dictionary<string, object?>
+                {
+                    ["moduleVersionId"] = r.CalleeModuleVersionId.ToString("D"),
+                    ["metadataToken"] = $"0x{r.CalleeMetadataToken:X8}",
+                }));
+    }
+
     private static bool TryParseIdentity(string moduleVersionId, string metadataToken,
         out MethodIdentity identity, out AssemblyError? error)
     {

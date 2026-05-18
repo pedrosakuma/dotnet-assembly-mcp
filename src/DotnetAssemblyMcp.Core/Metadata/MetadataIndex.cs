@@ -33,6 +33,11 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private readonly bool _watch;
     private int _disposed;
 
+    private readonly ConcurrentDictionary<Guid, IReadOnlyDictionary<int, List<int>>> _xrefCache = new();
+    private readonly string _xrefCacheDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".cache", "dotnet-assembly-mcp");
+
     /// <summary>Raised after a watched file change has been processed (success or failure).</summary>
     public event EventHandler<ModuleReloadedEventArgs>? ModuleReloaded;
 
@@ -160,6 +165,11 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         if (oldMvid is { } prev && prev != newMvid && _modules.TryRemove(prev, out var stale))
         {
             stale.PE.Dispose();
+            InvalidateXref(prev);
+        }
+        else if (oldMvid is { } same && same == newMvid)
+        {
+            InvalidateXref(same);
         }
 
         ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, oldMvid, newMvid, null));
@@ -352,6 +362,239 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return IlScanReadResult.Ok(new IlScanResult(
             module.Mvid, identity.MetadataToken, handleStr,
             instructions, calls, fields, types, strings));
+    }
+
+    /// <inheritdoc />
+    public FindCallersReadResult FindCallers(MethodIdentity callee)
+    {
+        var common = TryResolveMethod(callee);
+        if (common.Error is not null) return FindCallersReadResult.Fail(common.Error);
+        var module = common.Module!;
+
+        var fromCache = true;
+        var index = _xrefCache.GetOrAdd(module.Mvid, _ =>
+        {
+            fromCache = false;
+            return LoadOrBuildXref(module);
+        });
+
+        var callerTokens = index.TryGetValue(callee.MetadataToken, out var list)
+            ? list
+            : (IReadOnlyList<int>)Array.Empty<int>();
+
+        var callers = new List<CallerRef>(callerTokens.Count);
+        foreach (var token in callerTokens)
+        {
+            var handle = (MethodDefinitionHandle)MetadataTokens.Handle(token);
+            callers.Add(new CallerRef(
+                module.Mvid,
+                token,
+                HandleFormat.Format(module.Mvid, token),
+                RenderMethodDef(module, handle)));
+        }
+
+        var calleeHandleStr = HandleFormat.Format(module.Mvid, callee.MetadataToken);
+        return FindCallersReadResult.Ok(new FindCallersResult(
+            module.Mvid, callee.MetadataToken, calleeHandleStr,
+            callers, ModulesSearched: 1, FromCache: fromCache));
+    }
+
+    private void InvalidateXref(Guid mvid)
+    {
+        _xrefCache.TryRemove(mvid, out _);
+        try
+        {
+            var path = XrefCachePath(mvid);
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch (IOException) { /* best-effort */ }
+        catch (UnauthorizedAccessException) { /* best-effort */ }
+    }
+
+    private string XrefCachePath(Guid mvid) => Path.Combine(_xrefCacheDir, $"{mvid:N}.xref");
+
+    private IReadOnlyDictionary<int, List<int>> LoadOrBuildXref(Module module)
+    {
+        var cachePath = XrefCachePath(module.Mvid);
+        if (TryReadXrefCache(cachePath, module, out var cached))
+            return cached;
+
+        var built = BuildXref(module);
+        TryWriteXrefCache(cachePath, module, built);
+        return built;
+    }
+
+    private static Dictionary<int, List<int>> BuildXref(Module module)
+    {
+        var map = new Dictionary<int, List<int>>();
+        foreach (var methodHandle in module.MD.MethodDefinitions)
+        {
+            var def = module.MD.GetMethodDefinition(methodHandle);
+            if (def.RelativeVirtualAddress == 0) continue;
+
+            byte[] ilBytes;
+            try
+            {
+                var body = module.PE.GetMethodBody(def.RelativeVirtualAddress);
+                ilBytes = body.GetILBytes() ?? Array.Empty<byte>();
+            }
+            catch (BadImageFormatException) { continue; }
+
+            var callerToken = MetadataTokens.GetToken(methodHandle);
+            ScanCallsFromIl(module, ilBytes, callerToken, map);
+        }
+        return map;
+    }
+
+    private static void ScanCallsFromIl(Module module, byte[] il, int callerToken,
+        Dictionary<int, List<int>> map)
+    {
+        var span = il.AsSpan();
+        int pos = 0;
+        while (pos < span.Length)
+        {
+            var b1 = span[pos++];
+            IlOpcodeTable.Op op;
+            if (b1 == 0xFE)
+            {
+                if (pos >= span.Length) break;
+                op = IlOpcodeTable.TwoByteOp(span[pos++]);
+            }
+            else
+            {
+                op = IlOpcodeTable.OneByteOp(b1);
+            }
+
+            var size = IlOpcodeTable.OperandSize(op);
+            if (size == -1)
+            {
+                if (pos + 4 > span.Length) break;
+                var n = BitConverter.ToInt32(span.Slice(pos, 4));
+                pos += 4 + Math.Max(0, n) * 4;
+                continue;
+            }
+
+            if (size == 4 && pos + 4 <= span.Length &&
+                (op == IlOpcodeTable.Op.InlineMethod || op == IlOpcodeTable.Op.InlineTok))
+            {
+                var token = BitConverter.ToInt32(span.Slice(pos, 4));
+                var calleeToken = ResolveSameModuleMethodDefToken(module, token);
+                if (calleeToken != 0)
+                {
+                    if (!map.TryGetValue(calleeToken, out var list))
+                    {
+                        list = new List<int>();
+                        map[calleeToken] = list;
+                    }
+                    if (list.Count == 0 || list[^1] != callerToken)
+                        list.Add(callerToken);
+                }
+            }
+
+            pos += Math.Max(0, size);
+        }
+    }
+
+    private static int ResolveSameModuleMethodDefToken(Module module, int token)
+    {
+        EntityHandle h;
+        try { h = (EntityHandle)MetadataTokens.Handle(token); }
+        catch (ArgumentOutOfRangeException) { return 0; }
+        catch (BadImageFormatException) { return 0; }
+
+        switch (h.Kind)
+        {
+            case HandleKind.MethodDefinition:
+                return token;
+            case HandleKind.MethodSpecification:
+                try
+                {
+                    var spec = module.MD.GetMethodSpecification((MethodSpecificationHandle)h);
+                    return spec.Method.Kind == HandleKind.MethodDefinition
+                        ? MetadataTokens.GetToken(spec.Method)
+                        : 0;
+                }
+                catch (BadImageFormatException) { return 0; }
+            default:
+                return 0;
+        }
+    }
+
+    private const uint XrefMagic = 0x52584D41; // 'AMXR'
+    private const int XrefFormatVersion = 1;
+
+    private static bool TryReadXrefCache(string path, Module module,
+        out IReadOnlyDictionary<int, List<int>> map)
+    {
+        map = null!;
+        if (!File.Exists(path)) return false;
+
+        FileInfo info;
+        try { info = new FileInfo(module.Path); }
+        catch (IOException) { return false; }
+        if (!info.Exists) return false;
+
+        try
+        {
+            using var fs = File.OpenRead(path);
+            using var br = new BinaryReader(fs);
+            if (br.ReadUInt32() != XrefMagic) return false;
+            if (br.ReadInt32() != XrefFormatVersion) return false;
+            var mvidBytes = br.ReadBytes(16);
+            if (mvidBytes.Length != 16 || new Guid(mvidBytes) != module.Mvid) return false;
+            if (br.ReadInt64() != info.LastWriteTimeUtc.Ticks) return false;
+            if (br.ReadInt64() != info.Length) return false;
+
+            var count = br.ReadInt32();
+            if (count < 0) return false;
+            var result = new Dictionary<int, List<int>>(count);
+            for (int i = 0; i < count; i++)
+            {
+                var callee = br.ReadInt32();
+                var n = br.ReadInt32();
+                if (n < 0 || n > 1_000_000) return false;
+                var list = new List<int>(n);
+                for (int j = 0; j < n; j++) list.Add(br.ReadInt32());
+                result[callee] = list;
+            }
+            map = result;
+            return true;
+        }
+        catch (IOException) { return false; }
+    }
+
+    private void TryWriteXrefCache(string path, Module module,
+        Dictionary<int, List<int>> map)
+    {
+        try
+        {
+            Directory.CreateDirectory(_xrefCacheDir);
+            FileInfo info;
+            try { info = new FileInfo(module.Path); }
+            catch (IOException) { return; }
+            if (!info.Exists) return;
+
+            var tmp = path + ".tmp";
+            using (var fs = File.Create(tmp))
+            using (var bw = new BinaryWriter(fs))
+            {
+                bw.Write(XrefMagic);
+                bw.Write(XrefFormatVersion);
+                bw.Write(module.Mvid.ToByteArray());
+                bw.Write(info.LastWriteTimeUtc.Ticks);
+                bw.Write(info.Length);
+                bw.Write(map.Count);
+                foreach (var (callee, callers) in map)
+                {
+                    bw.Write(callee);
+                    bw.Write(callers.Count);
+                    foreach (var c in callers) bw.Write(c);
+                }
+            }
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch (IOException) { /* best-effort */ }
+        catch (UnauthorizedAccessException) { /* best-effort */ }
     }
 
     /// <summary>Default cap on raw IL bytes encoded by <see cref="GetIlBody"/>. 4 KiB.</summary>
