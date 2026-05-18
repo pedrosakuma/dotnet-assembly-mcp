@@ -14,10 +14,34 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 /// (System.Reflection.Metadata). Library chosen via spike #2 — see
 /// <c>docs/handoff-contract.md §8.1</c> for rationale.
 /// </summary>
+/// <remarks>
+/// When constructed with <c>watchForChanges: true</c> the index installs a
+/// <see cref="FileSystemWatcher"/> per loaded directory and re-reads the MVID on file
+/// updates. A debounce window (<see cref="WatchDebounce"/>) coalesces rapid writes from
+/// build tools. The watcher is opt-in so unit tests stay deterministic.
+/// </remarks>
 public sealed class MetadataIndex : IMetadataIndex, IDisposable
 {
+    /// <summary>Debounce window applied to <see cref="FileSystemWatcher"/> events.</summary>
+    public static readonly TimeSpan WatchDebounce = TimeSpan.FromMilliseconds(250);
+
     private readonly ConcurrentDictionary<Guid, Module> _modules = new();
+    private readonly ConcurrentDictionary<string, FileSystemWatcher> _watchers =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, DateTime> _pendingReloads =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly bool _watch;
     private int _disposed;
+
+    /// <summary>Raised after a watched file change has been processed (success or failure).</summary>
+    public event EventHandler<ModuleReloadedEventArgs>? ModuleReloaded;
+
+    /// <summary>Creates an index without filesystem watching (default).</summary>
+    public MetadataIndex() : this(watchForChanges: false) { }
+
+    /// <summary>Creates an index, optionally installing per-directory file watchers.</summary>
+    /// <param name="watchForChanges">When true, reloads modules on disk changes and invalidates the old MVID.</param>
+    public MetadataIndex(bool watchForChanges) => _watch = watchForChanges;
 
     /// <inheritdoc />
     public LoadResult Load(string path)
@@ -27,10 +51,20 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         if (!File.Exists(path))
             return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, $"file not found: {path}"));
 
+        var fullPath = Path.GetFullPath(path);
+        var loaded = OpenAndRegister(fullPath);
+        if (!loaded.IsSuccess) return loaded;
+
+        if (_watch) EnsureWatcher(fullPath);
+        return loaded;
+    }
+
+    private LoadResult OpenAndRegister(string fullPath)
+    {
         try
         {
             // Keep the FileStream open via PEReader; reads are lazy.
-            var stream = File.Open(path, new FileStreamOptions
+            var stream = File.Open(fullPath, new FileStreamOptions
             {
                 Mode = FileMode.Open,
                 Access = FileAccess.Read,
@@ -41,12 +75,12 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             if (!pe.HasMetadata)
             {
                 pe.Dispose();
-                return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, $"not a managed PE: {path}"));
+                return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, $"not a managed PE: {fullPath}"));
             }
             var md = pe.GetMetadataReader();
             var mvid = md.GetGuid(md.GetModuleDefinition().Mvid);
 
-            var added = _modules.GetOrAdd(mvid, _ => new Module(mvid, path, pe, md));
+            var added = _modules.GetOrAdd(mvid, _ => new Module(mvid, fullPath, pe, md));
             if (!ReferenceEquals(added.PE, pe))
             {
                 // Lost a race; another thread loaded the same MVID first. Dispose our duplicate.
@@ -66,6 +100,71 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         {
             return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, "i/o error opening assembly.", ex.Message));
         }
+    }
+
+    private void EnsureWatcher(string fullPath)
+    {
+        var dir = Path.GetDirectoryName(fullPath);
+        if (string.IsNullOrEmpty(dir)) return;
+        _watchers.GetOrAdd(dir, d =>
+        {
+            var w = new FileSystemWatcher(d)
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime
+                               | NotifyFilters.FileName,
+                IncludeSubdirectories = false,
+                EnableRaisingEvents = true,
+            };
+            w.Changed += OnWatcherEvent;
+            w.Created += OnWatcherEvent;
+            w.Renamed += OnWatcherRenamed;
+            return w;
+        });
+    }
+
+    private void OnWatcherEvent(object sender, FileSystemEventArgs e) => ScheduleReload(e.FullPath);
+    private void OnWatcherRenamed(object sender, RenamedEventArgs e) => ScheduleReload(e.FullPath);
+
+    private void ScheduleReload(string fullPath)
+    {
+        if (_disposed != 0) return;
+        // Only react to paths we actually loaded. Avoids storms on bin/obj rebuilds.
+        if (!_modules.Values.Any(m => string.Equals(m.Path, fullPath, StringComparison.OrdinalIgnoreCase)))
+            return;
+
+        var now = DateTime.UtcNow;
+        _pendingReloads[fullPath] = now;
+        _ = Task.Delay(WatchDebounce).ContinueWith(_ => TryReload(fullPath, now), TaskScheduler.Default);
+    }
+
+    private void TryReload(string fullPath, DateTime scheduledAt)
+    {
+        if (_disposed != 0) return;
+        // Drop stale debounce timers — only the most recent scheduling wins.
+        if (!_pendingReloads.TryGetValue(fullPath, out var latest) || latest != scheduledAt) return;
+        _pendingReloads.TryRemove(fullPath, out _);
+
+        var oldEntry = _modules.Values
+            .FirstOrDefault(m => string.Equals(m.Path, fullPath, StringComparison.OrdinalIgnoreCase));
+        var oldMvid = oldEntry?.Mvid;
+
+        // Tolerate transient ShareViolation/Empty mid-write by skipping; the next event will retry.
+        if (!File.Exists(fullPath)) return;
+
+        var result = OpenAndRegister(fullPath);
+        if (!result.IsSuccess)
+        {
+            ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, oldMvid, null, result.Error));
+            return;
+        }
+
+        var newMvid = result.Module!.ModuleVersionId;
+        if (oldMvid is { } prev && prev != newMvid && _modules.TryRemove(prev, out var stale))
+        {
+            stale.PE.Dispose();
+        }
+
+        ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, oldMvid, newMvid, null));
     }
 
     /// <inheritdoc />
@@ -178,12 +277,39 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        foreach (var w in _watchers.Values)
+        {
+            w.EnableRaisingEvents = false;
+            w.Dispose();
+        }
+        _watchers.Clear();
         foreach (var m in _modules.Values)
             m.PE.Dispose();
         _modules.Clear();
     }
 
     private sealed record Module(Guid Mvid, string Path, PEReader PE, MetadataReader MD);
+}
+
+/// <summary>Payload of <see cref="MetadataIndex.ModuleReloaded"/>.</summary>
+public sealed class ModuleReloadedEventArgs : EventArgs
+{
+    public ModuleReloadedEventArgs(string path, Guid? oldMvid, Guid? newMvid, AssemblyError? error)
+    {
+        Path = path;
+        OldMvid = oldMvid;
+        NewMvid = newMvid;
+        Error = error;
+    }
+
+    /// <summary>Absolute path of the file that was reloaded.</summary>
+    public string Path { get; }
+    /// <summary>MVID that was loaded before the change (null if first load).</summary>
+    public Guid? OldMvid { get; }
+    /// <summary>MVID after the change (null when <see cref="Error"/> is set).</summary>
+    public Guid? NewMvid { get; }
+    /// <summary>Populated when the reload failed (e.g. corrupted intermediate write).</summary>
+    public AssemblyError? Error { get; }
 }
 
 /// <summary>Stable string handle format used across all tool responses.</summary>

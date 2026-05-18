@@ -10,7 +10,8 @@ builder.Logging.AddSimpleConsole(o =>
     o.TimestampFormat = "HH:mm:ss.fff ";
 });
 
-builder.Services.AddSingleton<IMetadataIndex, MetadataIndex>();
+builder.Services.AddSingleton<IMetadataIndex>(_ =>
+    new MetadataIndex(watchForChanges: builder.Configuration.GetValue("AssemblyMcp:WatchForChanges", defaultValue: true)));
 
 builder.Services
     .AddMcpServer(options =>
