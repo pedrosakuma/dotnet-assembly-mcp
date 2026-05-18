@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using DotnetAssemblyMcp.Core;
+using DotnetAssemblyMcp.Core.Decompilation;
 using DotnetAssemblyMcp.Core.Errors;
 using DotnetAssemblyMcp.Core.Identity;
 using DotnetAssemblyMcp.Core.Metadata;
@@ -138,6 +139,59 @@ public sealed class AssemblyTools
                 {
                     ["moduleVersionId"] = m.ModuleVersionId.ToString("D"),
                 }));
+    }
+
+    [McpServerTool(
+        Name = "decompile_method",
+        Title = "Decompile a method to C# source",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Returns the C# source of a single method via ICSharpCode.Decompiler. Output is " +
+        "hard-capped by maxChars (default 16 KiB) and LRU-cached keyed by (mvid, token, " +
+        "maxChars) so repeated calls on the same hotspot are cheap. Use get_method first to " +
+        "confirm the identity exists, then call this for the body.")]
+    public static AssemblyResult<DecompiledMethod> DecompileMethod(
+        IDecompiler decompiler,
+        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
+        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
+        [Description("Optional cap on returned characters. Pass 0 to use the server default (16 KiB).")] int maxChars = 0)
+    {
+        if (!Guid.TryParse(moduleVersionId, out var mvid))
+        {
+            return AssemblyResult.Fail<DecompiledMethod>(
+                "moduleVersionId is not a valid GUID.",
+                new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{moduleVersionId}' as a GUID."),
+                new NextActionHint("list_assemblies", "Inspect loaded MVIDs in the expected format."));
+        }
+        if (!TryParseToken(metadataToken, out var token))
+        {
+            return AssemblyResult.Fail<DecompiledMethod>(
+                "metadataToken is not a valid integer.",
+                new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{metadataToken}' as a 32-bit metadata token."),
+                new NextActionHint("decompile_method", "Pass the token as decimal (100663297) or hex (0x06000001)."));
+        }
+
+        var identity = new MethodIdentity(mvid, token);
+        var result = decompiler.Decompile(identity, maxChars);
+        if (!result.IsSuccess)
+        {
+            var hint = result.Error!.Kind == ErrorKinds.ModuleNotFound
+                ? new NextActionHint("load_assembly", "Load the assembly whose MVID matches the requested method.")
+                : new NextActionHint("get_method", "Confirm the identity resolves with get_method before retrying.");
+            return AssemblyResult.Fail<DecompiledMethod>(result.Error.Message, result.Error, hint);
+        }
+
+        var d = result.Source!;
+        var prefix = d.CacheHit ? "[cache hit] " : string.Empty;
+        var suffix = d.Truncated ? $" — truncated at {d.SourceLengthChars} chars" : string.Empty;
+        return AssemblyResult.Ok(
+            d,
+            $"{prefix}{d.TypeFullName}.{d.MethodName} — {d.SourceLengthChars} chars of C#{suffix}.",
+            new NextActionHint("get_method", "Look up another method in the same module.",
+                new Dictionary<string, object?> { ["moduleVersionId"] = d.ModuleVersionId.ToString("D") }));
     }
 
     private static bool TryParseToken(string raw, out int token)

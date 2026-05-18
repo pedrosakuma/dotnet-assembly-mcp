@@ -4,4 +4,8 @@
     <AssemblyName>DotnetAssemblyMcp.Core</AssemblyName>
     <Description>Static .NET assembly navigation primitives. Reads metadata via System.Reflection.Metadata; has no MCP dependencies.</Description>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ICSharpCode.Decompiler" />
+  </ItemGroup>
 </Project>

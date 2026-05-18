@@ -1,3 +1,4 @@
+using DotnetAssemblyMcp.Core.Decompilation;
 using DotnetAssemblyMcp.Core.Metadata;
 using DotnetAssemblyMcp.Server.Tools;
 
@@ -12,6 +13,7 @@ builder.Logging.AddSimpleConsole(o =>
 
 builder.Services.AddSingleton<IMetadataIndex>(_ =>
     new MetadataIndex(watchForChanges: builder.Configuration.GetValue("AssemblyMcp:WatchForChanges", defaultValue: true)));
+builder.Services.AddSingleton<IDecompiler, Decompiler>();
 
 builder.Services
     .AddMcpServer(options =>
@@ -49,6 +51,9 @@ builder.Services
               2. `list_assemblies` — see what's currently loaded (mvid, path, method count).
               3. `get_method` — given a (moduleVersionId, metadataToken) pair from a
                  diagnostic payload, returns the resolved type/method/signature/IL size.
+              4. `decompile_method` — heavier follow-up: returns the C# source of a single
+                 method via ICSharpCode.Decompiler. Output is hard-capped (`maxChars`) and
+                 LRU-cached, so it is safe to call back-to-back on the same hotspot.
 
             Resolution is exact: the moduleVersionId must match a loaded module byte-for-byte.
             If it doesn't, call `load_assembly` with the correct file first — names are not
