@@ -194,6 +194,107 @@ public sealed class AssemblyTools
                 new Dictionary<string, object?> { ["moduleVersionId"] = d.ModuleVersionId.ToString("D") }));
     }
 
+    [McpServerTool(
+        Name = "get_method_il",
+        Title = "Get raw IL of a method",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Returns the raw IL bytes of a method (hex-encoded, capped by maxBytes; default " +
+        "4 KiB) plus max-stack, exception region count and instruction count. Cheaper than " +
+        "decompile_method when you only need to confirm the method exists with a non-empty " +
+        "body or to count instructions.")]
+    public static AssemblyResult<IlMethodBody> GetMethodIl(
+        IMetadataIndex index,
+        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
+        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
+        [Description("Optional cap on raw IL bytes encoded in the response. Pass 0 for the server default (4 KiB).")] int maxBytes = 0)
+    {
+        if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
+            return AssemblyResult.Fail<IlMethodBody>(err!.Message, err, new NextActionHint("list_assemblies", "Inspect loaded modules."));
+
+        var result = index.GetIlBody(identity, maxBytes);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<IlMethodBody>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
+
+        var b = result.Body!;
+        var suffix = b.IlTruncated ? $" (hex truncated at {b.IlHex.Length / 2} bytes)" : string.Empty;
+        return AssemblyResult.Ok(
+            b,
+            $"IL body: {b.IlSize} bytes, {b.InstructionCount} instructions, maxStack={b.MaxStack}, {b.ExceptionRegionCount} EH region(s){suffix}.",
+            new NextActionHint("scan_method_il", "Extract outbound calls / fields / types from the same method.",
+                new Dictionary<string, object?>
+                {
+                    ["moduleVersionId"] = b.ModuleVersionId.ToString("D"),
+                    ["metadataToken"] = $"0x{b.MetadataToken:X8}",
+                }));
+    }
+
+    [McpServerTool(
+        Name = "scan_method_il",
+        Title = "Scan a method's IL for outbound references",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Walks the method's IL and returns its structural outbound references: called methods, " +
+        "accessed fields, used types and string literals — each with its raw token and a " +
+        "best-effort textual rendering. Designed as the building block for cross-reference " +
+        "queries without paying the cost of full decompilation.")]
+    public static AssemblyResult<IlScanResult> ScanMethodIl(
+        IMetadataIndex index,
+        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
+        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken)
+    {
+        if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
+            return AssemblyResult.Fail<IlScanResult>(err!.Message, err, new NextActionHint("list_assemblies", "Inspect loaded modules."));
+
+        var result = index.ScanIl(identity);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<IlScanResult>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
+
+        var s = result.Scan!;
+        return AssemblyResult.Ok(
+            s,
+            $"{s.InstructionCount} instructions: {s.Calls.Count} call(s), {s.Fields.Count} field ref(s), {s.Types.Count} type ref(s), {s.Strings.Count} string literal(s).",
+            new NextActionHint("decompile_method", "Read the C# source if the call list is ambiguous.",
+                new Dictionary<string, object?>
+                {
+                    ["moduleVersionId"] = s.ModuleVersionId.ToString("D"),
+                    ["metadataToken"] = $"0x{s.MetadataToken:X8}",
+                }));
+    }
+
+    private static bool TryParseIdentity(string moduleVersionId, string metadataToken,
+        out MethodIdentity identity, out AssemblyError? error)
+    {
+        if (!Guid.TryParse(moduleVersionId, out var mvid))
+        {
+            identity = default!;
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse '{moduleVersionId}' as a GUID.");
+            return false;
+        }
+        if (!TryParseToken(metadataToken, out var token))
+        {
+            identity = default!;
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse '{metadataToken}' as a 32-bit metadata token.");
+            return false;
+        }
+        identity = new MethodIdentity(mvid, token);
+        error = null;
+        return true;
+    }
+
+    private static NextActionHint ErrorRecoveryHint(AssemblyError error) =>
+        error.Kind == ErrorKinds.ModuleNotFound
+            ? new NextActionHint("load_assembly", "Load the assembly whose MVID matches the requested method.")
+            : new NextActionHint("get_method", "Confirm the identity resolves with get_method before retrying.");
+
     private static bool TryParseToken(string raw, out int token)
     {
         var s = raw?.Trim() ?? string.Empty;

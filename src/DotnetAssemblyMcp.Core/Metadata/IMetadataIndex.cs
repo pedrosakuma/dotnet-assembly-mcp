@@ -26,6 +26,21 @@ public interface IMetadataIndex
     /// algorithm from <c>docs/handoff-contract.md §3</c>.
     /// </summary>
     ResolveResult Resolve(MethodIdentity identity);
+
+    /// <summary>
+    /// Returns the raw IL of the method as a hex string plus body metadata. The hex output
+    /// is capped at <paramref name="maxBytes"/> bytes of IL; the actual <see cref="IlMethodBody.IlSize"/>
+    /// reports the full size.
+    /// </summary>
+    /// <param name="identity">A resolved method identity.</param>
+    /// <param name="maxBytes">Hard upper bound on the bytes encoded in the response. Pass 0 for the default (4 KiB).</param>
+    IlBodyResult GetIlBody(MethodIdentity identity, int maxBytes = 0);
+
+    /// <summary>
+    /// Walks the IL of the method and returns the structural references it contains:
+    /// outbound calls, field accesses, type uses and string literals. No decompilation.
+    /// </summary>
+    IlScanReadResult ScanIl(MethodIdentity identity);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

@@ -54,6 +54,12 @@ builder.Services
               4. `decompile_method` — heavier follow-up: returns the C# source of a single
                  method via ICSharpCode.Decompiler. Output is hard-capped (`maxChars`) and
                  LRU-cached, so it is safe to call back-to-back on the same hotspot.
+              5. `get_method_il` — raw IL bytes (hex), max-stack, exception region count and
+                 instruction count. Cheaper than decompile when you only need to confirm a
+                 method's shape or count instructions.
+              6. `scan_method_il` — symbolic outbound references parsed from the IL: called
+                 methods, accessed fields, used types and string literals. The cheapest way
+                 to build a "what does this call?" graph without decompiling.
 
             Resolution is exact: the moduleVersionId must match a loaded module byte-for-byte.
             If it doesn't, call `load_assembly` with the correct file first — names are not
