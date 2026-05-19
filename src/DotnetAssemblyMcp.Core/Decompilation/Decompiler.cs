@@ -24,7 +24,7 @@ namespace DotnetAssemblyMcp.Core.Decompilation;
 /// remain in the LRU until they age out or get evicted by space pressure, which is fine:
 /// they are keyed by MVID, so no stale source can ever be served.
 /// </remarks>
-public sealed class Decompiler : IDecompiler
+public sealed class Decompiler : IDecompiler, IDisposable
 {
     /// <summary>Hard cap on entries. Older entries are evicted on insert.</summary>
     public const int MaxEntries = 256;
@@ -94,6 +94,11 @@ public sealed class Decompiler : IDecompiler
         if (!engineResult.IsSuccess)
             return DecompileResult.Fail(engineResult.Error!);
 
+        // Snapshot the engine reference we're about to use. OnModuleReloaded swaps the
+        // entry in _engines atomically — comparing references after Decompile lets us
+        // detect a concurrent reload and skip caching a source built from the old PE.
+        var engineToken = engineResult.Token!;
+
         cancellationToken.ThrowIfCancellationRequested();
 
         string source;
@@ -138,14 +143,14 @@ public sealed class Decompiler : IDecompiler
             truncated,
             CacheHit: false);
 
-        Insert(key, entry);
+        Insert(key, entry, engineToken);
         return DecompileResult.Ok(entry);
     }
 
     private EngineResult GetOrCreateEngine(Guid mvid, string modulePath)
     {
         if (_engines.TryGetValue(mvid, out var cached) && string.Equals(cached.Path, modulePath, StringComparison.Ordinal))
-            return new EngineResult(cached.Engine, null);
+            return new EngineResult(cached.Engine, cached, null);
 
         try
         {
@@ -154,19 +159,20 @@ public sealed class Decompiler : IDecompiler
                 ThrowOnAssemblyResolveErrors = false,
                 ShowXmlDocumentation = false,
             });
-            _engines[mvid] = new CachedDecompiler(modulePath, csd);
-            return new EngineResult(csd, null);
+            var token = new CachedDecompiler(modulePath, csd);
+            _engines[mvid] = token;
+            return new EngineResult(csd, token, null);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or DirectoryNotFoundException)
         {
-            return new EngineResult(null, new AssemblyError(
+            return new EngineResult(null, null, new AssemblyError(
                 ErrorKinds.ModuleLoadFailed,
                 $"decompiler could not open module: {ex.GetType().Name}.",
                 ex.Message));
         }
         catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException)
         {
-            return new EngineResult(null, new AssemblyError(
+            return new EngineResult(null, null, new AssemblyError(
                 ErrorKinds.ModuleLoadFailed,
                 $"decompiler could not open module: {ex.GetType().Name}.",
                 ex.Message));
@@ -213,11 +219,18 @@ public sealed class Decompiler : IDecompiler
         return false;
     }
 
-    private void Insert(CacheKey key, DecompiledMethod value)
+    private void Insert(CacheKey key, DecompiledMethod value, CachedDecompiler engineToken)
     {
         var bytes = (long)value.SourceLengthChars * 2;
         lock (_lruLock)
         {
+            // Reload race guard: between Decompile() and Insert(), OnModuleReloaded may
+            // have swapped (or removed) the engine for this MVID. If the engine we used
+            // is no longer the live one, drop the result on the floor — re-running the
+            // decompile next call will produce one keyed to the new MVID/engine.
+            if (!_engines.TryGetValue(key.Mvid, out var live) || !ReferenceEquals(live, engineToken))
+                return;
+
             if (_byKey.TryGetValue(key, out var existing))
                 RemoveNode(existing);
 
@@ -249,8 +262,22 @@ public sealed class Decompiler : IDecompiler
     private readonly record struct CacheKey(Guid Mvid, int Token, int MaxChars);
     private sealed record Entry(CacheKey Key, DecompiledMethod Value, DateTime InsertedAt, long Bytes);
     private sealed record CachedDecompiler(string Path, CSharpDecompiler Engine);
-    private readonly record struct EngineResult(CSharpDecompiler? Engine, AssemblyError? Error)
+    private readonly record struct EngineResult(CSharpDecompiler? Engine, CachedDecompiler? Token, AssemblyError? Error)
     {
         public bool IsSuccess => Error is null;
+    }
+
+    /// <inheritdoc cref="IDisposable.Dispose"/>
+    public void Dispose()
+    {
+        if (_index is MetadataIndex mi)
+            mi.ModuleReloaded -= OnModuleReloaded;
+        _engines.Clear();
+        lock (_lruLock)
+        {
+            _lru.Clear();
+            _byKey.Clear();
+            _residentBytes = 0;
+        }
     }
 }

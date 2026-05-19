@@ -617,13 +617,14 @@ public sealed class AssemblyTools
         [Description("Regular expression matched (case-insensitive) against each method's short name.")] string namePattern,
         [Description("Optional case-insensitive substring filter on the decoded signature (e.g. 'CancellationToken').")] string? signatureContains = null,
         [Description("Optional pagination cursor returned in a prior call (exclusive lower bound on MethodDef token).")] int? cursor = null,
-        [Description("Max matches per page (default 20, capped at 200).")] int pageSize = FindMethodQuery.DefaultPageSize)
+        [Description("Max matches per page (default 20, capped at 200).")] int pageSize = FindMethodQuery.DefaultPageSize,
+        CancellationToken cancellationToken = default)
     {
         if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var resolveErr))
             return AssemblyResult.Fail<FindMethodPage>(resolveErr!.Message, resolveErr, ErrorRecoveryHint(resolveErr));
 
         var query = new FindMethodQuery(namePattern, signatureContains, cursor, pageSize);
-        var result = index.FindMethod(mvid, query);
+        var result = index.FindMethod(mvid, query, cancellationToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<FindMethodPage>(result.Error!.Message, result.Error,
                 ErrorRecoveryHint(result.Error));
@@ -1056,8 +1057,11 @@ public sealed class AssemblyTools
             "list_assemblies",
             "Validate the argument shape against the tool description and retry."),
         ErrorKinds.BatchTooLarge => new NextActionHint(
-            "get_methods",
-            $"Batch exceeded the per-call cap of {BatchCap}. Split the items into smaller batches and retry."),
+            // Reachable batch-too-large responses are emitted by RunBatch with the actual tool
+            // name; this fallback is only used when an out-of-band caller surfaces the kind
+            // without context. Keep it tool-agnostic so we never lie about which tool to retry.
+            "list_assemblies",
+            $"Batch exceeded the per-call cap of {BatchCap}. Split the items into smaller batches and re-issue the same batch tool."),
         ErrorKinds.GenericInstantiationUnresolvable => new NextActionHint(
             "import_assembly_manifest",
             "A type-argument name did not resolve in any loaded module. Import the manifest for the dependency or supply assemblyPathHint, then retry."),
