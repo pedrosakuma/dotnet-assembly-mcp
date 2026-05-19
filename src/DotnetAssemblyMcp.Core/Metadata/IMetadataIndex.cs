@@ -111,7 +111,8 @@ public interface IMetadataIndex
     /// </summary>
     /// <param name="moduleVersionId">MVID of a loaded module.</param>
     /// <param name="query">Required name pattern plus optional signature substring, cursor and page size.</param>
-    FindMethodResult FindMethod(Guid moduleVersionId, FindMethodQuery query);
+    /// <param name="cancellationToken">Cooperative cancellation; checked once per <c>MethodDef</c> row.</param>
+    FindMethodResult FindMethod(Guid moduleVersionId, FindMethodQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Resolves a method to its source-location triple using the module's PDB (embedded

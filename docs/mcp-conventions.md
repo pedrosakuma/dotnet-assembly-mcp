@@ -36,32 +36,40 @@ samples|fixtures/
 
 ## 2. Tool design
 
-### 2.1 Budget: **≤10 tools**
+### 2.1 Budget: **~10 tools, justify every addition**
 
-Anthropic recommends ≤10 tools per LLM context. New capabilities must either:
+Anthropic recommends ≤10 tools per LLM context. This server currently exposes **16**
+because the consumer-side handoff (§3.5) plus the batch variants for hotspot dumps
+each earn their slot — but the bar for adding the 17th must stay high. Before
+adding a new tool, check the alternatives:
 
 1. Extend an existing tool with a parameter, or
-2. Be exposed as an MCP **Resource** (`audience: ["assistant"]`) — does **not** count
-   against the tool budget. Use for guides, schemas, the handoff contract itself.
+2. Expose the capability as an MCP **Resource** (`audience: ["assistant"]`) — does
+   **not** count against the budget. Use for guides, schemas, the handoff contract.
 3. Use **handle-based drill-down**: one summary tool returns small payload + handles;
    detail tools take a handle and return more. This is exactly the `(MVID, token)`
    handle pattern from [`docs/handoff-contract.md`](./handoff-contract.md).
 
-Strawman tool surface for this server (≤10, with room to grow):
+If you still need a new tool, justify it in the PR description: which producer
+hotspot or agent workflow needs it, why a Resource or parameter wouldn't carry the
+same payload, and what the total count will be after the addition.
+
+Current surface (16 tools — keep this table in sync with `AssemblyTools.cs`):
 
 | Tool | Purpose | Tier |
 |---|---|---|
 | `load_assembly` | Register an explicit path outside configured search roots | n/a |
 | `list_assemblies` | Enumerate currently loaded modules (MVID, name) | T1 |
-| `get_type` | Type summary + member list, by handle | T1 |
-| `get_method` | Method summary by `(MVID, token)` — entry point from the handoff | T1 |
+| `import_assembly_manifest` | Bulk register a producer's path → MVID map | n/a |
+| `list_types` | Enumerate type definitions for a module (paged) | T1 |
+| `list_methods` | Enumerate methods of a type (paged) | T1 |
+| `find_method` | Module-wide method search by regex | T1 |
+| `get_method` / `get_methods` | Method summary by `(MVID, token)` (single + batch) | T1 |
 | `get_method_il` | Raw IL bytes for a method | T2 |
-| `scan_method_il` | Structured IL summary (calls/fields/types/strings) | T2.5 |
+| `scan_method_il` / `scan_methods_il` | Structured IL summary (single + batch) | T2.5 |
 | `decompile_method` | C# decompilation by `(MVID, token)` | T3 |
-| `find_callers` | Inbound xref by `(MVID, token)` | T4 |
-| `find_implementations` | Subtypes / overrides of an interface or virtual | T1 |
-
-That's 9. Anything else lives as a Resource or as a parameter.
+| `find_callers` / `find_callers_batch` | Inbound xref (single + batch) | T4 |
+| `get_method_source` / `get_methods_source` | PDB second-chance source location | T2 |
 
 ### 2.2 Attribute checklist
 

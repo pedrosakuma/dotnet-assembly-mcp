@@ -82,6 +82,12 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 if (_modules.TryUpdate(mvid, replacement, existing))
                 {
                     existing.PE.Dispose();
+                    // Even when the MVID hasn't changed, the IL we just opened may differ from
+                    // what built the xref / source caches (deterministic rebuild, manual file
+                    // swap). Drop those caches and fan the event out so subscribers (e.g. the
+                    // decompiler engine cache) can refresh too.
+                    InvalidateXref(mvid);
+                    ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, mvid, mvid, null));
                     return LoadResult.Ok(SummarizeModule(replacement));
                 }
             }
@@ -389,7 +395,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     /// <inheritdoc />
-    public FindMethodResult FindMethod(Guid moduleVersionId, FindMethodQuery query)
+    public FindMethodResult FindMethod(Guid moduleVersionId, FindMethodQuery query, CancellationToken cancellationToken = default)
     {
         if (query is null)
             return FindMethodResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "query is required."));
@@ -427,6 +433,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         foreach (var mh in module.MD.MethodDefinitions)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var token = MetadataTokens.GetToken(mh);
             if (token <= startToken) continue;
 
@@ -644,9 +651,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 module.MD, typeRendered ?? Array.Empty<string>(), methodRendered ?? Array.Empty<string>());
             var sig = def.DecodeSignature(provider, genericContext: null);
             var paramList = string.Join(", ", sig.ParameterTypes);
-            var ns = module.MD.GetString(typeDef.Namespace);
-            var typeNameRaw = module.MD.GetString(typeDef.Name);
-            var fullType = string.IsNullOrEmpty(ns) ? typeNameRaw : $"{ns}.{typeNameRaw}";
+            var fullType = TypeName(module, typeDef);
             var methodName = module.MD.GetString(def.Name);
             var closedSig = $"{sig.ReturnType} {fullType}.{methodName}({paramList})";
 
@@ -864,7 +869,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             var hexLen = Math.Min(ilBytes.Length, cap);
             var hex = Convert.ToHexString(ilBytes.AsSpan(0, hexLen));
             var truncated = hexLen < ilBytes.Length;
-            var instructions = CountInstructions(ilBytes);
+            var instructions = CountInstructions(ilBytes, cancellationToken);
 
             return IlBodyResult.Ok(new IlMethodBody(
                 module.Mvid, identity.MetadataToken,
@@ -924,8 +929,12 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         var span = ilBytes.AsSpan();
         int pos = 0;
+        int sinceCancelCheck = 0;
         while (pos < span.Length)
         {
+            // Cancellation is checked every 256 instructions to keep the hot loop cheap; an
+            // unbounded malformed body otherwise spins until the whole IL is walked.
+            if ((sinceCancelCheck++ & 0xFF) == 0) cancellationToken.ThrowIfCancellationRequested();
             instructions++;
             var b1 = span[pos++];
             IlOpcodeTable.Op op;
@@ -1340,9 +1349,12 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 new StringSignatureProvider(callerModule.MD), callerModule.MD, genericContext: null);
             var blob = callerModule.MD.GetBlobReader(mr.Signature);
             var sig = decoder.DecodeMethodSignature(ref blob);
-            if (sig.ParameterTypes.Length != key.ParameterCount) return false;
+            if (sig.Header.RawValue != key.CallingConvention) return false;
+            if (sig.RequiredParameterCount != key.ParameterCount) return false;
             if (sig.GenericParameterCount != key.GenericArity) return false;
-            var paramSig = string.Join(",", sig.ParameterTypes);
+            var paramSig = sig.RequiredParameterCount == sig.ParameterTypes.Length
+                ? string.Join(",", sig.ParameterTypes)
+                : string.Join(",", sig.ParameterTypes.Take(sig.RequiredParameterCount));
             return string.Equals(paramSig, key.ParameterSignature, StringComparison.Ordinal);
         }
         catch (BadImageFormatException) { return false; }
@@ -1358,7 +1370,8 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
         catch (IOException) { /* best-effort */ }
         catch (UnauthorizedAccessException) { /* best-effort */ }
-        _sourceCache.TryRemove(mvid, out _);
+        if (_sourceCache.TryRemove(mvid, out var pdb))
+            pdb?.Provider?.Dispose();
     }
 
     // ---- Source-location (PDB / SourceLink) -----------------------------------------------
@@ -1368,7 +1381,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private static readonly Guid SourceLinkCdiKind =
         new("CC110556-A091-4D38-9FEC-25AB9A351A6A");
 
-    private sealed record PdbHandle(MetadataReaderProvider Provider, MetadataReader Reader, PdbKind Kind, int Age);
+    private sealed record PdbHandle(MetadataReaderProvider? Provider, MetadataReader? Reader, PdbKind Kind, int Age);
 
     /// <inheritdoc />
     public MethodSourceResult GetMethodSource(MethodIdentity identity)
@@ -1388,13 +1401,23 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 PdbKind: PdbKind.None, PdbAge: null,
                 Reason: "no PDB found (embedded or sibling .pdb)"));
         }
+        if (pdb.Reader is null)
+        {
+            // Currently the only path here is a Windows (MSF7) PDB sibling that we can't read with
+            // System.Reflection.Metadata. Surface kind so consumers know a PDB exists but is unsupported.
+            return MethodSourceResult.Ok(new MethodSourceLocation(
+                module.Mvid, identity.MetadataToken, handleStr,
+                Found: false, File: null, StartLine: null, EndLine: null, SourceLink: null,
+                PdbKind: pdb.Kind, PdbAge: pdb.Age,
+                Reason: "PDB present but unsupported (Windows/MSF7 format; portable PDB required)"));
+        }
 
         // PDB MethodDebugInformation table is parallel to MethodDef — same row id.
         var rid = MetadataTokens.GetRowNumber(methodHandle);
         var debugHandle = MetadataTokens.MethodDebugInformationHandle(rid);
 
         MethodDebugInformation debugInfo;
-        try { debugInfo = pdb.Reader.GetMethodDebugInformation(debugHandle); }
+        try { debugInfo = pdb.Reader!.GetMethodDebugInformation(debugHandle); }
         catch (BadImageFormatException)
         {
             return MethodSourceResult.Ok(NoSeqPoints(module.Mvid, identity.MetadataToken, handleStr, pdb,
@@ -1476,9 +1499,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                     new MemoryStream(bytes, writable: false), MetadataStreamOptions.PrefetchMetadata);
                 return new PdbHandle(provider, provider.GetMetadataReader(), PdbKind.Portable, 0);
             }
-            // Windows PDB ('Microsoft C/C++ MSF 7.00\r\n…'): unsupported for read in System.Reflection.Metadata.
-            return new PdbHandle(MetadataReaderProvider.FromPortablePdbImage(default),
-                default!, PdbKind.Windows, 0);
+            // Windows PDB ('Microsoft C/C++ MSF 7.00\r\n…'): not readable via System.Reflection.Metadata.
+            // Return a sentinel with Reader=null so callers can surface a meaningful "unsupported" reason
+            // without crashing when they try to read sequence points.
+            return new PdbHandle(Provider: null, Reader: null, PdbKind.Windows, 0);
         }
         catch (BadImageFormatException) { return null; }
         catch (IOException) { return null; }
@@ -1727,11 +1751,17 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 new StringSignatureProvider(module.MD), module.MD, genericContext: null);
             var blob = module.MD.GetBlobReader(mr.Signature);
             var sig = decoder.DecodeMethodSignature(ref blob);
-            var paramSig = string.Join(",", sig.ParameterTypes);
+            // For vararg call sites, RequiredParameterCount counts the fixed params (before the
+            // sentinel). Using it instead of ParameterTypes.Length lets us match a vararg MemberRef
+            // (which carries the extra args) against the vararg MethodDef (which doesn't).
+            var paramCount = sig.RequiredParameterCount;
+            var paramSig = paramCount == sig.ParameterTypes.Length
+                ? string.Join(",", sig.ParameterTypes)
+                : string.Join(",", sig.ParameterTypes.Take(paramCount));
 
             var entry = new OutboundCallRef(callerToken, assemblyName,
-                typeName, methodName, sig.ParameterTypes.Length,
-                sig.GenericParameterCount, paramSig);
+                typeName, methodName, paramCount,
+                sig.GenericParameterCount, paramSig, sig.Header.RawValue);
             if (seen.Add(entry))
                 outbound.Add(entry);
         }
@@ -1930,22 +1960,27 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         int paramCount = 0;
         int genericArity = def.GetGenericParameters().Count;
         var paramSig = string.Empty;
+        byte callingConvention = 0;
         try
         {
             var decoder = new SignatureDecoder<string, object?>(
                 new StringSignatureProvider(module.MD), module.MD, genericContext: null);
             var blob = module.MD.GetBlobReader(def.Signature);
             var sig = decoder.DecodeMethodSignature(ref blob);
-            paramCount = sig.ParameterTypes.Length;
-            paramSig = string.Join(",", sig.ParameterTypes);
+            // Mirror TryAddOutbound: required count is what cross-module vararg call sites carry.
+            paramCount = sig.RequiredParameterCount;
+            paramSig = paramCount == sig.ParameterTypes.Length
+                ? string.Join(",", sig.ParameterTypes)
+                : string.Join(",", sig.ParameterTypes.Take(paramCount));
+            callingConvention = sig.Header.RawValue;
         }
         catch (BadImageFormatException) { /* leave defaults */ }
 
-        return new CalleeKey(asmName, typeFullName, methodName, paramCount, genericArity, paramSig);
+        return new CalleeKey(asmName, typeFullName, methodName, paramCount, genericArity, paramSig, callingConvention);
     }
 
     private const uint XrefMagic = 0x52584D41; // 'AMXR'
-    private const int XrefFormatVersion = 2;
+    private const int XrefFormatVersion = 3; // v3 adds CallingConvention byte + uses RequiredParameterCount.
 
     private const int MaxIntraCount = 10_000_000;
     private const int MaxOutboundCount = 10_000_000;
@@ -1997,7 +2032,8 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 var pc = br.ReadInt32();
                 var ga = br.ReadInt32();
                 var psig = br.ReadString();
-                outbound.Add(new OutboundCallRef(caller, asm, type, method, pc, ga, psig));
+                var cc = br.ReadByte();
+                outbound.Add(new OutboundCallRef(caller, asm, type, method, pc, ga, psig, cc));
             }
 
             data = new XrefData(intra, outbound);
@@ -2048,6 +2084,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                     bw.Write(o.ParameterCount);
                     bw.Write(o.GenericArity);
                     bw.Write(o.ParameterSignature);
+                    bw.Write(o.CallingConvention);
                 }
             }
             File.Move(tmp, path, overwrite: true);
@@ -2059,12 +2096,14 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     /// <summary>Default cap on raw IL bytes encoded by <see cref="GetIlBody"/>. 4 KiB.</summary>
     public const int DefaultIlMaxBytes = 4 * 1024;
 
-    private static int CountInstructions(byte[] il)
+    private static int CountInstructions(byte[] il, CancellationToken cancellationToken = default)
     {
         int n = 0, pos = 0;
+        int sinceCancelCheck = 0;
         var span = il.AsSpan();
         while (pos < span.Length)
         {
+            if ((sinceCancelCheck++ & 0xFF) == 0) cancellationToken.ThrowIfCancellationRequested();
             n++;
             var b1 = span[pos++];
             IlOpcodeTable.Op op;
@@ -2258,9 +2297,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         var def = m.MD.GetMethodDefinition(h);
         var typeDef = m.MD.GetTypeDefinition(def.GetDeclaringType());
-        var ns = m.MD.GetString(typeDef.Namespace);
-        var typeName = m.MD.GetString(typeDef.Name);
-        var fullType = string.IsNullOrEmpty(ns) ? typeName : $"{ns}.{typeName}";
+        var fullType = TypeName(m, typeDef);
         var methodName = m.MD.GetString(def.Name);
 
         var sig = def.DecodeSignature(new StringSignatureProvider(m.MD), genericContext: null);
@@ -2324,6 +2361,12 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         foreach (var m in _modules.Values)
             m.PE.Dispose();
         _modules.Clear();
+        foreach (var pdb in _sourceCache.Values)
+        {
+            // Embedded portable PDB providers pin native memory; releasing them is mandatory.
+            pdb?.Provider?.Dispose();
+        }
+        _sourceCache.Clear();
     }
 
     private sealed record Module(Guid Mvid, string Path, PEReader PE, MetadataReader MD);

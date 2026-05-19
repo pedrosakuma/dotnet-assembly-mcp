@@ -52,11 +52,13 @@ internal sealed record OutboundCallRef(
     string TargetMethodName,
     int ParameterCount,
     int GenericArity,
-    string ParameterSignature)
+    string ParameterSignature,
+    byte CallingConvention)
 {
     public bool Matches(CalleeKey key) =>
         ParameterCount == key.ParameterCount
         && GenericArity == key.GenericArity
+        && CallingConvention == key.CallingConvention
         && string.Equals(TargetMethodName, key.MethodName, StringComparison.Ordinal)
         && string.Equals(TargetTypeFullName, key.TypeFullName, StringComparison.Ordinal)
         && string.Equals(TargetAssemblyName, key.AssemblyName, StringComparison.Ordinal)
@@ -70,4 +72,5 @@ internal readonly record struct CalleeKey(
     string MethodName,
     int ParameterCount,
     int GenericArity,
-    string ParameterSignature);
+    string ParameterSignature,
+    byte CallingConvention);
