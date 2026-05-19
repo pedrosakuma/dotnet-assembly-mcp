@@ -555,6 +555,73 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "find_string_references",
+        Title = "Find every method that emits a given string literal",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Reverse string-literal lookup: returns every method whose IL contains an ldstr opcode " +
+        "whose decoded user-string matches 'query' under 'matchMode' (exact / contains / regex). " +
+        "Scope is all loaded modules unless 'mvidOrPath' is supplied; in that case only the named " +
+        "module is searched (auto-loaded from path if needed). Hits include the caller's method " +
+        "handle, signature display, IL offset of the ldstr opcode, and the matched literal. " +
+        "Per-module string index is built lazily on the first call against that module and held " +
+        "in memory; subsequent calls are O(1) for exact / O(unique-literals) for contains+regex. " +
+        "Result is capped at 'maxHits' (default 1000, hard cap 10000); 'truncated' = true when hit. " +
+        "Typical use: 'a user reported error message X — which method produces it?'.")]
+    public static AssemblyResult<FindStringReferencesResult> FindStringReferences(
+        IMetadataIndex index,
+        [Description("The string to search for. Required.")] string query,
+        [Description("Match semantics: 'exact' (default), 'contains', or 'regex'. Regex evaluation has a 1s timeout per literal.")] string? matchMode = null,
+        [Description("Optional scope. MVID GUID or absolute path of a single module. Omit / pass null to search every loaded module.")] string? mvidOrPath = null,
+        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(query))
+        {
+            return AssemblyResult.Fail<FindStringReferencesResult>(
+                "query is required.",
+                new AssemblyError(ErrorKinds.InvalidArgument, "query is required."));
+        }
+
+        StringMatchMode mode = StringMatchMode.Exact;
+        if (!string.IsNullOrEmpty(matchMode))
+        {
+            if (string.Equals(matchMode, "exact", StringComparison.OrdinalIgnoreCase)) mode = StringMatchMode.Exact;
+            else if (string.Equals(matchMode, "contains", StringComparison.OrdinalIgnoreCase)) mode = StringMatchMode.Contains;
+            else if (string.Equals(matchMode, "regex", StringComparison.OrdinalIgnoreCase)) mode = StringMatchMode.Regex;
+            else
+            {
+                var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"matchMode must be 'exact', 'contains', or 'regex' (got '{matchMode}').");
+                return AssemblyResult.Fail<FindStringReferencesResult>(err.Message, err);
+            }
+        }
+
+        var mvidFilter = Guid.Empty;
+        if (!string.IsNullOrEmpty(mvidOrPath))
+        {
+            if (!TryResolveModuleId(index, mvidOrPath, out mvidFilter, out var loadErr))
+                return AssemblyResult.Fail<FindStringReferencesResult>(loadErr!.Message, loadErr, ErrorRecoveryHint(loadErr));
+        }
+
+        var result = index.FindStringReferences(query, mode, mvidFilter, maxHits, cancellationToken);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<FindStringReferencesResult>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var r = result.Result!;
+        var truncTag = r.Truncated ? " (truncated)" : "";
+        var summary = r.Hits.Count == 0
+            ? $"No hits across {r.ModulesSearched} module(s)."
+            : $"{r.Hits.Count} hit(s) across {r.ModulesSearched} module(s){truncTag}.";
+        return AssemblyResult.Ok(r, summary,
+            new NextActionHint("get_method", "Inspect a specific caller for context around the literal."));
+    }
+
+    [McpServerTool(
         Name = "list_methods",
         Title = "List methods of a type with paging and name filtering",
         Destructive = false,

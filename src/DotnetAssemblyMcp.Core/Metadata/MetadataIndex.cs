@@ -35,6 +35,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private int _disposed;
 
     private readonly ConcurrentDictionary<Guid, XrefData> _xrefCache = new();
+    private readonly ConcurrentDictionary<Guid, StringIndexData> _stringIndexCache = new();
     private readonly string _xrefCacheDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".cache", "dotnet-assembly-mcp");
@@ -1170,6 +1171,218 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     /// <inheritdoc />
+    public FindStringReferencesReadResult FindStringReferences(
+        string query,
+        StringMatchMode matchMode,
+        Guid moduleVersionIdFilter = default,
+        int maxHits = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (query is null)
+            return FindStringReferencesReadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "query is required."));
+        if (matchMode == StringMatchMode.Exact && query.Length == 0)
+            return FindStringReferencesReadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "query cannot be empty for exact match."));
+
+        const int DefaultMaxHits = 1000;
+        const int HardMaxHits = 10_000;
+        if (maxHits <= 0) maxHits = DefaultMaxHits;
+        if (maxHits > HardMaxHits) maxHits = HardMaxHits;
+
+        System.Text.RegularExpressions.Regex? regex = null;
+        if (matchMode == StringMatchMode.Regex)
+        {
+            try
+            {
+                regex = new System.Text.RegularExpressions.Regex(
+                    query,
+                    System.Text.RegularExpressions.RegexOptions.CultureInvariant
+                        | System.Text.RegularExpressions.RegexOptions.Compiled,
+                    TimeSpan.FromSeconds(1));
+            }
+            catch (ArgumentException ex)
+            {
+                return FindStringReferencesReadResult.Fail(new AssemblyError(
+                    ErrorKinds.InvalidArgument, "regex pattern is invalid.", ex.Message));
+            }
+        }
+
+        IEnumerable<Module> targets;
+        if (moduleVersionIdFilter != Guid.Empty)
+        {
+            if (!_modules.TryGetValue(moduleVersionIdFilter, out var only))
+            {
+                return FindStringReferencesReadResult.Fail(new AssemblyError(
+                    ErrorKinds.ModuleNotFound,
+                    $"no loaded module has MVID {moduleVersionIdFilter:D}."));
+            }
+            targets = new[] { only };
+        }
+        else
+        {
+            targets = _modules.Values;
+        }
+
+        var hits = new List<StringReferenceRef>();
+        var fromCache = true;
+        var modulesSearched = 0;
+        var truncated = false;
+
+        foreach (var module in targets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            modulesSearched++;
+
+            var index = _stringIndexCache.GetOrAdd(module.Mvid, _ =>
+            {
+                fromCache = false;
+                return BuildStringIndex(module, cancellationToken);
+            });
+
+            switch (matchMode)
+            {
+                case StringMatchMode.Exact:
+                    if (index.ByLiteral.TryGetValue(query, out var exactSites))
+                    {
+                        if (!AppendHits(module, query, exactSites, hits, maxHits))
+                        {
+                            truncated = true;
+                            goto done;
+                        }
+                    }
+                    break;
+
+                case StringMatchMode.Contains:
+                    foreach (var (literal, sites) in index.ByLiteral)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (literal.Contains(query, StringComparison.Ordinal))
+                        {
+                            if (!AppendHits(module, literal, sites, hits, maxHits))
+                            {
+                                truncated = true;
+                                goto done;
+                            }
+                        }
+                    }
+                    break;
+
+                case StringMatchMode.Regex:
+                    foreach (var (literal, sites) in index.ByLiteral)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        bool isMatch;
+                        try
+                        {
+                            isMatch = regex!.IsMatch(literal);
+                        }
+                        catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+                        {
+                            return FindStringReferencesReadResult.Fail(new AssemblyError(
+                                ErrorKinds.PatternTooBroad,
+                                "regex evaluation exceeded the per-literal timeout (1s); refine the pattern."));
+                        }
+                        if (isMatch)
+                        {
+                            if (!AppendHits(module, literal, sites, hits, maxHits))
+                            {
+                                truncated = true;
+                                goto done;
+                            }
+                        }
+                    }
+                    break;
+            }
+        }
+    done:
+
+        return FindStringReferencesReadResult.Ok(new FindStringReferencesResult(
+            query, matchMode, hits, modulesSearched, FromCache: fromCache, Truncated: truncated));
+    }
+
+    private static bool AppendHits(Module module, string literal, List<(int MethodToken, int IlOffset)> sites,
+        List<StringReferenceRef> output, int maxHits)
+    {
+        foreach (var (token, offset) in sites)
+        {
+            if (output.Count >= maxHits) return false;
+            var h = (MethodDefinitionHandle)MetadataTokens.Handle(token);
+            output.Add(new StringReferenceRef(
+                module.Mvid, token, HandleFormat.Format(module.Mvid, token),
+                RenderMethodDef(module, h),
+                offset, literal));
+        }
+        return true;
+    }
+
+    private static StringIndexData BuildStringIndex(Module module, CancellationToken cancellationToken)
+    {
+        var dict = new Dictionary<string, List<(int MethodToken, int IlOffset)>>(StringComparer.Ordinal);
+
+        foreach (var methodHandle in module.MD.MethodDefinitions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var def = module.MD.GetMethodDefinition(methodHandle);
+            if (def.RelativeVirtualAddress == 0) continue;
+
+            byte[] ilBytes;
+            try
+            {
+                var body = module.PE.GetMethodBody(def.RelativeVirtualAddress);
+                ilBytes = body.GetILBytes() ?? Array.Empty<byte>();
+            }
+            catch (BadImageFormatException) { continue; }
+
+            var methodToken = MetadataTokens.GetToken(methodHandle);
+            var span = ilBytes.AsSpan();
+            int pos = 0;
+            while (pos < span.Length)
+            {
+                int opStart = pos;
+                var b1 = span[pos++];
+                IlOpcodeTable.Op op;
+                if (b1 == 0xFE)
+                {
+                    if (pos >= span.Length) break;
+                    op = IlOpcodeTable.TwoByteOp(span[pos++]);
+                }
+                else
+                {
+                    op = IlOpcodeTable.OneByteOp(b1);
+                }
+
+                var size = IlOpcodeTable.OperandSize(op);
+                if (size == -1) // switch
+                {
+                    if (pos + 4 > span.Length) break;
+                    var n = BitConverter.ToInt32(span.Slice(pos, 4));
+                    if (n < 0 || n > (span.Length - pos - 4) / 4) break;
+                    pos += 4 + n * 4;
+                    continue;
+                }
+
+                if (op == IlOpcodeTable.Op.InlineString && size == 4 && pos + 4 <= span.Length)
+                {
+                    var token = BitConverter.ToInt32(span.Slice(pos, 4));
+                    var literal = TryReadUserString(module, token);
+                    if (literal is not null)
+                    {
+                        if (!dict.TryGetValue(literal, out var list))
+                        {
+                            list = new List<(int, int)>(1);
+                            dict[literal] = list;
+                        }
+                        list.Add((methodToken, opStart));
+                    }
+                }
+
+                pos += Math.Max(0, size);
+            }
+        }
+
+        return new StringIndexData(dict);
+    }
+
+    /// <inheritdoc />
     public FindTypeReferencesReadResult FindTypeReferences(Guid moduleVersionId, int typeMetadataToken, CancellationToken cancellationToken = default)
     {
         if (moduleVersionId == Guid.Empty)
@@ -1546,6 +1759,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private void InvalidateXref(Guid mvid)
     {
         _xrefCache.TryRemove(mvid, out _);
+        _stringIndexCache.TryRemove(mvid, out _);
         try
         {
             var path = XrefCachePath(mvid);

@@ -38,6 +38,8 @@ public sealed class ConsumerService
 public sealed class NullLogger : ILogger
 {
     public void Log(string message) { /* discard */ }
+
+    public string Banner() => "consumer-banner";
 }
 
 /// <summary>

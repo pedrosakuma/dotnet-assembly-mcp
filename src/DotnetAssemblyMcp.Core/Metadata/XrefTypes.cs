@@ -145,3 +145,43 @@ internal sealed record OutboundTypeRef(
 
 /// <summary>Signature-level identity for a cross-module type lookup.</summary>
 internal readonly record struct TypeKey(string AssemblyName, string TypeFullName);
+
+/// <summary>How <see cref="IMetadataIndex.FindStringReferences"/> matches the query against indexed user-string literals.</summary>
+public enum StringMatchMode
+{
+    /// <summary>Exact case-sensitive equality. O(1) per module after the index is built.</summary>
+    Exact,
+    /// <summary>Case-sensitive substring match. O(unique-literals) per module.</summary>
+    Contains,
+    /// <summary>.NET regular expression. O(unique-literals) per module. Capped server-side.</summary>
+    Regex,
+}
+
+/// <summary>A single resolved string-literal site emitted by <see cref="IMetadataIndex.FindStringReferences"/>.</summary>
+public sealed record StringReferenceRef(
+    Guid ModuleVersionId,
+    int MethodMetadataToken,
+    string MethodHandle,
+    string MethodDisplay,
+    int IlOffset,
+    string Literal);
+
+/// <summary>Tier-4 payload for <c>find_string_references</c>.</summary>
+public sealed record FindStringReferencesResult(
+    string Query,
+    StringMatchMode MatchMode,
+    IReadOnlyList<StringReferenceRef> Hits,
+    int ModulesSearched,
+    bool FromCache,
+    bool Truncated);
+
+/// <summary>Result of <see cref="IMetadataIndex.FindStringReferences"/>.</summary>
+public readonly record struct FindStringReferencesReadResult(FindStringReferencesResult? Result, AssemblyError? Error)
+{
+    public bool IsSuccess => Result is not null;
+    public static FindStringReferencesReadResult Ok(FindStringReferencesResult r) => new(r, null);
+    public static FindStringReferencesReadResult Fail(AssemblyError e) => new(null, e);
+}
+
+/// <summary>Per-module string-literal index: literal → list of (caller MethodDef token, IL offset of the ldstr opcode).</summary>
+internal sealed record StringIndexData(Dictionary<string, List<(int MethodToken, int IlOffset)>> ByLiteral);
