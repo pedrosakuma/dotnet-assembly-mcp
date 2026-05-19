@@ -43,6 +43,7 @@ public sealed class Decompiler : IDecompiler
     private readonly object _lruLock = new();
     private readonly LinkedList<Entry> _lru = new();
     private readonly Dictionary<CacheKey, LinkedListNode<Entry>> _byKey = new();
+    private readonly ConcurrentDictionary<Guid, CachedDecompiler> _engines = new();
     private long _residentBytes;
 
     public Decompiler(IMetadataIndex index) : this(index, () => DateTime.UtcNow) { }
@@ -51,6 +52,10 @@ public sealed class Decompiler : IDecompiler
     {
         _index = index ?? throw new ArgumentNullException(nameof(index));
         _now = clock ?? throw new ArgumentNullException(nameof(clock));
+
+        // Drop cached engines + sources for any module that reloaded on disk.
+        if (_index is MetadataIndex mi)
+            mi.ModuleReloaded += OnModuleReloaded;
     }
 
     /// <inheritdoc />
@@ -83,19 +88,27 @@ public sealed class Decompiler : IDecompiler
                 $"no loaded module has MVID {identity.ModuleVersionId}."));
         }
 
+        var engineResult = GetOrCreateEngine(identity.ModuleVersionId, module);
+        if (!engineResult.IsSuccess)
+            return DecompileResult.Fail(engineResult.Error!);
+
         string source;
         try
         {
-            var csd = new CSharpDecompiler(module, new DecompilerSettings
-            {
-                ThrowOnAssemblyResolveErrors = false,
-                ShowXmlDocumentation = false,
-            });
             var handle = MetadataTokens.EntityHandle(identity.MetadataToken);
-            source = csd.DecompileAsString(handle);
+            source = engineResult.Engine!.DecompileAsString(handle);
         }
         catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or NotSupportedException)
         {
+            return DecompileResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleLoadFailed,
+                $"decompilation failed: {ex.GetType().Name}.",
+                ex.Message));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The PE became unavailable between load and decompile (deleted, locked, perms changed).
+            _engines.TryRemove(identity.ModuleVersionId, out _);
             return DecompileResult.Fail(new AssemblyError(
                 ErrorKinds.ModuleLoadFailed,
                 $"decompilation failed: {ex.GetType().Name}.",
@@ -124,6 +137,55 @@ public sealed class Decompiler : IDecompiler
         Insert(key, entry);
         return DecompileResult.Ok(entry);
     }
+
+    private EngineResult GetOrCreateEngine(Guid mvid, string modulePath)
+    {
+        if (_engines.TryGetValue(mvid, out var cached) && string.Equals(cached.Path, modulePath, StringComparison.Ordinal))
+            return new EngineResult(cached.Engine, null);
+
+        try
+        {
+            var csd = new CSharpDecompiler(modulePath, new DecompilerSettings
+            {
+                ThrowOnAssemblyResolveErrors = false,
+                ShowXmlDocumentation = false,
+            });
+            _engines[mvid] = new CachedDecompiler(modulePath, csd);
+            return new EngineResult(csd, null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new EngineResult(null, new AssemblyError(
+                ErrorKinds.ModuleLoadFailed,
+                $"decompiler could not open module: {ex.GetType().Name}.",
+                ex.Message));
+        }
+        catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException)
+        {
+            return new EngineResult(null, new AssemblyError(
+                ErrorKinds.ModuleLoadFailed,
+                $"decompiler could not open module: {ex.GetType().Name}.",
+                ex.Message));
+        }
+    }
+
+    private void OnModuleReloaded(object? sender, ModuleReloadedEventArgs e)
+    {
+        // Drop the engine + any cached source for the previous MVID. The new MVID has
+        // its own keyspace, so live entries on it are unaffected.
+        if (e.OldMvid is Guid old)
+        {
+            _engines.TryRemove(old, out _);
+            lock (_lruLock)
+            {
+                var dead = _byKey.Keys.Where(k => k.Mvid == old).ToList();
+                foreach (var k in dead)
+                    if (_byKey.TryGetValue(k, out var node))
+                        RemoveNode(node);
+            }
+        }
+    }
+
 
     private bool TryGetCached(CacheKey key, out DecompiledMethod? value)
     {
@@ -182,4 +244,9 @@ public sealed class Decompiler : IDecompiler
 
     private readonly record struct CacheKey(Guid Mvid, int Token, int MaxChars);
     private sealed record Entry(CacheKey Key, DecompiledMethod Value, DateTime InsertedAt, long Bytes);
+    private sealed record CachedDecompiler(string Path, CSharpDecompiler Engine);
+    private readonly record struct EngineResult(CSharpDecompiler? Engine, AssemblyError? Error)
+    {
+        public bool IsSuccess => Error is null;
+    }
 }
