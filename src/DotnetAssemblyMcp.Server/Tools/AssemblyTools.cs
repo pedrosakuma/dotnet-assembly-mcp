@@ -299,7 +299,11 @@ public sealed class AssemblyTools
         "Returns the C# source of a single method via ICSharpCode.Decompiler. Output is " +
         "hard-capped by maxChars (default 16 KiB) and LRU-cached keyed by (mvid, token, " +
         "maxChars) so repeated calls on the same hotspot are cheap. Use get_method first to " +
-        "confirm the identity exists, then call this for the body.")]
+        "confirm the identity exists, then call this for the body. " +
+        "Note: generic methods are always returned in their open form (e.g. 'T Echo(T value)') — " +
+        "the decompiler operates on MethodDef, not on closed instantiations. For a closed " +
+        "signature view, use get_method with genericTypeArguments / genericMethodArguments " +
+        "(or the methodSpec fast-path); see docs/handoff-contract.md §3.5.")]
     public static AssemblyResult<DecompiledMethod> DecompileMethod(
         IDecompiler decompiler,
         IMetadataIndex index,

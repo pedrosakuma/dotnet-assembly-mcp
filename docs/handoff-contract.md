@@ -279,7 +279,9 @@ The consumer:
 3. Materializes a synthetic `MethodSpec` in memory (no row written to the metadata stream).
 4. Returns the **closed** signature in the response, while keeping the original `(MVID, token)` of the open def as the identity anchor.
 
-Tools that accept `genericTypeArguments`: `get_method`, `decompile_method`, `find_callers`, plus the batch variants (`get_methods`, `find_callers_batch`). `find_callers` with a closed identity restricts results to `MethodSpec` rows whose `Method` resolves to the open def AND whose `Instantiation` blob matches — i.e. *only* callers of the int instantiation, not all callers of `List<T>.Add`.
+Tools that accept `genericTypeArguments`: `get_method`, `find_callers`, plus the batch variants (`get_methods`, `find_callers_batch`). `find_callers` with a closed identity restricts results to `MethodSpec` rows whose `Method` resolves to the open def AND whose `Instantiation` blob matches — i.e. *only* callers of the int instantiation, not all callers of `List<T>.Add`.
+
+`decompile_method` intentionally does **not** accept the generic args: ICSharpCode.Decompiler operates on `MethodDef`, not on closed instantiations, so it always emits the open C# (`T Echo(T value)`). The open form is the correct decompiler output — for a closed *signature* view, use `get_method` with `genericTypeArguments` / `genericMethodArguments` (or the `methodSpec` fast-path). Tracked in [issue #10](https://github.com/pedrosakuma/dotnet-assembly-mcp/issues/10) if demand arises for a header-substitution mode.
 
 If both `methodSpec` and `genericTypeArguments` are present, the consumer prefers `methodSpec` when it can load the caller module (cheaper — one blob parse, no name resolution), and falls back to `genericTypeArguments` otherwise. The two MUST encode the same instantiation; mismatch is `generic_instantiation_mismatch`.
 
