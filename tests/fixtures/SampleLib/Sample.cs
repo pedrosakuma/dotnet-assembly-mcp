@@ -1,4 +1,31 @@
+using System.ComponentModel;
+using SampleLib;
+
+[assembly: FixtureMarker("sample-assembly", Category = "fixture")]
+
 namespace SampleLib;
+
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method | AttributeTargets.Parameter | AttributeTargets.Assembly,
+    AllowMultiple = true)]
+public sealed class FixtureMarkerAttribute : Attribute
+{
+    public FixtureMarkerAttribute(string name) { Name = name; }
+    public FixtureMarkerAttribute(string name, int order) { Name = name; Order = order; }
+    public FixtureMarkerAttribute(string[] tags) { Name = "tagged"; Tags = tags; }
+    public string Name { get; }
+    public int Order { get; init; }
+    public string Category { get; set; } = "default";
+    public string[]? Tags { get; }
+}
+
+[FixtureMarker("hello", 1)]
+[FixtureMarker("world", Category = "greeting")]
+public class AnnotatedService
+{
+    [FixtureMarker(new[] { "tagA", "tagB" })]
+    [Description("Marked-up method for the list_attributes fixture.")]
+    public int Annotated([FixtureMarker("p0")] int x) => x;
+}
 
 public class OrderService
 {

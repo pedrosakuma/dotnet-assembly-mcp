@@ -123,6 +123,14 @@ public interface IMetadataIndex
     /// <c>docs/handoff-contract.md §3.4</c>.
     /// </summary>
     MethodSourceResult GetMethodSource(MethodIdentity identity);
+
+    /// <summary>
+    /// Tier-1 custom-attribute enumeration: walks the <c>CustomAttribute</c> rows attached to
+    /// the entity identified by <paramref name="target"/> (assembly, type, method, or
+    /// parameter) and returns decoded <see cref="AttributeSummary"/> entries. No IL is
+    /// touched; this is pure metadata.
+    /// </summary>
+    ListAttributesResult ListAttributes(AttributeTarget target, ListAttributesQuery query);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>
