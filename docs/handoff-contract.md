@@ -221,6 +221,74 @@ Semantics:
 - **Composes with `assemblyPathHint`** (§3.1) — same load semantics; once the module is loaded, its PDB is opened once and cached for the lifetime of the index.
 - Legacy Windows PDBs are detected (`pdbKind = "windows"`) but not read — `System.Reflection.Metadata` only handles portable PDBs.
 
+### 3.5 Generic instantiations (`MethodSpec` handoff) — `genericTypeArguments`
+
+> **Status:** spec draft. Producer counterpart: [`dotnet-diagnostics-mcp#21`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/21). Consumer-side implementation tracked at [#3](https://github.com/pedrosakuma/dotnet-assembly-mcp/issues/3).
+
+The base `MethodIdentity` (§2) resolves to the **open** `MethodDef`. Runtime hotspots, however, are almost always **closed** generic instantiations: `List<int>.Add`, not `List<T>.Add`. Collapsing both into the same identity loses exactly the signal a perf agent cares about — *which* instantiation is hot. This section extends the contract to carry instantiations end-to-end without losing the `(MVID, token)` anchor.
+
+#### Wire shape (additive, optional)
+
+```jsonc
+{
+  "moduleVersionId": "…",
+  "metadataToken":   "0x06000028",        // open MethodDef (unchanged)
+  "typeFullName":    "System.Collections.Generic.List`1",
+  "methodName":      "Add",
+  "genericArity":    0,                    // method-level arity (still the open def)
+
+  "genericTypeArguments": {                // NEW. Optional. Producer SHOULD emit when known.
+    "type":   ["System.Int32"],            // type-level args, in declaration order. [] if type is non-generic.
+    "method": []                           // method-level args, in declaration order. [] if method is non-generic.
+  },
+
+  "methodSpec": {                          // NEW. Optional. Producer MAY emit when the captured frame came
+    "moduleVersionId": "…callerMvid…",     // from a MethodSpec row in a specific caller module. The consumer
+    "metadataToken":   "0x2B000007"        // uses this as a fast-path when it can load that module; otherwise
+  }                                        // it falls back to `genericTypeArguments`.
+}
+```
+
+#### Canonical format for `genericTypeArguments` strings
+
+Both producer and consumer MUST use **CLR reflection-style full names without assembly qualification**:
+
+- **Namespace + name**: `System.Int32`, `System.Collections.Generic.Dictionary`2`.
+- **Generic arity backtick**: `List`1`, `Dictionary`2` — required even when the type appears as a top-level arg (`"System.Collections.Generic.List`1[System.String]"`).
+- **Nested types**: `+` separator, CLR-style (`Outer+Inner`), NOT `.`. Disambiguates nested vs namespaced.
+- **Closed generic args inline**: bracketed comma list — `System.Collections.Generic.Dictionary`2[System.Int32,System.String]`. Recursive.
+- **Arrays**: `T[]` (SZ), `T[,]` (rank-2), `T[*]` (MD rank-1 with non-zero lower bound).
+- **By-ref / pointer**: `T&`, `T*`. Rare in instantiations but reserved.
+- **No assembly qualification.** The consumer resolves each type name first in the module that owns the open `MethodDef`, then in any other loaded module (`assembly://manifest/loaded`). If the name resolves in 2+ modules with conflicting identities, the consumer fails with `generic_instantiation_ambiguous` (echoing the candidate MVIDs). If it doesn't resolve in any loaded module, `generic_instantiation_unresolvable` — the agent's recovery is to call `import_assembly_manifest` (§3.2) or supply `assemblyPathHint` for the missing dependency.
+
+#### Resolution semantics on the consumer
+
+A consumer call that wants the closed view supplies `genericTypeArguments` directly:
+
+```jsonc
+get_method({
+  "moduleVersionId":       "…MVID of List`1's module…",
+  "metadataToken":         "0x06000028",
+  "genericTypeArguments":  { "type": ["System.Int32"], "method": [] }
+})
+```
+
+The consumer:
+1. Resolves the open `MethodDef` per §3 (same path as today).
+2. Resolves each type-arg name into a `TypeDef`/`TypeRef` handle in some loaded module.
+3. Materializes a synthetic `MethodSpec` in memory (no row written to the metadata stream).
+4. Returns the **closed** signature in the response, while keeping the original `(MVID, token)` of the open def as the identity anchor.
+
+Tools that accept `genericTypeArguments`: `get_method`, `decompile_method`, `find_callers`, plus the batch variants (`get_methods`, `find_callers_batch`). `find_callers` with a closed identity restricts results to `MethodSpec` rows whose `Method` resolves to the open def AND whose `Instantiation` blob matches — i.e. *only* callers of the int instantiation, not all callers of `List<T>.Add`.
+
+If both `methodSpec` and `genericTypeArguments` are present, the consumer prefers `methodSpec` when it can load the caller module (cheaper — one blob parse, no name resolution), and falls back to `genericTypeArguments` otherwise. The two MUST encode the same instantiation; mismatch is `generic_instantiation_mismatch`.
+
+#### Out of scope
+
+- **Open generics in the args** (e.g. arg referencing `!0` of an outer scope) — runtime instantiations are always closed; if a producer ever emits an open arg, the consumer rejects with `generic_instantiation_open`.
+- **Variance / constraints** — irrelevant for resolution; consumer doesn't validate.
+- **Inferring instantiations from `displayName`** — the consumer does NOT parse `List<Int32>` out of a display string. Without `genericTypeArguments` or `methodSpec`, the consumer resolves the **open** def as today.
+
 ---
 
 ## 4. Error shape
@@ -235,6 +303,10 @@ When resolution fails, the consumer MUST return a structured error with one of t
 | `token_wrong_table`  | `metadataToken` decodes to a table other than `MethodDef` (`0x06`). |
 | `identity_malformed` | Required field missing or wrong type. |
 | `batch_too_large`    | A batch tool received more than 100 items in a single call. Split the input and retry. |
+| `generic_instantiation_unresolvable` | A type-arg name in `genericTypeArguments` (§3.5) did not resolve in any loaded module. Recovery: `import_assembly_manifest` or `assemblyPathHint` for the missing dependency. |
+| `generic_instantiation_ambiguous`    | A type-arg name in `genericTypeArguments` (§3.5) resolved in 2+ modules with conflicting MVIDs. Error echoes candidate MVIDs; producer should qualify or consumer should narrow the manifest. |
+| `generic_instantiation_open`         | A type-arg referenced an open type parameter (`!0` / `!!0`). Instantiations on the wire MUST be closed. |
+| `generic_instantiation_mismatch`     | Both `methodSpec` and `genericTypeArguments` (§3.5) were supplied and they decode to different instantiations. |
 
 Errors SHOULD include the offending identity (echoed back) to help the agent debug without a second round trip.
 
