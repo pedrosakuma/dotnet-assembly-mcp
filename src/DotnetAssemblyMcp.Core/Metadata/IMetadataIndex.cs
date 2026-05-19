@@ -141,11 +141,14 @@ public interface IMetadataIndex
     GetTypeResult GetTypeDefinition(Guid moduleVersionId, int typeMetadataToken);
 
     /// <summary>
-    /// Tier-1 type-hierarchy walk: returns every <c>TypeDef</c> in the same module whose
-    /// <c>BaseType</c> resolves to <paramref name="baseTypeMetadataToken"/>. When
-    /// <see cref="ListDerivedTypesQuery.DirectOnly"/> is <c>false</c> the walk is transitive
-    /// (every descendant, not just immediate children). Cross-module derived-type lookups
-    /// are tracked separately (issue #39 follow-up).
+    /// Tier-1 type-hierarchy walk: returns every <c>TypeDef</c> across every loaded module
+    /// whose <c>BaseType</c> chain or <c>InterfaceImplementation</c> chain reaches
+    /// <paramref name="baseTypeMetadataToken"/>. Same-module hits are matched by TypeDef
+    /// token; cross-module hits are matched by (assembly simple name, type full name) via
+    /// the child module's <c>TypeRef</c> rows. When <see cref="ListDerivedTypesQuery.DirectOnly"/>
+    /// is <c>false</c> the walk is transitive (every descendant / implementer, not just
+    /// immediate children). TypeSpec parents (generic instantiations such as
+    /// <c>class Dog : AnimalBase&lt;int&gt;</c>) are not yet matched.
     /// </summary>
     ListDerivedTypesResult ListDerivedTypes(Guid moduleVersionId, int baseTypeMetadataToken, ListDerivedTypesQuery query);
 

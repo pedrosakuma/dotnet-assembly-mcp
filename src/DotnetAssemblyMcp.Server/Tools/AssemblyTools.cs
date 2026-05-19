@@ -1355,7 +1355,7 @@ public sealed class AssemblyTools
         var baseSummary = t.BaseType is null ? "no base type" : $"base = {t.BaseType.FullName}";
         var ifaceCount = t.Interfaces?.Count ?? 0;
         var summary = $"{t.FullName} ({t.Kind}); {baseSummary}; {ifaceCount} interface(s).";
-        NextActionHint hint = new("list_derived_types", "Walk the descendants of this type within the same module.",
+        NextActionHint hint = new("list_derived_types", "Walk the descendants and implementers of this type across every loaded module.",
             new Dictionary<string, object?>
             {
                 ["typeHandle"] = HandleFormat.FormatType(t.ModuleVersionId, t.MetadataToken),
@@ -1365,18 +1365,21 @@ public sealed class AssemblyTools
 
     [McpServerTool(
         Name = "list_derived_types",
-        Title = "List types derived from a given base type within a single module",
+        Title = "List subclasses and interface implementers of a type across every loaded module",
         Destructive = false,
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(
-        "Enumerates TypeDef rows in the same module whose base type chain reaches the " +
-        "supplied base type. With directOnly=true (default) only immediate subclasses are " +
-        "returned; with directOnly=false the full transitive descendant set is returned. " +
-        "Scope is intentionally intra-module: cross-module derived-type lookup is deferred. " +
-        "Identify the base type via 'typeHandle' or via mvidOrPath + typeFullName, exactly " +
-        "like get_type / list_methods.")]
+        "Enumerates TypeDef rows across every loaded module whose base-class chain or " +
+        "InterfaceImplementation chain reaches the supplied base type. Use it to answer " +
+        "'who derives from / implements this type?' refactor questions — same-module hits " +
+        "use TypeDef tokens, cross-module hits match by (assembly simple name, type full " +
+        "name) against the child module's TypeRef rows. With directOnly=true (default) only " +
+        "immediate subclasses / implementers are returned; with directOnly=false the full " +
+        "transitive set is returned. Identify the base type via 'typeHandle' or via " +
+        "mvidOrPath + typeFullName, exactly like get_type / list_methods. Generic-instantiation " +
+        "parents (TypeSpec) are not matched yet.")]
     public static AssemblyResult<ListDerivedTypesPage> ListDerivedTypes(
         IMetadataIndex index,
         [Description("Type handle 't:<mvid>:0x<typeToken>' of the base type, as returned by list_types or get_type.")] string? typeHandle = null,

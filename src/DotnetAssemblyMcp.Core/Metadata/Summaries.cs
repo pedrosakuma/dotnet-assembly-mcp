@@ -169,8 +169,8 @@ public readonly record struct FindMethodResult(FindMethodPage? Page, AssemblyErr
 
 /// <summary>
 /// Filter / paging knobs accepted by <see cref="IMetadataIndex.ListDerivedTypes"/>. The
-/// query is scoped to a single module: cross-module derived-type lookup is tracked
-/// separately and not part of the first iteration of issue #39.
+/// query walks every loaded module so subclasses and interface implementers defined in
+/// other assemblies are returned alongside same-module hits (see issue #61).
 /// </summary>
 public sealed record ListDerivedTypesQuery(
     int? Cursor = null,
