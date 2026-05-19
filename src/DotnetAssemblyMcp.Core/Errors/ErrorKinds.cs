@@ -48,4 +48,7 @@ public static class ErrorKinds
 
     /// <summary>Both <c>methodSpec</c> and <c>genericTypeArguments</c> were supplied and decode to different instantiations.</summary>
     public const string GenericInstantiationMismatch = "generic_instantiation_mismatch";
+
+    /// <summary>A pattern argument (regex / substring) would match more results than the server is willing to return in a single call.</summary>
+    public const string PatternTooBroad = "pattern_too_broad";
 }

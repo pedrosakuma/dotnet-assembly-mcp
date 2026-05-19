@@ -175,6 +175,22 @@ public interface IMetadataIndex
     /// One-shot; not paginated — AssemblyRef tables are typically &lt; 100 entries.
     /// </summary>
     ListAssemblyReferencesResult ListAssemblyReferences(Guid moduleVersionId);
+
+    /// <summary>
+    /// Reverse string-literal lookup: returns every method that emits an <c>ldstr</c> opcode
+    /// whose decoded user-string matches <paramref name="query"/>. The match semantics depend
+    /// on <paramref name="matchMode"/> (exact / contains / regex). The per-module string index
+    /// is built lazily on first call and cached in memory; rebuilds when the module is reloaded.
+    /// When <paramref name="moduleVersionIdFilter"/> is non-empty the search is scoped to that
+    /// one module; otherwise every loaded module is searched. <paramref name="maxHits"/> is a
+    /// server-side cap (defaults to 1000); hitting it returns <see cref="FindStringReferencesResult.Truncated"/> = true.
+    /// </summary>
+    FindStringReferencesReadResult FindStringReferences(
+        string query,
+        StringMatchMode matchMode,
+        Guid moduleVersionIdFilter = default,
+        int maxHits = 0,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>
