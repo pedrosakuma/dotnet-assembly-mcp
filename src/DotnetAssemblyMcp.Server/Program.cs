@@ -129,7 +129,8 @@ static Microsoft.Extensions.DependencyInjection.IMcpServerBuilder ConfigureMcpSe
                 """;
         })
         .WithTools<AssemblyTools>()
-        .WithResources<DotnetAssemblyMcp.Server.Resources.ContractResources>();
+        .WithResources<DotnetAssemblyMcp.Server.Resources.ContractResources>()
+        .WithResources<DotnetAssemblyMcp.Server.Resources.AssemblyManifestResources>();
 
 namespace DotnetAssemblyMcp.Server
 {
