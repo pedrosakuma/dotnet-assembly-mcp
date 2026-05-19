@@ -741,6 +741,130 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "find_field_references",
+        Title = "Find every method that reads, writes, or takes the address of a given field",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Reverse field-access lookup: returns every method whose IL touches the field identified " +
+        "by 'fieldHandle' ('f:<mvid>:0x<fieldToken>') through one of the six field opcodes — " +
+        "ldfld / ldsfld (read), stfld / stsfld (write), ldflda / ldsflda (address). Same-module " +
+        "hits use FieldDef tokens; cross-module hits match via assembly + declaring-type-fullname " +
+        "+ field-name. 'mode' filters by access kind ('all' default, 'read' (incl. address), or " +
+        "'write'). Per-module field-access index is built lazily on first call and invalidated " +
+        "with the xref cache on file change. Result is capped at 'maxHits' (default 1000, hard " +
+        "cap 10000). Typical use: 'who writes to this static cache field?' / 'who depends on the " +
+        "value of FeatureFlags.X?'.")]
+    public static AssemblyResult<FindFieldReferencesResult> FindFieldReferences(
+        IMetadataIndex index,
+        [Description("Field handle 'f:<mvid>:0x<fieldToken>' (as returned by list_fields / find_attribute_targets).")] string fieldHandle,
+        [Description("Optional access mode filter: 'all' (default), 'read' (ldfld/ldsfld + ldflda/ldsflda), or 'write' (stfld/stsfld).")] string? mode = null,
+        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(fieldHandle))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, "fieldHandle is required.");
+            return AssemblyResult.Fail<FindFieldReferencesResult>(err.Message, err);
+        }
+        if (!fieldHandle.StartsWith("f:", StringComparison.Ordinal)
+            || !TryParsePrefixedHandle(fieldHandle, 2, out var mvid, out var token))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse '{fieldHandle}' as 'f:<mvid>:0x<fieldToken>'.");
+            return AssemblyResult.Fail<FindFieldReferencesResult>(err.Message, err);
+        }
+
+        var accessMode = FieldAccessMode.All;
+        if (!string.IsNullOrEmpty(mode))
+        {
+            if (string.Equals(mode, "all", StringComparison.OrdinalIgnoreCase)) accessMode = FieldAccessMode.All;
+            else if (string.Equals(mode, "read", StringComparison.OrdinalIgnoreCase)) accessMode = FieldAccessMode.Read;
+            else if (string.Equals(mode, "write", StringComparison.OrdinalIgnoreCase)) accessMode = FieldAccessMode.Write;
+            else
+            {
+                var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"mode must be 'all', 'read', or 'write' (got '{mode}').");
+                return AssemblyResult.Fail<FindFieldReferencesResult>(err.Message, err);
+            }
+        }
+
+        var result = index.FindFieldReferences(mvid, token, accessMode, maxHits, cancellationToken);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<FindFieldReferencesResult>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var r = result.Result!;
+        var summary = r.References.Count == 0
+            ? $"No references to {r.TargetHandle} across {r.ModulesSearched} module(s)."
+            : $"{r.References.Count} reference(s) to {r.TargetHandle} across {r.ModulesSearched} module(s).";
+        return AssemblyResult.Ok(r, summary,
+            new NextActionHint("get_method", "Inspect a specific caller around the field-access offset."));
+    }
+
+    [McpServerTool(
+        Name = "find_property_references",
+        Title = "Find every method that calls a given property's getter or setter",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Reverse property-access lookup: resolves 'propertyHandle' ('p:<mvid>:0x<propertyToken>') " +
+        "to its getter / setter MethodDefs and reuses the call xref to list every invocation, " +
+        "tagged with which accessor was hit. 'accessor' filters the result ('all' default, " +
+        "'getter', or 'setter'). Same-module and cross-module hits both supported. Typical use: " +
+        "'who reads CurrentUser.Name?' / 'every assignment to Service.IsEnabled'.")]
+    public static AssemblyResult<FindPropertyReferencesResult> FindPropertyReferences(
+        IMetadataIndex index,
+        [Description("Property handle 'p:<mvid>:0x<propertyToken>'.")] string propertyHandle,
+        [Description("Optional accessor filter: 'all' (default), 'getter', or 'setter'.")] string? accessor = null,
+        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(propertyHandle))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, "propertyHandle is required.");
+            return AssemblyResult.Fail<FindPropertyReferencesResult>(err.Message, err);
+        }
+        if (!propertyHandle.StartsWith("p:", StringComparison.Ordinal)
+            || !TryParsePrefixedHandle(propertyHandle, 2, out var mvid, out var token))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse '{propertyHandle}' as 'p:<mvid>:0x<propertyToken>'.");
+            return AssemblyResult.Fail<FindPropertyReferencesResult>(err.Message, err);
+        }
+
+        var accessorFilter = PropertyAccessorFilter.All;
+        if (!string.IsNullOrEmpty(accessor))
+        {
+            if (string.Equals(accessor, "all", StringComparison.OrdinalIgnoreCase)) accessorFilter = PropertyAccessorFilter.All;
+            else if (string.Equals(accessor, "getter", StringComparison.OrdinalIgnoreCase)) accessorFilter = PropertyAccessorFilter.GetterOnly;
+            else if (string.Equals(accessor, "setter", StringComparison.OrdinalIgnoreCase)) accessorFilter = PropertyAccessorFilter.SetterOnly;
+            else
+            {
+                var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"accessor must be 'all', 'getter', or 'setter' (got '{accessor}').");
+                return AssemblyResult.Fail<FindPropertyReferencesResult>(err.Message, err);
+            }
+        }
+
+        var result = index.FindPropertyReferences(mvid, token, accessorFilter, maxHits, cancellationToken);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<FindPropertyReferencesResult>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var r = result.Result!;
+        var summary = r.References.Count == 0
+            ? $"No references to {r.TargetHandle} across {r.ModulesSearched} module(s)."
+            : $"{r.References.Count} reference(s) to {r.TargetHandle} across {r.ModulesSearched} module(s).";
+        return AssemblyResult.Ok(r, summary,
+            new NextActionHint("get_method", "Inspect a specific caller for context."));
+    }
+
+    [McpServerTool(
         Name = "list_methods",
         Title = "List methods of a type with paging and name filtering",
         Destructive = false,
