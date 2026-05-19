@@ -102,7 +102,8 @@ public sealed class AssemblyTools
         [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
         [Description("Optional declaring type full name; used only as a sanity-check display label.")] string? typeFullName = null,
         [Description("Optional method name; used only as a sanity-check display label.")] string? methodName = null,
-        [Description("Optional generic arity from the producer payload. Defaults to 0.")] int genericArity = 0)
+        [Description("Optional generic arity from the producer payload. Defaults to 0.")] int genericArity = 0,
+        [Description("Optional absolute path the producer observed for this assembly. Used only when the MVID is not yet loaded: if the file at the path has a matching MVID it is loaded transparently; if it has a different MVID the call fails with mvid_mismatch (the path is a hint, never an override).")] string? assemblyPathHint = null)
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
         {
@@ -121,6 +122,9 @@ public sealed class AssemblyTools
                 err,
                 ErrorRecoveryHint(err));
         }
+
+        if (TryEnsureModuleLoaded(index, mvid, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<MethodSummary>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
 
         var identity = new MethodIdentity(mvid, token, TypeFullName: typeFullName, MethodName: methodName, GenericArity: genericArity);
         var result = index.Resolve(identity);
@@ -154,9 +158,11 @@ public sealed class AssemblyTools
         "confirm the identity exists, then call this for the body.")]
     public static AssemblyResult<DecompiledMethod> DecompileMethod(
         IDecompiler decompiler,
+        IMetadataIndex index,
         [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
         [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Optional cap on returned characters. Pass 0 to use the server default (16 KiB).")] int maxChars = 0)
+        [Description("Optional cap on returned characters. Pass 0 to use the server default (16 KiB).")] int maxChars = 0,
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null)
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
         {
@@ -174,6 +180,9 @@ public sealed class AssemblyTools
                 err,
                 ErrorRecoveryHint(err));
         }
+
+        if (TryEnsureModuleLoaded(index, mvid, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<DecompiledMethod>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
 
         var identity = new MethodIdentity(mvid, token);
         var result = decompiler.Decompile(identity, maxChars);
@@ -208,10 +217,14 @@ public sealed class AssemblyTools
         IMetadataIndex index,
         [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
         [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Optional cap on raw IL bytes encoded in the response. Pass 0 for the server default (4 KiB).")] int maxBytes = 0)
+        [Description("Optional cap on raw IL bytes encoded in the response. Pass 0 for the server default (4 KiB).")] int maxBytes = 0,
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
             return AssemblyResult.Fail<IlMethodBody>(err!.Message, err, ErrorRecoveryHint(err));
+
+        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<IlMethodBody>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
 
         var result = index.GetIlBody(identity, maxBytes);
         if (!result.IsSuccess)
@@ -245,10 +258,14 @@ public sealed class AssemblyTools
     public static AssemblyResult<IlScanResult> ScanMethodIl(
         IMetadataIndex index,
         [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
-        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken)
+        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
             return AssemblyResult.Fail<IlScanResult>(err!.Message, err, ErrorRecoveryHint(err));
+
+        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<IlScanResult>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
 
         var result = index.ScanIl(identity);
         if (!result.IsSuccess)
@@ -513,10 +530,14 @@ public sealed class AssemblyTools
     public static AssemblyResult<FindCallersResult> FindCallers(
         IMetadataIndex index,
         [Description("ModuleVersionId GUID of the callee, as a string ('D' format).")] string moduleVersionId,
-        [Description("Callee MethodDef metadata token (table 0x06). Accepts decimal or hex.")] string metadataToken)
+        [Description("Callee MethodDef metadata token (table 0x06). Accepts decimal or hex.")] string metadataToken,
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
             return AssemblyResult.Fail<FindCallersResult>(err!.Message, err, ErrorRecoveryHint(err));
+
+        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<FindCallersResult>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
 
         var result = index.FindCallers(identity);
         if (!result.IsSuccess)
@@ -617,6 +638,35 @@ public sealed class AssemblyTools
         mvid = load.Module!.ModuleVersionId;
         error = null;
         return true;
+    }
+
+    /// <summary>
+    /// Ensures the module identified by <paramref name="mvid"/> is loaded in the index. If it
+    /// isn't and <paramref name="assemblyPathHint"/> is non-empty, opens the PE at the hint,
+    /// confirms the MVID matches, and loads it idempotently. A hinted path whose MVID differs
+    /// is rejected with <see cref="ErrorKinds.MvidMismatch"/> — the path is a hint, never an
+    /// override. See issue #4 / docs/handoff-contract.md.
+    /// </summary>
+    private static AssemblyError? TryEnsureModuleLoaded(IMetadataIndex index, Guid mvid, string? assemblyPathHint)
+    {
+        foreach (var loaded in index.List())
+        {
+            if (loaded.ModuleVersionId == mvid) return null;
+        }
+        if (string.IsNullOrWhiteSpace(assemblyPathHint))
+        {
+            return new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {mvid:D}.");
+        }
+        var load = index.Load(assemblyPathHint);
+        if (!load.IsSuccess) return load.Error;
+        if (load.Module!.ModuleVersionId != mvid)
+        {
+            return new AssemblyError(
+                ErrorKinds.MvidMismatch,
+                $"assemblyPathHint '{assemblyPathHint}' has MVID {load.Module.ModuleVersionId:D} but the caller requested {mvid:D}.");
+        }
+        return null;
     }
 
     private static bool TryResolveTypeIdentity(IMetadataIndex index, string? typeHandle,

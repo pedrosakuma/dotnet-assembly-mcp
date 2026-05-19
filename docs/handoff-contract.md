@@ -101,6 +101,29 @@ This server resolves a `MethodIdentity` to an in-memory `MethodDefinition` (or e
 
 **Library choice: TBD.** The candidates are [`Mono.Cecil`](https://github.com/jbevain/cecil), [`AsmResolver`](https://github.com/Washi1337/AsmResolver), and [`System.Reflection.Metadata`](https://learn.microsoft.com/dotnet/api/system.reflection.metadata). All three expose MVID and token-based lookup; the decision is deferred to the implementation phase and does not affect this contract — the spec is written in terms of behavior (`(MVID, token) → MethodDef`), not in terms of a specific API.
 
+### 3.1 `assemblyPathHint` — single-call resolution from a producer payload
+
+Every `(MVID, token)`-keyed tool (`get_method`, `decompile_method`, `get_method_il`, `scan_method_il`, `find_callers`) accepts an optional `assemblyPathHint` parameter. It is the recommended way for an agent that consumes a `MethodIdentity` from `dotnet-diagnostics-mcp` to resolve a hotspot in a single call instead of `load_assembly` + tool.
+
+```jsonc
+get_method({
+  "moduleVersionId":   "1f5b2e84-…",
+  "metadataToken":     "0x06000020",
+  "assemblyPathHint":  "/app/MyApp.dll"   // == identity.modulePath from the producer
+})
+```
+
+Semantics, applied before the underlying resolution:
+
+| Situation | Behavior |
+|---|---|
+| MVID already loaded | Hint ignored. Resolve immediately. |
+| MVID not loaded, hint absent | `module_not_found`. |
+| MVID not loaded, hint present, **on-disk MVID matches** | Open and load the PE idempotently (same code path as `load_assembly`), then resolve. |
+| MVID not loaded, hint present, **on-disk MVID differs** | `mvid_mismatch` carrying both the requested MVID and the MVID actually found at the hinted path. **The wrong binary is not loaded silently.** |
+
+The hint is a hint — trust is anchored to the MVID match, never to the path. Producers SHOULD populate the hint from `MethodIdentity.modulePath`.
+
 ---
 
 ## 4. Error shape
