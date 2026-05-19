@@ -38,9 +38,9 @@ samples|fixtures/
 
 ### 2.1 Budget: **~10 tools, justify every addition**
 
-Anthropic recommends ≤10 tools per LLM context. This server currently exposes **16**
-because the consumer-side handoff (§3.5) plus the batch variants for hotspot dumps
-each earn their slot — but the bar for adding the 17th must stay high. Before
+Anthropic recommends ≤10 tools per LLM context. This server currently exposes **23**
+because the consumer-side handoff (§3.5) plus the full Tier-4 cross-reference suite
+each earn their slot — but the bar for adding the 24th must stay high. Before
 adding a new tool, check the alternatives:
 
 1. Extend an existing tool with a parameter, or
@@ -54,22 +54,33 @@ If you still need a new tool, justify it in the PR description: which producer
 hotspot or agent workflow needs it, why a Resource or parameter wouldn't carry the
 same payload, and what the total count will be after the addition.
 
-Current surface (16 tools — keep this table in sync with `AssemblyTools.cs`):
+Current surface (23 tools — keep this table in sync with `AssemblyTools.cs`):
 
 | Tool | Purpose | Tier |
 |---|---|---|
 | `load_assembly` | Register an explicit path outside configured search roots | n/a |
 | `list_assemblies` | Enumerate currently loaded modules (MVID, name) | T1 |
+| `list_assembly_references` | Outbound `AssemblyRef` table for a module | T1 |
 | `import_assembly_manifest` | Bulk register a producer's path → MVID map | n/a |
 | `list_types` | Enumerate type definitions for a module (paged) | T1 |
+| `get_type` | Type summary by `(MVID, typeToken)` | T1 |
+| `list_derived_types` | Subtype / implementer search | T1 |
+| `list_members` | Enumerate fields / properties / events of a type | T1 |
 | `list_methods` | Enumerate methods of a type (paged) | T1 |
+| `list_attributes` | Custom attributes for a method / type / module | T1 |
 | `find_method` | Module-wide method search by regex | T1 |
-| `get_method` / `get_methods` | Method summary by `(MVID, token)` (single + batch) | T1 |
+| `get_method` | Method summary by `(MVID, token)` | T1 |
 | `get_method_il` | Raw IL bytes for a method | T2 |
-| `scan_method_il` / `scan_methods_il` | Structured IL summary (single + batch) | T2.5 |
+| `get_method_il_text` | Disassembled IL listing for a method | T2 |
+| `scan_method_il` | Structured IL summary (outbound refs) | T2.5 |
 | `decompile_method` | C# decompilation by `(MVID, token)` | T3 |
-| `find_callers` / `find_callers_batch` | Inbound xref (single + batch) | T4 |
-| `get_method_source` / `get_methods_source` | PDB second-chance source location | T2 |
+| `get_method_source` | PDB second-chance source location | T2 |
+| `find_callers` | Inbound method xref | T4 |
+| `find_type_references` | Inbound type xref | T4 |
+| `find_string_references` | Inbound string-literal xref | T4 |
+| `find_attribute_targets` | Reverse attribute index | T4 |
+| `find_field_references` | Inbound field-access xref | T4 |
+| `find_property_references` | Inbound property-accessor xref | T4 |
 
 ### 2.2 Attribute checklist
 

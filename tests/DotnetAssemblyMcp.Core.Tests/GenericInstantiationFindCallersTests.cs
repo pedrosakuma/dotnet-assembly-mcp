@@ -110,7 +110,7 @@ public sealed class GenericInstantiationFindCallersTests
     }
 
     [Fact]
-    public void Find_callers_batch_propagates_per_item_generic_args()
+    public void Find_callers_propagates_per_call_generic_args()
     {
         using var index = new MetadataIndex();
         index.Load(SampleLibPath);
@@ -120,56 +120,41 @@ public sealed class GenericInstantiationFindCallersTests
         var callInt = MethodOf(typeof(SampleConsumer.ConsumerService), "CallEchoOfInt");
         var callStr = MethodOf(typeof(SampleConsumer.ConsumerService), "CallEchoOfString");
 
-        var batch = new MethodBatchItem[]
-        {
-            new(
-                echoOpen.Module.ModuleVersionId.ToString("D"),
-                $"0x{echoOpen.MetadataToken:X8}",
-                GenericMethodArguments: ["System.Int32"]),
-            new(
-                echoOpen.Module.ModuleVersionId.ToString("D"),
-                $"0x{echoOpen.MetadataToken:X8}",
-                GenericMethodArguments: ["System.String"]),
-        };
+        var mvid = echoOpen.Module.ModuleVersionId.ToString("D");
+        var token = $"0x{echoOpen.MetadataToken:X8}";
 
-        var result = AssemblyTools.FindCallersBatch(index, batch);
+        var intResult = AssemblyTools.FindCallers(index, mvid, token,
+            genericMethodArguments: ["System.Int32"]);
+        var strResult = AssemblyTools.FindCallers(index, mvid, token,
+            genericMethodArguments: ["System.String"]);
 
-        result.IsError.Should().BeFalse(result.Summary);
-        var intItem = result.Data!.Results[0];
-        var strItem = result.Data.Results[1];
-        intItem.Ok.Should().BeTrue();
-        strItem.Ok.Should().BeTrue();
+        intResult.IsError.Should().BeFalse(intResult.Summary);
+        strResult.IsError.Should().BeFalse(strResult.Summary);
 
-        intItem.Data!.Callers.Select(c => c.MetadataToken)
+        intResult.Data!.Callers.Select(c => c.MetadataToken)
             .Should().Contain(callInt.MetadataToken)
             .And.NotContain(callStr.MetadataToken);
-        strItem.Data!.Callers.Select(c => c.MetadataToken)
+        strResult.Data!.Callers.Select(c => c.MetadataToken)
             .Should().Contain(callStr.MetadataToken)
             .And.NotContain(callInt.MetadataToken);
     }
 
     [Fact]
-    public void Get_methods_batch_propagates_per_item_generic_args()
+    public void Get_method_renders_closed_generic_signature()
     {
         using var index = new MetadataIndex();
         index.Load(SampleLibPath);
 
         var echoOpen = MethodOf(typeof(SampleLib.OrderService), "Echo");
 
-        var batch = new MethodBatchItem[]
-        {
-            new(
-                echoOpen.Module.ModuleVersionId.ToString("D"),
-                $"0x{echoOpen.MetadataToken:X8}",
-                GenericMethodArguments: ["System.Int32"]),
-        };
-
-        var result = AssemblyTools.GetMethods(index, batch);
+        var result = AssemblyTools.GetMethod(index,
+            echoOpen.Module.ModuleVersionId.ToString("D"),
+            $"0x{echoOpen.MetadataToken:X8}",
+            genericMethodArguments: ["System.Int32"]);
 
         result.IsError.Should().BeFalse(result.Summary);
-        result.Data!.Results[0].Ok.Should().BeTrue();
-        result.Data.Results[0].Data!.Signature.Should().Contain("System.Int32");
-        result.Data.Results[0].Data!.Signature.Should().NotContain("!!0");
+        result.Data!.Signature.Should().Contain("System.Int32");
+        result.Data.Signature.Should().NotContain("!!0");
     }
 
     private static List<GenericTypeName> ParseArgs(params string[] raw)

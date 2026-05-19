@@ -1135,114 +1135,6 @@ public sealed class AssemblyTools
             $"{r.References.Count} reference(s) in {r.ModulesSearched} module{cacheTag}.");
     }
 
-    [McpServerTool(
-        Title = "Batch: resolve many MethodIdentities in one call",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Batch variant of get_method. Resolves up to " + BatchCapStr + " (moduleVersionId, " +
-        "metadataToken) pairs in one round-trip. Per-item success/failure: one bad token does " +
-        "not fail the batch. Each item may carry an assemblyPathHint (same semantics as " +
-        "get_method), and the §3.5 generic-instantiation fields (genericTypeArguments, " +
-        "genericMethodArguments, methodSpecModuleVersionId, methodSpecMetadataToken) so closed " +
-        "instantiations are honored per item. Use after a dotnet-diagnostics-mcp top-N hotspot " +
-        "dump to enrich the whole table in a single call. Over the cap → batch_too_large.")]
-    public static AssemblyResult<BatchResponse<MethodSummary>> GetMethods(
-        IMetadataIndex index,
-        [Description("Method identities to resolve. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items,
-        CancellationToken cancellationToken = default)
-        => RunBatch<MethodSummary>(items, (item, _) =>
-        {
-            if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
-                return (null, err);
-            if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
-                return (null, loadErr);
-            if (!TryParseGenericArgs(item.GenericTypeArguments, "genericTypeArguments", out var typeArgs, out var pErr))
-                return (null, pErr);
-            if (!TryParseGenericArgs(item.GenericMethodArguments, "genericMethodArguments", out var methodArgs, out pErr))
-                return (null, pErr);
-            if (!TryParseMethodSpec(item.MethodSpecModuleVersionId, item.MethodSpecMetadataToken, out var methodSpec, out pErr))
-                return (null, pErr);
-            identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs, MethodSpec = methodSpec };
-            var r = index.Resolve(identity);
-            return r.IsSuccess ? (r.Method, null) : (null, r.Error);
-        }, summarize: (ok, total) => $"Resolved {ok}/{total} method identit(ies).",
-           overCapToolName: "get_methods", cancellationToken: cancellationToken);
-
-    [McpServerTool(
-        Name = "scan_methods_il",
-        Title = "Batch: scan IL of many methods in one call",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Batch variant of scan_method_il. Walks the IL of up to " + BatchCapStr + " methods " +
-        "and returns each one's outbound calls/fields/types/strings. Per-item success/" +
-        "failure; assemblyPathHint honored per item. Like scan_method_il, this batch does not " +
-        "accept §3.5 generic-instantiation arguments per item — IL is invariant across " +
-        "instantiations of an open generic; supplying them is rejected with invalid_argument. " +
-        "Over the cap → batch_too_large.")]
-    public static AssemblyResult<BatchResponse<IlScanResult>> ScanMethodsIl(
-        IMetadataIndex index,
-        [Description("Method identities to scan. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items,
-        CancellationToken cancellationToken = default)
-        => RunBatch<IlScanResult>(items, (item, _) =>
-        {
-            if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
-                return (null, err);
-            if (HasGenericInstantiationFields(item))
-                return (null, new AssemblyError(
-                    ErrorKinds.InvalidArgument,
-                    "scan_methods_il does not accept genericTypeArguments / genericMethodArguments / methodSpec* — IL token references are invariant across instantiations. Remove the fields and retry."));
-            if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
-                return (null, loadErr);
-            var r = index.ScanIl(identity, cancellationToken);
-            return r.IsSuccess ? (r.Scan, null) : (null, r.Error);
-        }, summarize: (ok, total) => $"Scanned {ok}/{total} method(s) for outbound references.",
-           overCapToolName: "scan_methods_il", cancellationToken: cancellationToken);
-
-    [McpServerTool(
-        Name = "find_callers_batch",
-        Title = "Batch: find callers of many methods in one call",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Batch variant of find_callers. Reverse-resolves up to " + BatchCapStr + " callees " +
-        "in one round-trip; per-item success/failure. The lazily-built xref cache is shared " +
-        "across items so repeated calls within the same module pay the build cost once. Each " +
-        "item may carry §3.5 generic-instantiation fields (genericTypeArguments, " +
-        "genericMethodArguments, methodSpecModuleVersionId, methodSpecMetadataToken) to narrow " +
-        "results to a closed instantiation. Over the cap → batch_too_large.")]
-    public static AssemblyResult<BatchResponse<FindCallersResult>> FindCallersBatch(
-        IMetadataIndex index,
-        [Description("Callee identities. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items,
-        CancellationToken cancellationToken = default)
-        => RunBatch<FindCallersResult>(items, (item, _) =>
-        {
-            if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
-                return (null, err);
-            if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
-                return (null, loadErr);
-            if (!TryParseGenericArgs(item.GenericTypeArguments, "genericTypeArguments", out var typeArgs, out var pErr))
-                return (null, pErr);
-            if (!TryParseGenericArgs(item.GenericMethodArguments, "genericMethodArguments", out var methodArgs, out pErr))
-                return (null, pErr);
-            if (!TryParseMethodSpec(item.MethodSpecModuleVersionId, item.MethodSpecMetadataToken, out var methodSpec, out pErr))
-                return (null, pErr);
-            identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs, MethodSpec = methodSpec };
-            var r = index.FindCallers(identity, cancellationToken);
-            return r.IsSuccess ? (r.Result, null) : (null, r.Error);
-        }, summarize: (ok, total) => $"Resolved callers for {ok}/{total} callee(s).",
-           overCapToolName: "find_callers_batch", cancellationToken: cancellationToken);
-
-    /// <summary>Server-wide cap on batch items. See issue #5.</summary>
-    public const int BatchCap = 100;
-    private const string BatchCapStr = "100";
 
     [McpServerTool(
         Name = "get_method_source",
@@ -1307,38 +1199,6 @@ public sealed class AssemblyTools
                 }));
     }
 
-    [McpServerTool(
-        Name = "get_methods_source",
-        Title = "Batch: resolve source-line coordinates for many methods",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Batch variant of get_method_source. Reads the PDB for up to " + BatchCapStr + " " +
-        "methods in one round-trip and returns each one's file/startLine/endLine plus " +
-        "SourceLink URL when available. Per-item success/failure; assemblyPathHint honored " +
-        "per item. Like get_method_source, this batch does not accept §3.5 generic-" +
-        "instantiation arguments per item — sequence points anchor on the open MethodDef; " +
-        "supplying them is rejected with invalid_argument. Over the cap → batch_too_large.")]
-    public static AssemblyResult<BatchResponse<MethodSourceLocation>> GetMethodsSource(
-        IMetadataIndex index,
-        [Description("Method identities to resolve. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items,
-        CancellationToken cancellationToken = default)
-        => RunBatch<MethodSourceLocation>(items, (item, _) =>
-        {
-            if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
-                return (null, err);
-            if (HasGenericInstantiationFields(item))
-                return (null, new AssemblyError(
-                    ErrorKinds.InvalidArgument,
-                    "get_methods_source does not accept genericTypeArguments / genericMethodArguments / methodSpec* — PDB sequence points anchor on the open MethodDef. Remove the fields and retry."));
-            if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
-                return (null, loadErr);
-            var r = index.GetMethodSource(identity);
-            return r.IsSuccess ? (r.Location, null) : (null, r.Error);
-        }, summarize: (ok, total) => $"Resolved source for {ok}/{total} method(s).",
-           overCapToolName: "get_methods_source", cancellationToken: cancellationToken);
 
     [McpServerTool(
         Name = "list_attributes",
@@ -1696,73 +1556,6 @@ public sealed class AssemblyTools
         return TryParseToken(rest[(sep + 1)..].ToString(), out token);
     }
 
-    private static AssemblyResult<BatchResponse<T>> RunBatch<T>(
-        IReadOnlyList<MethodBatchItem> items,
-        Func<MethodBatchItem, int, (T? Data, AssemblyError? Error)> handler,
-        Func<int, int, string> summarize,
-        string overCapToolName,
-        CancellationToken cancellationToken = default)
-        where T : class
-    {
-        if (items is null || items.Count == 0)
-        {
-            var empty = new BatchResponse<T>(Array.Empty<BatchItemResult<T>>(), 0, 0);
-            return AssemblyResult.Ok(
-                empty,
-                "Batch is empty — nothing to do.",
-                new NextActionHint("list_assemblies", "Confirm what is loaded before issuing a batch."));
-        }
-        if (items.Count > BatchCap)
-        {
-            var err = new AssemblyError(
-                ErrorKinds.BatchTooLarge,
-                $"batch contains {items.Count} items, max is {BatchCap}.");
-            return AssemblyResult.Fail<BatchResponse<T>>(
-                err.Message, err,
-                new NextActionHint(
-                    overCapToolName,
-                    $"Split the input into chunks of at most {BatchCap} items and re-issue."));
-        }
-
-        var results = new List<BatchItemResult<T>>(items.Count);
-        int ok = 0, fail = 0;
-        for (int i = 0; i < items.Count; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var item = items[i];
-            if (item is null)
-            {
-                var nullErr = new AssemblyError(ErrorKinds.InvalidArgument, "batch item is null.");
-                results.Add(new BatchItemResult<T>(i, new MethodBatchItem(string.Empty, string.Empty), false, null, nullErr));
-                fail++;
-                continue;
-            }
-            var (data, error) = handler(item, i);
-            if (data is not null && error is null)
-            {
-                results.Add(new BatchItemResult<T>(i, item, true, data, null));
-                ok++;
-            }
-            else
-            {
-                results.Add(new BatchItemResult<T>(i, item, false,
-                    null,
-                    error ?? new AssemblyError(ErrorKinds.InvalidArgument, "handler returned no data and no error.")));
-                fail++;
-            }
-        }
-
-        var response = new BatchResponse<T>(results, ok, fail);
-        var summary = summarize(ok, items.Count);
-        NextActionHint next = fail > 0
-            ? new NextActionHint(
-                "get_method",
-                $"{fail} item(s) failed — inspect each result's 'error.kind' and re-issue affected items individually.")
-            : new NextActionHint(
-                "decompile_method",
-                "Drill into a specific hotspot's source after the batch enrichment.");
-        return AssemblyResult.Ok(response, summary, next);
-    }
 
     private static bool TryParseIdentity(string moduleVersionId, string metadataToken,
         out MethodIdentity identity, out AssemblyError? error)
@@ -1815,12 +1608,6 @@ public sealed class AssemblyTools
         ErrorKinds.InvalidArgument => new NextActionHint(
             "list_assemblies",
             "Validate the argument shape against the tool description and retry."),
-        ErrorKinds.BatchTooLarge => new NextActionHint(
-            // Reachable batch-too-large responses are emitted by RunBatch with the actual tool
-            // name; this fallback is only used when an out-of-band caller surfaces the kind
-            // without context. Keep it tool-agnostic so we never lie about which tool to retry.
-            "list_assemblies",
-            $"Batch exceeded the per-call cap of {BatchCap}. Split the items into smaller batches and re-issue the same batch tool."),
         ErrorKinds.GenericInstantiationUnresolvable => new NextActionHint(
             "import_assembly_manifest",
             "A type-argument name did not resolve in any loaded module. Import the manifest for the dependency or supply assemblyPathHint, then retry."),
@@ -1838,16 +1625,6 @@ public sealed class AssemblyTools
             "Inspect loaded modules and retry the call."),
     };
 
-    /// <summary>
-    /// True when the batch item carries any §3.5 generic-instantiation field. Used by tools
-    /// that do not accept instantiations (IL-only, source-only) to reject them with a clear
-    /// invalid_argument instead of silently ignoring.
-    /// </summary>
-    private static bool HasGenericInstantiationFields(MethodBatchItem item) =>
-        (item.GenericTypeArguments is { Count: > 0 }) ||
-        (item.GenericMethodArguments is { Count: > 0 }) ||
-        !string.IsNullOrWhiteSpace(item.MethodSpecModuleVersionId) ||
-        !string.IsNullOrWhiteSpace(item.MethodSpecMetadataToken);
 
     /// <summary>
     /// Parses an array of canonical CLR-style type names (see <c>docs/handoff-contract.md §3.5</c>)
@@ -1858,16 +1635,12 @@ public sealed class AssemblyTools
     /// </summary>
     private static bool TryParseGenericArgs(string[]? raw, string paramName,
         out IReadOnlyList<GenericTypeName>? parsed, out AssemblyError? error)
-        => TryParseGenericArgs((IReadOnlyList<string>?)raw, paramName, out parsed, out error);
-
-    private static bool TryParseGenericArgs(IReadOnlyList<string>? raw, string paramName,
-        out IReadOnlyList<GenericTypeName>? parsed, out AssemblyError? error)
     {
         parsed = null;
         error = null;
-        if (raw is null || raw.Count == 0) return true;
-        var list = new List<GenericTypeName>(raw.Count);
-        for (int i = 0; i < raw.Count; i++)
+        if (raw is null || raw.Length == 0) return true;
+        var list = new List<GenericTypeName>(raw.Length);
+        for (int i = 0; i < raw.Length; i++)
         {
             if (!GenericTypeName.TryParse(raw[i], out var node, out var kind, out var msg))
             {

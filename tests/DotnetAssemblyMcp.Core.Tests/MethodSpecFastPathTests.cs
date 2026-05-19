@@ -186,7 +186,7 @@ public sealed class MethodSpecFastPathTests
     }
 
     [Fact]
-    public void Batch_method_spec_propagates_per_item()
+    public void Get_method_with_method_spec_renders_closed_signature()
     {
         using var index = new MetadataIndex();
         index.Load(SampleLibPath);
@@ -196,18 +196,13 @@ public sealed class MethodSpecFastPathTests
         var callInt = MethodOf(typeof(SampleConsumer.ConsumerService), "CallEchoOfInt");
         var specToken = FindMethodSpecToken(index, callInt, "System.Int32");
 
-        var batch = new MethodBatchItem[]
-        {
-            new(
-                echoOpen.Module.ModuleVersionId.ToString("D"),
-                $"0x{echoOpen.MetadataToken:X8}",
-                MethodSpecModuleVersionId: callInt.Module.ModuleVersionId.ToString("D"),
-                MethodSpecMetadataToken: $"0x{specToken:X8}"),
-        };
+        var result = AssemblyTools.GetMethod(index,
+            echoOpen.Module.ModuleVersionId.ToString("D"),
+            $"0x{echoOpen.MetadataToken:X8}",
+            methodSpecModuleVersionId: callInt.Module.ModuleVersionId.ToString("D"),
+            methodSpecMetadataToken: $"0x{specToken:X8}");
 
-        var result = AssemblyTools.GetMethods(index, batch);
         result.IsError.Should().BeFalse(result.Summary);
-        result.Data!.Results[0].Ok.Should().BeTrue();
-        result.Data.Results[0].Data!.Signature.Should().Contain("System.Int32");
+        result.Data!.Signature.Should().Contain("System.Int32");
     }
 }

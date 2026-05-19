@@ -119,13 +119,6 @@ If the tool isn't on `PATH`, point `command` at the absolute path (e.g. `~/.dotn
 | `find_callers` | Reverse call graph (intra-module MethodDef + cross-module MemberRef matching); narrows by instantiation when `genericMethodArguments` is supplied |
 | `get_method_source` | PDB-resolved file/lines plus SourceLink URL (embedded PDB or sibling `.pdb`) |
 
-### Batch variants
-| Tool | Purpose |
-|---|---|
-| `get_methods` | Batch `get_method` — up to 100 identities per call |
-| `scan_methods_il` | Batch `scan_method_il` |
-| `find_callers_batch` | Batch `find_callers` |
-
 Every tool returns the same envelope (`summary`, `data`, `hints`, `error`); `hints` advertise the suggested next tool so an agent can chain without rediscovering the API.
 
 ## Companion project
