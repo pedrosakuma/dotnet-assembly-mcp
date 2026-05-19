@@ -185,3 +185,38 @@ public readonly record struct FindStringReferencesReadResult(FindStringReference
 
 /// <summary>Per-module string-literal index: literal → list of (caller MethodDef token, IL offset of the ldstr opcode).</summary>
 internal sealed record StringIndexData(Dictionary<string, List<(int MethodToken, int IlOffset)>> ByLiteral);
+
+/// <summary>A single resolved target site for <see cref="IMetadataIndex.FindAttributeTargets"/>.</summary>
+public sealed record AttributeTargetRef(
+    Guid ModuleVersionId,
+    AttributeTargetKind Kind,
+    int MetadataToken,
+    int ParameterSequence,
+    string Handle,
+    string Display,
+    int AttributeMetadataToken);
+
+/// <summary>Tier-4 payload for <c>find_attribute_targets</c>.</summary>
+public sealed record FindAttributeTargetsResult(
+    string AttributeTypeFullName,
+    IReadOnlyList<AttributeTargetRef> Hits,
+    int ModulesSearched,
+    bool FromCache,
+    bool Truncated);
+
+/// <summary>Result of <see cref="IMetadataIndex.FindAttributeTargets"/>.</summary>
+public readonly record struct FindAttributeTargetsReadResult(FindAttributeTargetsResult? Result, AssemblyError? Error)
+{
+    public bool IsSuccess => Result is not null;
+    public static FindAttributeTargetsReadResult Ok(FindAttributeTargetsResult r) => new(r, null);
+    public static FindAttributeTargetsReadResult Fail(AssemblyError e) => new(null, e);
+}
+
+/// <summary>
+/// Per-module reverse attribute index: attribute type full name → list of decoded
+/// (parent handle, parameter sequence, attribute token) entries. Built lazily on the first
+/// <c>FindAttributeTargets</c> call against a module and invalidated together with the xref
+/// cache when the underlying PE file changes.
+/// </summary>
+internal sealed record AttributeIndexData(
+    Dictionary<string, List<(AttributeTargetKind Kind, int TargetToken, int ParameterSequence, int AttributeToken)>> ByAttributeType);
