@@ -49,6 +49,23 @@ docker run --rm -p 8788:8080 \
 
 Or build locally: `docker build -t dotnet-assembly-mcp:dev -f deploy/Dockerfile .`.
 
+### Joint with `dotnet-diagnostics-mcp` (recommended)
+
+The diagnostics server emits `MethodIdentity` / `TypeIdentity` handles that only
+become actionable when this server is on the same MCP client. Run both together:
+
+```bash
+export ASSEMBLIES_DIR=/abs/path/to/your/published/binaries
+docker compose -f deploy/docker-compose.yml up -d
+# diagnostics: http://localhost:8787/mcp
+# assembly:    http://localhost:8788/mcp
+```
+
+The same `docker-compose.yml` ships in
+[`pedrosakuma/dotnet-diagnostics-mcp:deploy/docker-compose.yml`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/blob/main/deploy/docker-compose.yml)
+— bring it up from either checkout. Set `MCP_BEARER_TOKEN` on the host to
+gate both servers with one shared token.
+
 ## Client configuration
 
 ### Claude Desktop / Cursor / VS Code / Copilot CLI (stdio)
