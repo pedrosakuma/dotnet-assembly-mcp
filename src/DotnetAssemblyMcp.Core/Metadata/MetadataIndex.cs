@@ -551,18 +551,93 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         var summary = SummarizeMethod(module, methodHandle, identity.MetadataToken);
 
-        // §3.5: optional closed generic instantiation. When the caller supplied either set of
-        // type-args, we validate counts vs the open def's arities, validate each leaf resolves in
-        // some loaded module, then re-render the signature with substituted parameters so the
-        // response carries the closed view (e.g. `int Echo(int)` instead of `!!0 Echo(!!0)`).
+        // §3.5: optional closed generic instantiation. Either (or both) of:
+        //   - explicit TypeGenericArguments / MethodGenericArguments string lists, validated
+        //     against loaded modules.
+        //   - MethodSpec fast-path (#9): a (mvid, token) into a MethodSpec row whose
+        //     Instantiation blob carries the method-level args, and whose Method.Parent
+        //     (if a TypeSpec) carries the type-level args.
+        // When both are present they are cross-checked element-wise; a mismatch yields
+        // GenericInstantiationMismatch.
+        IReadOnlyList<string>? typeRendered = null;
+        IReadOnlyList<string>? methodRendered = null;
+
+        if (identity.MethodSpec is { } specRef)
+        {
+            var (specMvid, specToken) = (specRef.ModuleVersionId, specRef.MetadataToken);
+            if (!_modules.TryGetValue(specMvid, out var callerMod))
+            {
+                return ResolveResult.Fail(new AssemblyError(
+                    ErrorKinds.ModuleNotFound,
+                    $"methodSpec module {specMvid:D} is not loaded; load it first or omit methodSpec."));
+            }
+
+            EntityHandle specHandle;
+            try { specHandle = (EntityHandle)MetadataTokens.Handle(specToken); }
+            catch (ArgumentException)
+            {
+                return ResolveResult.Fail(new AssemblyError(
+                    ErrorKinds.InvalidArgument,
+                    $"methodSpec token 0x{specToken:X8} is not a valid metadata token."));
+            }
+            if (specHandle.Kind != HandleKind.MethodSpecification)
+            {
+                return ResolveResult.Fail(new AssemblyError(
+                    ErrorKinds.TokenWrongTable,
+                    $"methodSpec token 0x{specToken:X8} is a {specHandle.Kind}, expected MethodSpecification (table 0x2B)."));
+            }
+
+            MethodSpecification specRow;
+            try { specRow = callerMod.MD.GetMethodSpecification((MethodSpecificationHandle)specHandle); }
+            catch (BadImageFormatException)
+            {
+                return ResolveResult.Fail(new AssemblyError(
+                    ErrorKinds.InvalidArgument,
+                    $"methodSpec token 0x{specToken:X8} could not be decoded."));
+            }
+
+            var wireProvider = new WireFormatSignatureProvider();
+            try
+            {
+                methodRendered = specRow.DecodeSignature(wireProvider, genericContext: (object?)null);
+            }
+            catch (BadImageFormatException)
+            {
+                return ResolveResult.Fail(new AssemblyError(
+                    ErrorKinds.InvalidArgument,
+                    "methodSpec Instantiation blob could not be decoded."));
+            }
+
+            // Type-level args ride on spec.Method.Parent when it's a TypeSpec.
+            if (specRow.Method.Kind == HandleKind.MemberReference)
+            {
+                try
+                {
+                    var mr = callerMod.MD.GetMemberReference((MemberReferenceHandle)specRow.Method);
+                    if (mr.Parent.Kind == HandleKind.TypeSpecification)
+                    {
+                        var ts = callerMod.MD.GetTypeSpecification((TypeSpecificationHandle)mr.Parent);
+                        var typeDecoded = ts.DecodeSignature(wireProvider, genericContext: (object?)null);
+                        if (GenericTypeName.TryParse(typeDecoded, out var node, out _, out _)
+                            && node is GenericTypeName.Named named
+                            && !named.TypeArguments.IsDefaultOrEmpty)
+                        {
+                            typeRendered = named.TypeArguments.Select(a => a.Format()).ToArray();
+                        }
+                    }
+                }
+                catch (BadImageFormatException) { /* leave typeRendered null */ }
+            }
+        }
+
         bool hasTypeArgs = identity.TypeGenericArguments is { Count: > 0 };
         bool hasMethodArgs = identity.MethodGenericArguments is { Count: > 0 };
         if (hasTypeArgs || hasMethodArgs)
         {
-            var def = module.MD.GetMethodDefinition(methodHandle);
-            var typeDef = module.MD.GetTypeDefinition(def.GetDeclaringType());
-            int typeArity = typeDef.GetGenericParameters().Count;
-            int methodArity = def.GetGenericParameters().Count;
+            var def0 = module.MD.GetMethodDefinition(methodHandle);
+            var typeDef0 = module.MD.GetTypeDefinition(def0.GetDeclaringType());
+            int typeArity = typeDef0.GetGenericParameters().Count;
+            int methodArity = def0.GetGenericParameters().Count;
 
             int gotType = identity.TypeGenericArguments?.Count ?? 0;
             int gotMethod = identity.MethodGenericArguments?.Count ?? 0;
@@ -578,25 +653,38 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
             var readers = SnapshotReaders();
 
-            IReadOnlyList<string> typeRendered = Array.Empty<string>();
             if (hasTypeArgs)
             {
                 var (rendered, err) = GenericArgResolver.RenderAndValidate(
                     identity.TypeGenericArguments!, identity.ModuleVersionId, readers);
                 if (err is not null) return ResolveResult.Fail(err);
+                if (typeRendered is not null && !RenderedSequenceEqual(typeRendered, rendered!))
+                    return ResolveResult.Fail(new AssemblyError(
+                        ErrorKinds.GenericInstantiationMismatch,
+                        $"methodSpec encodes type-args [{string.Join(",", typeRendered)}] but genericTypeArguments has [{string.Join(",", rendered!)}]."));
                 typeRendered = rendered!;
             }
 
-            IReadOnlyList<string> methodRendered = Array.Empty<string>();
             if (hasMethodArgs)
             {
                 var (rendered, err) = GenericArgResolver.RenderAndValidate(
                     identity.MethodGenericArguments!, identity.ModuleVersionId, readers);
                 if (err is not null) return ResolveResult.Fail(err);
+                if (methodRendered is not null && !RenderedSequenceEqual(methodRendered, rendered!))
+                    return ResolveResult.Fail(new AssemblyError(
+                        ErrorKinds.GenericInstantiationMismatch,
+                        $"methodSpec encodes method-args [{string.Join(",", methodRendered)}] but genericMethodArguments has [{string.Join(",", rendered!)}]."));
                 methodRendered = rendered!;
             }
+        }
 
-            var provider = new SubstitutingStringSignatureProvider(module.MD, typeRendered, methodRendered);
+        if (typeRendered is not null || methodRendered is not null)
+        {
+            var def = module.MD.GetMethodDefinition(methodHandle);
+            var typeDef = module.MD.GetTypeDefinition(def.GetDeclaringType());
+
+            var provider = new SubstitutingStringSignatureProvider(
+                module.MD, typeRendered ?? Array.Empty<string>(), methodRendered ?? Array.Empty<string>());
             var sig = def.DecodeSignature(provider, genericContext: null);
             var paramList = string.Join(", ", sig.ParameterTypes);
             var ns = module.MD.GetString(typeDef.Namespace);
@@ -609,6 +697,14 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
 
         return ResolveResult.Ok(summary);
+    }
+
+    private static bool RenderedSequenceEqual(IReadOnlyList<string> a, IReadOnlyList<string> b)
+    {
+        if (a.Count != b.Count) return false;
+        for (int i = 0; i < a.Count; i++)
+            if (!string.Equals(a[i], b[i], StringComparison.Ordinal)) return false;
+        return true;
     }
 
     private Dictionary<Guid, Func<MetadataReader>> SnapshotReaders()

@@ -20,7 +20,7 @@ find_callers(mvid, token)            →  reverse call graph (intra+cross) (~100
 get_method_source(mvid, token)       →  PDB file/lines + SourceLink URL  (~40 tokens)
 ```
 
-Closed generic instantiations are first-class: `get_method` / `find_callers` accept `genericTypeArguments` so the agent gets `int Echo(int)` instead of `T Echo(T)` and `find_callers` narrows to callers whose `MethodSpec` matches the requested instantiation. See [`docs/handoff-contract.md §3.5`](./docs/handoff-contract.md#35-generic-instantiations).
+Closed generic instantiations are first-class: `get_method` / `find_callers` accept `genericTypeArguments` so the agent gets `int Echo(int)` instead of `T Echo(T)` and `find_callers` narrows to callers whose `MethodSpec` matches the requested instantiation. Producers that already have a `MethodSpec` row in the caller's module can skip the string-rendering step and supply `methodSpecModuleVersionId` + `methodSpecMetadataToken` as a fast-path; when both forms are present they are cross-checked and a mismatch yields `generic_instantiation_mismatch`. See [`docs/handoff-contract.md §3.5`](./docs/handoff-contract.md#35-generic-instantiations).
 
 The agent pays only for what it actually needs to see.
 

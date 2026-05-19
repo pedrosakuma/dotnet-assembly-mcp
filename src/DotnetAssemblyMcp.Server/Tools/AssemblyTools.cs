@@ -230,7 +230,9 @@ public sealed class AssemblyTools
         [Description("Optional generic arity from the producer payload. Defaults to 0.")] int genericArity = 0,
         [Description("Optional absolute path the producer observed for this assembly. Used only when the MVID is not yet loaded: if the file at the path has a matching MVID it is loaded transparently; if it has a different MVID the call fails with mvid_mismatch (the path is a hint, never an override).")] string? assemblyPathHint = null,
         [Description("Optional CLR reflection-style full names for the declaring type's generic arguments (e.g. ['System.Int32']). When supplied alongside genericMethodArguments produces a closed signature view per docs/handoff-contract.md §3.5. No assembly qualification; nested types use '+'.")] string[]? genericTypeArguments = null,
-        [Description("Optional CLR reflection-style full names for the method's generic arguments. See genericTypeArguments for the format.")] string[]? genericMethodArguments = null)
+        [Description("Optional CLR reflection-style full names for the method's generic arguments. See genericTypeArguments for the format.")] string[]? genericMethodArguments = null,
+        [Description("Optional fast-path (§3.5): ModuleVersionId of a MethodSpec row that natively encodes the closed instantiation. Must be paired with methodSpecMetadataToken.")] string? methodSpecModuleVersionId = null,
+        [Description("Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B) inside methodSpecModuleVersionId. When supplied alongside genericTypeArguments, the two are cross-checked; a mismatch yields generic_instantiation_mismatch.")] string? methodSpecMetadataToken = null)
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
         {
@@ -258,13 +260,17 @@ public sealed class AssemblyTools
         if (!TryParseGenericArgs(genericMethodArguments, nameof(genericMethodArguments), out var methodArgs, out parseErr))
             return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
 
+        if (!TryParseMethodSpec(methodSpecModuleVersionId, methodSpecMetadataToken, out var methodSpec, out parseErr))
+            return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+
         var identity = new MethodIdentity(
             mvid, token,
             TypeFullName: typeFullName,
             MethodName: methodName,
             GenericArity: genericArity,
             TypeGenericArguments: typeArgs,
-            MethodGenericArguments: methodArgs);
+            MethodGenericArguments: methodArgs,
+            MethodSpec: methodSpec);
         var result = index.Resolve(identity);
         if (!result.IsSuccess)
         {
@@ -671,7 +677,9 @@ public sealed class AssemblyTools
         [Description("Callee MethodDef metadata token (table 0x06). Accepts decimal or hex.")] string metadataToken,
         [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
         [Description("Optional CLR reflection-style full names for the declaring type's generic arguments (see get_method).")] string[]? genericTypeArguments = null,
-        [Description("Optional CLR reflection-style full names for the method's generic arguments. When supplied, the caller list is narrowed to call sites whose MethodSpec.Instantiation matches element-wise (docs/handoff-contract.md §3.5).")] string[]? genericMethodArguments = null)
+        [Description("Optional CLR reflection-style full names for the method's generic arguments. When supplied, the caller list is narrowed to call sites whose MethodSpec.Instantiation matches element-wise (docs/handoff-contract.md §3.5).")] string[]? genericMethodArguments = null,
+        [Description("Optional fast-path (§3.5): ModuleVersionId of a MethodSpec row. Paired with methodSpecMetadataToken.")] string? methodSpecModuleVersionId = null,
+        [Description("Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B). When supplied, derives the instantiation directly from metadata.")] string? methodSpecMetadataToken = null)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
             return AssemblyResult.Fail<FindCallersResult>(err!.Message, err, ErrorRecoveryHint(err));
@@ -683,11 +691,14 @@ public sealed class AssemblyTools
             return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
         if (!TryParseGenericArgs(genericMethodArguments, nameof(genericMethodArguments), out var methodArgs, out parseErr))
             return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+        if (!TryParseMethodSpec(methodSpecModuleVersionId, methodSpecMetadataToken, out var methodSpec, out parseErr))
+            return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
 
         identity = identity with
         {
             TypeGenericArguments = typeArgs,
             MethodGenericArguments = methodArgs,
+            MethodSpec = methodSpec,
         };
 
         var result = index.FindCallers(identity);
@@ -734,7 +745,9 @@ public sealed class AssemblyTools
                 return (null, pErr);
             if (!TryParseGenericArgs(item.GenericMethodArguments, "genericMethodArguments", out var methodArgs, out pErr))
                 return (null, pErr);
-            identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs };
+            if (!TryParseMethodSpec(item.MethodSpecModuleVersionId, item.MethodSpecMetadataToken, out var methodSpec, out pErr))
+                return (null, pErr);
+            identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs, MethodSpec = methodSpec };
             var r = index.Resolve(identity);
             return r.IsSuccess ? (r.Method, null) : (null, r.Error);
         }, summarize: (ok, total) => $"Resolved {ok}/{total} method identit(ies).");
@@ -787,7 +800,9 @@ public sealed class AssemblyTools
                 return (null, pErr);
             if (!TryParseGenericArgs(item.GenericMethodArguments, "genericMethodArguments", out var methodArgs, out pErr))
                 return (null, pErr);
-            identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs };
+            if (!TryParseMethodSpec(item.MethodSpecModuleVersionId, item.MethodSpecMetadataToken, out var methodSpec, out pErr))
+                return (null, pErr);
+            identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs, MethodSpec = methodSpec };
             var r = index.FindCallers(identity);
             return r.IsSuccess ? (r.Result, null) : (null, r.Error);
         }, summarize: (ok, total) => $"Resolved callers for {ok}/{total} callee(s).");
@@ -1019,6 +1034,36 @@ public sealed class AssemblyTools
             list.Add(node!);
         }
         parsed = list;
+        return true;
+    }
+
+    private static bool TryParseMethodSpec(string? mvidStr, string? tokenStr,
+        out MethodSpecHandle? spec, out AssemblyError? error)
+    {
+        spec = null;
+        error = null;
+        bool hasMvid = !string.IsNullOrWhiteSpace(mvidStr);
+        bool hasToken = !string.IsNullOrWhiteSpace(tokenStr);
+        if (!hasMvid && !hasToken) return true;
+        if (hasMvid != hasToken)
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                "methodSpecModuleVersionId and methodSpecMetadataToken must be supplied together.");
+            return false;
+        }
+        if (!Guid.TryParse(mvidStr, out var mvid))
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse methodSpecModuleVersionId '{mvidStr}' as a GUID.");
+            return false;
+        }
+        if (!TryParseToken(tokenStr!, out var token))
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse methodSpecMetadataToken '{tokenStr}' as a 32-bit metadata token.");
+            return false;
+        }
+        spec = new MethodSpecHandle(mvid, token);
         return true;
     }
 

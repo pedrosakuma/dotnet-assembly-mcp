@@ -17,4 +17,14 @@ public sealed record MethodIdentity(
     // Optional closed type-level generic arguments (declaration order) — see docs/handoff-contract.md §3.5.
     IReadOnlyList<DotnetAssemblyMcp.Core.Metadata.GenericTypeName>? TypeGenericArguments = null,
     // Optional closed method-level generic arguments (declaration order).
-    IReadOnlyList<DotnetAssemblyMcp.Core.Metadata.GenericTypeName>? MethodGenericArguments = null);
+    IReadOnlyList<DotnetAssemblyMcp.Core.Metadata.GenericTypeName>? MethodGenericArguments = null,
+    // Optional fast-path: a (MVID, token) pointing at a MethodSpec row in the caller's module
+    // that encodes the closed instantiation natively (§3.5). When supplied alongside the string
+    // args, the two are cross-checked and a mismatch yields GenericInstantiationMismatch.
+    MethodSpecHandle? MethodSpec = null);
+
+/// <summary>
+/// §3.5 fast-path pointer: a <c>MethodSpec</c> row (table 0x2B) inside a caller's module
+/// that natively encodes the closed instantiation of a generic call site.
+/// </summary>
+public sealed record MethodSpecHandle(Guid ModuleVersionId, int MetadataToken);

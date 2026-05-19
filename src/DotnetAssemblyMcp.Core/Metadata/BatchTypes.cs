@@ -12,7 +12,9 @@ public sealed record MethodBatchItem(
     string MetadataToken,
     string? AssemblyPathHint = null,
     IReadOnlyList<string>? GenericTypeArguments = null,
-    IReadOnlyList<string>? GenericMethodArguments = null);
+    IReadOnlyList<string>? GenericMethodArguments = null,
+    string? MethodSpecModuleVersionId = null,
+    string? MethodSpecMetadataToken = null);
 
 /// <summary>
 /// One result slot in a batch response. Either <see cref="Data"/> is populated and

@@ -237,7 +237,7 @@ internal sealed class SubstitutingStringSignatureProvider : System.Reflection.Me
 /// Used for comparing decoded MethodSpec/TypeSpec blobs against the strings produced by
 /// <see cref="GenericArgResolver.RenderAndValidate"/>.
 /// </summary>
-internal sealed class WireFormatSignatureProvider : System.Reflection.Metadata.ISignatureTypeProvider<string, object?>
+public sealed class WireFormatSignatureProvider : System.Reflection.Metadata.ISignatureTypeProvider<string, object?>
 {
     public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode switch
     {
