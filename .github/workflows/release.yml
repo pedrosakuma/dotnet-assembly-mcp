@@ -116,10 +116,10 @@ jobs:
             -r ${{ matrix.rid }} \
             -o "$out" \
             --self-contained true \
-            /p:Version=${{ needs.version.outputs.version }} \
-            /p:PublishSingleFile=true \
-            /p:IncludeNativeLibrariesForSelfExtract=true \
-            /p:DebugType=embedded
+            -p:Version=${{ needs.version.outputs.version }} \
+            -p:PublishSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:DebugType=embedded
 
       - name: Archive (tar.gz)
         if: matrix.archive == 'tar'
