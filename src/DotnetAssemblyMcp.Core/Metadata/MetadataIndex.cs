@@ -66,6 +66,44 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     private LoadResult OpenAndRegister(string fullPath)
     {
+        var opened = OpenModule(fullPath);
+        if (opened.Error is not null) return LoadResult.Fail(opened.Error);
+        var mvid = opened.Module!.Mvid;
+
+        if (_modules.TryGetValue(mvid, out var existing))
+        {
+            // Same-MVID reload: atomically install the freshly-read PE and dispose the old one
+            // so subsequent queries don't keep returning the stale byte buffer. Without this
+            // swap, deterministic rebuilds that preserve the MVID would silently serve stale IL.
+            if (string.Equals(existing.Path, fullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                var replacement = new Module(mvid, fullPath, opened.PE!, opened.MD!);
+                if (_modules.TryUpdate(mvid, replacement, existing))
+                {
+                    existing.PE.Dispose();
+                    return LoadResult.Ok(SummarizeModule(replacement));
+                }
+            }
+            // Different path with the same MVID (e.g. file copy) — keep the first registration
+            // and dispose our duplicate to avoid leaking the PEReader.
+            opened.PE!.Dispose();
+            return LoadResult.Ok(SummarizeModule(existing));
+        }
+
+        var added = _modules.GetOrAdd(mvid, _ => opened.Module!);
+        if (!ReferenceEquals(added.PE, opened.PE))
+        {
+            // Lost a race; another thread loaded the same MVID first. Dispose our duplicate.
+            opened.PE!.Dispose();
+        }
+        return LoadResult.Ok(SummarizeModule(added));
+    }
+
+    private readonly record struct OpenedModule(
+        Module? Module, PEReader? PE, MetadataReader? MD, AssemblyError? Error);
+
+    private static OpenedModule OpenModule(string fullPath)
+    {
         try
         {
             // Read the bytes once and back the PEReader with a MemoryStream so the file on disk
@@ -78,30 +116,27 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             if (!pe.HasMetadata)
             {
                 pe.Dispose();
-                return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, $"not a managed PE: {fullPath}"));
+                return new OpenedModule(null, null, null,
+                    new AssemblyError(ErrorKinds.ModuleLoadFailed, $"not a managed PE: {fullPath}"));
             }
             var md = pe.GetMetadataReader();
             var mvid = md.GetGuid(md.GetModuleDefinition().Mvid);
-
-            var added = _modules.GetOrAdd(mvid, _ => new Module(mvid, fullPath, pe, md));
-            if (!ReferenceEquals(added.PE, pe))
-            {
-                // Lost a race; another thread loaded the same MVID first. Dispose our duplicate.
-                pe.Dispose();
-            }
-            return LoadResult.Ok(SummarizeModule(added));
+            return new OpenedModule(new Module(mvid, fullPath, pe, md), pe, md, null);
         }
         catch (BadImageFormatException ex)
         {
-            return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, "invalid PE/CLI image.", ex.Message));
+            return new OpenedModule(null, null, null,
+                new AssemblyError(ErrorKinds.ModuleLoadFailed, "invalid PE/CLI image.", ex.Message));
         }
         catch (UnauthorizedAccessException ex)
         {
-            return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, "permission denied.", ex.Message));
+            return new OpenedModule(null, null, null,
+                new AssemblyError(ErrorKinds.ModuleLoadFailed, "permission denied.", ex.Message));
         }
         catch (IOException ex)
         {
-            return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, "i/o error opening assembly.", ex.Message));
+            return new OpenedModule(null, null, null,
+                new AssemblyError(ErrorKinds.ModuleLoadFailed, "i/o error opening assembly.", ex.Message));
         }
     }
 
@@ -327,7 +362,9 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             {
                 if (pos + 4 > span.Length) break;
                 var n = BitConverter.ToInt32(span.Slice(pos, 4));
-                pos += 4 + Math.Max(0, n) * 4;
+                // Validate without overflow: n quads must fit in the remaining IL.
+                if (n < 0 || n > (span.Length - pos - 4) / 4) break;
+                pos += 4 + n * 4;
                 continue;
             }
 
@@ -830,6 +867,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private const uint XrefMagic = 0x52584D41; // 'AMXR'
     private const int XrefFormatVersion = 2;
 
+    private const int MaxIntraCount = 10_000_000;
+    private const int MaxOutboundCount = 10_000_000;
+    private const int MaxIntraCallersPerCallee = 1_000_000;
+
     private static bool TryReadXrefCache(string path, Module module, out XrefData data)
     {
         data = null!;
@@ -852,20 +893,20 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             if (br.ReadInt64() != info.Length) return false;
 
             var intraCount = br.ReadInt32();
-            if (intraCount < 0) return false;
+            if (intraCount < 0 || intraCount > MaxIntraCount) return false;
             var intra = new Dictionary<int, List<int>>(intraCount);
             for (int i = 0; i < intraCount; i++)
             {
                 var callee = br.ReadInt32();
                 var n = br.ReadInt32();
-                if (n < 0 || n > 1_000_000) return false;
+                if (n < 0 || n > MaxIntraCallersPerCallee) return false;
                 var list = new List<int>(n);
                 for (int j = 0; j < n; j++) list.Add(br.ReadInt32());
                 intra[callee] = list;
             }
 
             var outboundCount = br.ReadInt32();
-            if (outboundCount < 0 || outboundCount > 10_000_000) return false;
+            if (outboundCount < 0 || outboundCount > MaxOutboundCount) return false;
             var outbound = new List<OutboundCallRef>(outboundCount);
             for (int i = 0; i < outboundCount; i++)
             {
@@ -882,7 +923,13 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             data = new XrefData(intra, outbound);
             return true;
         }
+        // Treat any corruption shape as "cache invalid — rebuild". The expensive part of a
+        // rebuild is bounded (single-module IL scan), so degrading gracefully here is cheap.
+        catch (EndOfStreamException) { return false; }  // derives from IOException — list first
         catch (IOException) { return false; }
+        catch (FormatException) { return false; }
+        catch (ArgumentException) { return false; }
+        catch (OutOfMemoryException) { return false; }
     }
 
     private void TryWriteXrefCache(string path, Module module, XrefData data)
@@ -953,7 +1000,8 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             {
                 if (pos + 4 > span.Length) break;
                 var count = BitConverter.ToInt32(span.Slice(pos, 4));
-                pos += 4 + Math.Max(0, count) * 4;
+                if (count < 0 || count > (span.Length - pos - 4) / 4) break;
+                pos += 4 + count * 4;
                 continue;
             }
             pos += Math.Max(0, size);
