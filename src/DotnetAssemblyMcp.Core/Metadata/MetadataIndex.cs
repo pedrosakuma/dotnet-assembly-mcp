@@ -3007,6 +3007,46 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     /// <inheritdoc />
+    public ListAssemblyReferencesResult ListAssemblyReferences(Guid moduleVersionId)
+    {
+        if (moduleVersionId == Guid.Empty)
+            return ListAssemblyReferencesResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
+        if (!_modules.TryGetValue(moduleVersionId, out var module))
+            return ListAssemblyReferencesResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {moduleVersionId:D}."));
+
+        var refs = new List<AssemblyReferenceSummary>(module.MD.AssemblyReferences.Count);
+        foreach (var arh in module.MD.AssemblyReferences)
+        {
+            try
+            {
+                var ar = module.MD.GetAssemblyReference(arh);
+                var name = module.MD.GetString(ar.Name);
+                var culture = ar.Culture.IsNil ? null : module.MD.GetString(ar.Culture);
+                if (string.IsNullOrEmpty(culture)) culture = null;
+                string? pkt = null;
+                if (!ar.PublicKeyOrToken.IsNil)
+                {
+                    var bytes = module.MD.GetBlobBytes(ar.PublicKeyOrToken);
+                    if (bytes.Length > 0) pkt = Convert.ToHexString(bytes).ToLowerInvariant();
+                }
+                var token = MetadataTokens.GetToken(arh);
+                refs.Add(new AssemblyReferenceSummary(
+                    MetadataToken: token,
+                    Handle: $"a:{module.Mvid:D}:0x{token:X8}",
+                    Name: name,
+                    Version: ar.Version.ToString(),
+                    Culture: culture,
+                    PublicKeyTokenHex: pkt,
+                    Flags: (int)ar.Flags));
+            }
+            catch (BadImageFormatException) { /* skip malformed row */ }
+        }
+
+        return ListAssemblyReferencesResult.Ok(new ListAssemblyReferencesPage(module.Mvid, refs));
+    }
+
+    /// <inheritdoc />
     public ListMembersResult ListMembers(Guid moduleVersionId, int typeMetadataToken, ListMembersQuery query)
     {
         query ??= new ListMembersQuery();

@@ -520,6 +520,41 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "list_assembly_references",
+        Title = "List AssemblyRef rows (external dependencies) of a module",
+        Destructive = false,
+        ReadOnly = false,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Enumerates the AssemblyRef table of a single module: every external assembly the " +
+        "module depends on at metadata level, with name, four-part version, culture, public " +
+        "key token (hex), and raw AssemblyFlags. Cheap (single MetadataReader walk, not " +
+        "paginated). Use to reconstruct the dependency graph, audit target-framework or " +
+        "package versions, or pivot into load_assembly when the referenced assembly is also " +
+        "on disk. Accepts an MVID of an already-loaded module or an absolute path (auto-" +
+        "loaded on first call).")]
+    public static AssemblyResult<ListAssemblyReferencesPage> ListAssemblyReferences(
+        IMetadataIndex index,
+        [Description("Either the MVID GUID (D format) of a loaded module, or an absolute path to a .NET PE assembly (auto-loaded).")] string mvidOrPath)
+    {
+        if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var loadErr))
+            return AssemblyResult.Fail<ListAssemblyReferencesPage>(loadErr!.Message, loadErr, ErrorRecoveryHint(loadErr));
+
+        var result = index.ListAssemblyReferences(mvid);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<ListAssemblyReferencesPage>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var p = result.Page!;
+        var summary = p.References.Count == 0
+            ? "Module declares no AssemblyRef rows."
+            : $"{p.References.Count} assembly reference(s).";
+        return AssemblyResult.Ok(p, summary,
+            new NextActionHint("load_assembly", "Load a referenced assembly by absolute path to inspect it."));
+    }
+
+    [McpServerTool(
         Name = "list_methods",
         Title = "List methods of a type with paging and name filtering",
         Destructive = false,

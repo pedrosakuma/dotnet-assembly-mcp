@@ -168,6 +168,13 @@ public interface IMetadataIndex
     /// already builds.
     /// </summary>
     FindTypeReferencesReadResult FindTypeReferences(Guid moduleVersionId, int typeMetadataToken, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Enumerates the AssemblyRef rows of a single loaded module: every external assembly the
+    /// module references at metadata level (name, version, culture, public key token, flags).
+    /// One-shot; not paginated — AssemblyRef tables are typically &lt; 100 entries.
+    /// </summary>
+    ListAssemblyReferencesResult ListAssemblyReferences(Guid moduleVersionId);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>
