@@ -72,8 +72,8 @@ public sealed record ListTypesQuery(
 public sealed record ListTypesPage(
     Guid ModuleVersionId,
     IReadOnlyList<TypeSummary> Types,
-    int? NextCursor,
-    bool Truncated);
+    int? NextCursor = null,
+    bool Truncated = false);
 
 /// <summary>Result of <see cref="IMetadataIndex.ListTypes"/>.</summary>
 public readonly record struct ListTypesResult(ListTypesPage? Page, AssemblyError? Error)
@@ -103,8 +103,8 @@ public sealed record ListMethodsPage(
     int TypeMetadataToken,
     string TypeFullName,
     IReadOnlyList<MethodSummary> Methods,
-    int? NextCursor,
-    bool Truncated);
+    int? NextCursor = null,
+    bool Truncated = false);
 
 /// <summary>Result of <see cref="IMetadataIndex.ListMethods"/>.</summary>
 public readonly record struct ListMethodsResult(ListMethodsPage? Page, AssemblyError? Error)
@@ -144,8 +144,8 @@ public sealed record FindMethodPage(
     Guid ModuleVersionId,
     string NamePattern,
     IReadOnlyList<MethodMatch> Matches,
-    int? NextCursor,
-    bool Truncated);
+    int? NextCursor = null,
+    bool Truncated = false);
 
 /// <summary>Result of <see cref="IMetadataIndex.FindMethod"/>.</summary>
 public readonly record struct FindMethodResult(FindMethodPage? Page, AssemblyError? Error)
