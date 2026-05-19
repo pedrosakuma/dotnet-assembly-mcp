@@ -228,7 +228,9 @@ public sealed class AssemblyTools
         [Description("Optional declaring type full name; used only as a sanity-check display label.")] string? typeFullName = null,
         [Description("Optional method name; used only as a sanity-check display label.")] string? methodName = null,
         [Description("Optional generic arity from the producer payload. Defaults to 0.")] int genericArity = 0,
-        [Description("Optional absolute path the producer observed for this assembly. Used only when the MVID is not yet loaded: if the file at the path has a matching MVID it is loaded transparently; if it has a different MVID the call fails with mvid_mismatch (the path is a hint, never an override).")] string? assemblyPathHint = null)
+        [Description("Optional absolute path the producer observed for this assembly. Used only when the MVID is not yet loaded: if the file at the path has a matching MVID it is loaded transparently; if it has a different MVID the call fails with mvid_mismatch (the path is a hint, never an override).")] string? assemblyPathHint = null,
+        [Description("Optional CLR reflection-style full names for the declaring type's generic arguments (e.g. ['System.Int32']). When supplied alongside genericMethodArguments produces a closed signature view per docs/handoff-contract.md §3.5. No assembly qualification; nested types use '+'.")] string[]? genericTypeArguments = null,
+        [Description("Optional CLR reflection-style full names for the method's generic arguments. See genericTypeArguments for the format.")] string[]? genericMethodArguments = null)
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
         {
@@ -251,7 +253,18 @@ public sealed class AssemblyTools
         if (TryEnsureModuleLoaded(index, mvid, assemblyPathHint) is { } loadErr)
             return AssemblyResult.Fail<MethodSummary>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
 
-        var identity = new MethodIdentity(mvid, token, TypeFullName: typeFullName, MethodName: methodName, GenericArity: genericArity);
+        if (!TryParseGenericArgs(genericTypeArguments, nameof(genericTypeArguments), out var typeArgs, out var parseErr))
+            return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+        if (!TryParseGenericArgs(genericMethodArguments, nameof(genericMethodArguments), out var methodArgs, out parseErr))
+            return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+
+        var identity = new MethodIdentity(
+            mvid, token,
+            TypeFullName: typeFullName,
+            MethodName: methodName,
+            GenericArity: genericArity,
+            TypeGenericArguments: typeArgs,
+            MethodGenericArguments: methodArgs);
         var result = index.Resolve(identity);
         if (!result.IsSuccess)
         {
@@ -953,6 +966,34 @@ public sealed class AssemblyTools
             "list_assemblies",
             "Inspect loaded modules and retry the call."),
     };
+
+    /// <summary>
+    /// Parses an array of canonical CLR-style type names (see <c>docs/handoff-contract.md §3.5</c>)
+    /// into <see cref="GenericTypeName"/> nodes for forwarding through <see cref="MethodIdentity"/>.
+    /// Returns <c>true</c> with a non-null list (possibly empty) on success, or <c>false</c> with
+    /// the first parser error and a null list. Null/empty input yields <c>(true, null)</c> so the
+    /// caller can distinguish "absent" from "empty".
+    /// </summary>
+    private static bool TryParseGenericArgs(string[]? raw, string paramName,
+        out IReadOnlyList<GenericTypeName>? parsed, out AssemblyError? error)
+    {
+        parsed = null;
+        error = null;
+        if (raw is null || raw.Length == 0) return true;
+        var list = new List<GenericTypeName>(raw.Length);
+        for (int i = 0; i < raw.Length; i++)
+        {
+            if (!GenericTypeName.TryParse(raw[i], out var node, out var kind, out var msg))
+            {
+                error = new AssemblyError(kind ?? ErrorKinds.InvalidArgument,
+                    $"{paramName}[{i}] is invalid: {msg}");
+                return false;
+            }
+            list.Add(node!);
+        }
+        parsed = list;
+        return true;
+    }
 
     private static bool TryResolveModuleId(IMetadataIndex index, string mvidOrPath,
         out Guid mvid, out AssemblyError? error)

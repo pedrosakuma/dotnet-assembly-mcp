@@ -13,4 +13,8 @@ public sealed record MethodIdentity(
     string? ModulePath = null,
     string? TypeFullName = null,
     string? MethodName = null,
-    int GenericArity = 0);
+    int GenericArity = 0,
+    // Optional closed type-level generic arguments (declaration order) — see docs/handoff-contract.md §3.5.
+    IReadOnlyList<DotnetAssemblyMcp.Core.Metadata.GenericTypeName>? TypeGenericArguments = null,
+    // Optional closed method-level generic arguments (declaration order).
+    IReadOnlyList<DotnetAssemblyMcp.Core.Metadata.GenericTypeName>? MethodGenericArguments = null);

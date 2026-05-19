@@ -550,7 +550,76 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
 
         var summary = SummarizeMethod(module, methodHandle, identity.MetadataToken);
+
+        // §3.5: optional closed generic instantiation. When the caller supplied either set of
+        // type-args, we validate counts vs the open def's arities, validate each leaf resolves in
+        // some loaded module, then re-render the signature with substituted parameters so the
+        // response carries the closed view (e.g. `int Echo(int)` instead of `!!0 Echo(!!0)`).
+        bool hasTypeArgs = identity.TypeGenericArguments is { Count: > 0 };
+        bool hasMethodArgs = identity.MethodGenericArguments is { Count: > 0 };
+        if (hasTypeArgs || hasMethodArgs)
+        {
+            var def = module.MD.GetMethodDefinition(methodHandle);
+            var typeDef = module.MD.GetTypeDefinition(def.GetDeclaringType());
+            int typeArity = typeDef.GetGenericParameters().Count;
+            int methodArity = def.GetGenericParameters().Count;
+
+            int gotType = identity.TypeGenericArguments?.Count ?? 0;
+            int gotMethod = identity.MethodGenericArguments?.Count ?? 0;
+
+            if (gotType != 0 && gotType != typeArity)
+                return ResolveResult.Fail(new AssemblyError(
+                    ErrorKinds.InvalidArgument,
+                    $"genericTypeArguments.type carries {gotType} args but the declaring type has arity {typeArity}."));
+            if (gotMethod != 0 && gotMethod != methodArity)
+                return ResolveResult.Fail(new AssemblyError(
+                    ErrorKinds.InvalidArgument,
+                    $"genericTypeArguments.method carries {gotMethod} args but the method has arity {methodArity}."));
+
+            var readers = SnapshotReaders();
+
+            IReadOnlyList<string> typeRendered = Array.Empty<string>();
+            if (hasTypeArgs)
+            {
+                var (rendered, err) = GenericArgResolver.RenderAndValidate(
+                    identity.TypeGenericArguments!, identity.ModuleVersionId, readers);
+                if (err is not null) return ResolveResult.Fail(err);
+                typeRendered = rendered!;
+            }
+
+            IReadOnlyList<string> methodRendered = Array.Empty<string>();
+            if (hasMethodArgs)
+            {
+                var (rendered, err) = GenericArgResolver.RenderAndValidate(
+                    identity.MethodGenericArguments!, identity.ModuleVersionId, readers);
+                if (err is not null) return ResolveResult.Fail(err);
+                methodRendered = rendered!;
+            }
+
+            var provider = new SubstitutingStringSignatureProvider(module.MD, typeRendered, methodRendered);
+            var sig = def.DecodeSignature(provider, genericContext: null);
+            var paramList = string.Join(", ", sig.ParameterTypes);
+            var ns = module.MD.GetString(typeDef.Namespace);
+            var typeNameRaw = module.MD.GetString(typeDef.Name);
+            var fullType = string.IsNullOrEmpty(ns) ? typeNameRaw : $"{ns}.{typeNameRaw}";
+            var methodName = module.MD.GetString(def.Name);
+            var closedSig = $"{sig.ReturnType} {fullType}.{methodName}({paramList})";
+
+            summary = summary with { Signature = closedSig };
+        }
+
         return ResolveResult.Ok(summary);
+    }
+
+    private Dictionary<Guid, Func<MetadataReader>> SnapshotReaders()
+    {
+        var dict = new Dictionary<Guid, Func<MetadataReader>>(_modules.Count);
+        foreach (var (mvid, mod) in _modules)
+        {
+            var local = mod; // capture
+            dict[mvid] = () => local.MD;
+        }
+        return dict;
     }
 
     /// <inheritdoc />
