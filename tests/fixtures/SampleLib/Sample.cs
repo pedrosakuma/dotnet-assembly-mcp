@@ -82,6 +82,18 @@ public sealed class Box<T>
     public Box(T value) => Value = value;
 }
 
+/// <summary>
+/// Fixture for find_type_references IL-scan coverage. The methods here emit type-bearing IL
+/// opcodes (<c>ldtoken</c>, <c>castclass</c>, <c>isinst</c>) whose operand is an InlineType
+/// token, so the xref builder can record them as IlOpcode reference sites.
+/// </summary>
+public static class TypeUsageFixture
+{
+    public static Type BoxTypeHandle() => typeof(Box<int>);
+    public static bool IsAnimal(object o) => o is AnimalBase;
+    public static AnimalBase? AsAnimal(object o) => o as AnimalBase;
+}
+
 public interface ILogger
 {
     void Log(string message);

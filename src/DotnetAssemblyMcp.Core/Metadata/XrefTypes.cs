@@ -38,7 +38,9 @@ public readonly record struct FindCallersReadResult(FindCallersResult? Result, A
 /// </summary>
 internal sealed record XrefData(
     Dictionary<int, List<int>> Intra,
-    List<OutboundCallRef> Outbound);
+    List<OutboundCallRef> Outbound,
+    Dictionary<int, List<TypeReferenceSite>> TypeIntra,
+    List<OutboundTypeRef> TypeOutbound);
 
 /// <summary>
 /// A single cross-module call site recorded while scanning a module's IL. The target is
@@ -74,3 +76,72 @@ internal readonly record struct CalleeKey(
     int GenericArity,
     string ParameterSignature,
     byte CallingConvention);
+
+/// <summary>
+/// How a single type-reference site uses the target type. Matches the buckets a refactor
+/// impact-analysis question typically asks: "where is this type used as a field, as a
+/// parameter, as a local, in an opcode (cast/box/typeof/newobj)?".
+/// </summary>
+public enum TypeReferenceKind
+{
+    FieldType,
+    PropertyType,
+    EventType,
+    MethodParameter,
+    MethodReturn,
+    MethodLocal,
+    IlOpcode,
+}
+
+/// <summary>
+/// A single resolved type-reference site emitted by <see cref="IMetadataIndex.FindTypeReferences"/>.
+/// <see cref="SiteKind"/> tells you which member table <see cref="MetadataToken"/> belongs to
+/// (Field / Property / Event / Method); <see cref="ReferenceKind"/> tells you *how* that member
+/// uses the target type.
+/// </summary>
+public sealed record TypeReferenceRef(
+    Guid ModuleVersionId,
+    int MetadataToken,
+    MemberKind SiteKind,
+    TypeReferenceKind ReferenceKind,
+    string Handle,
+    string Display);
+
+/// <summary>Tier-4 payload for <c>find_type_references</c>.</summary>
+public sealed record FindTypeReferencesResult(
+    Guid TargetModuleVersionId,
+    int TargetMetadataToken,
+    string TargetHandle,
+    IReadOnlyList<TypeReferenceRef> References,
+    int ModulesSearched,
+    bool FromCache);
+
+/// <summary>Result of <see cref="IMetadataIndex.FindTypeReferences"/>.</summary>
+public readonly record struct FindTypeReferencesReadResult(FindTypeReferencesResult? Result, AssemblyError? Error)
+{
+    public bool IsSuccess => Result is not null;
+    public static FindTypeReferencesReadResult Ok(FindTypeReferencesResult r) => new(r, null);
+    public static FindTypeReferencesReadResult Fail(AssemblyError e) => new(null, e);
+}
+
+/// <summary>A single intra-module type-reference site recorded by the xref builder.</summary>
+internal readonly record struct TypeReferenceSite(
+    int SiteToken,
+    MemberKind SiteKind,
+    TypeReferenceKind ReferenceKind);
+
+/// <summary>
+/// A single cross-module type-reference site recorded while scanning a module. The target is
+/// described purely by (assembly simple name, type full name with '+'-joined nested types) so
+/// it can be matched against any other loaded module's TypeDef without holding that module's
+/// metadata reader.
+/// </summary>
+internal sealed record OutboundTypeRef(
+    int SiteToken,
+    MemberKind SiteKind,
+    TypeReferenceKind ReferenceKind,
+    string TargetAssemblyName,
+    string TargetTypeFullName);
+
+/// <summary>Signature-level identity for a cross-module type lookup.</summary>
+internal readonly record struct TypeKey(string AssemblyName, string TypeFullName);

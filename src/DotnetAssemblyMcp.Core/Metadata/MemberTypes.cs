@@ -3,15 +3,17 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 using DotnetAssemblyMcp.Core;
 
 /// <summary>
-/// Kind of structural member reported by <see cref="IMetadataIndex.ListMembers"/>. Methods
-/// are intentionally excluded — they have their own dedicated <c>list_methods</c> surface
-/// because the IL-size / generic-arity columns don't apply to fields / properties / events.
+/// Kind of structural member. <see cref="IMetadataIndex.ListMembers"/> only emits
+/// <see cref="Field"/> / <see cref="Property"/> / <see cref="Event"/> (methods have their own
+/// <c>list_methods</c> surface). <see cref="Method"/> is used by xref site results
+/// (<see cref="TypeReferenceRef"/>) where any member kind can be a reference site.
 /// </summary>
 public enum MemberKind
 {
     Field,
     Property,
     Event,
+    Method,
 }
 
 /// <summary>
