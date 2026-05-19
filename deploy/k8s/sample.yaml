@@ -1,0 +1,142 @@
+# Centralised deployment of dotnet-assembly-mcp on Kubernetes.
+#
+# Topology: one Deployment per cluster (or per team) that any in-cluster MCP
+# client can call. This server reads .NET assemblies from a mounted volume and
+# never touches a running process, so it does not need to be a sidecar.
+#
+# See deploy/k8s/README.md for the full rationale and rollout walkthrough.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: assemblymcp
+---
+# Read-write claim for the xref disk cache (~/.cache/dotnet-assembly-mcp).
+# Rebuilding the index after pod restart is bounded but not free; persisting
+# it cuts cold-start cost on every `find_callers` call.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dotnet-assembly-mcp-cache
+  namespace: assemblymcp
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Read-only claim that the cluster operator populates with the .NET assemblies
+# the resolver should be able to inspect. Sources are environment-specific:
+# CI artifact tarballs, a build-cache mount, or an initContainer rsync from
+# object storage. Either change the storageClassName to match your cluster or
+# replace with a hostPath / NFS / CSI volume that is already pre-populated.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dotnet-assembly-mcp-assemblies
+  namespace: assemblymcp
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dotnet-assembly-mcp
+  namespace: assemblymcp
+  labels:
+    app: dotnet-assembly-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dotnet-assembly-mcp
+  strategy:
+    # Rolling new pods need exclusive access to the cache PVC (RWO); use
+    # Recreate so the old pod releases the volume before the new one mounts it.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: dotnet-assembly-mcp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: server
+          image: ghcr.io/pedrosakuma/dotnet-assembly-mcp:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: mcp
+          env:
+            - name: ASPNETCORE_URLS
+              value: http://0.0.0.0:8080
+            - name: DOTNET_NOLOGO
+              value: "1"
+            # Override HOME so the xref cache lands on the persisted volume.
+            - name: HOME
+              value: /var/cache/assemblymcp
+          volumeMounts:
+            - name: cache
+              mountPath: /var/cache/assemblymcp
+            - name: assemblies
+              mountPath: /assemblies
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            # Decompile and find_callers are bursty; cap to protect noisy
+            # neighbours but leave room for a single large module index.
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: dotnet-assembly-mcp-cache
+        - name: assemblies
+          persistentVolumeClaim:
+            claimName: dotnet-assembly-mcp-assemblies
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dotnet-assembly-mcp
+  namespace: assemblymcp
+  labels:
+    app: dotnet-assembly-mcp
+spec:
+  type: ClusterIP
+  selector:
+    app: dotnet-assembly-mcp
+  ports:
+    - name: mcp
+      # Conventional default that matches the dotnet-tool/systemd/Docker stories.
+      # diagnostics-mcp uses 8787; assembly-mcp uses 8788.
+      port: 8788
+      targetPort: mcp

@@ -1,6 +1,6 @@
 # dotnet-assembly-mcp
 
-> **Status:** 16 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool` and Docker image. Latest release: [`v0.6.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases/tag/v0.6.0) — surface-alignment + 10 audit fixes; v0.7.0 (in progress) folds in dual-audit follow-ups.
+> **Status:** 16 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool`, Docker image, and self-contained single-file binaries. Latest release: [`v0.7.1`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases/tag/v0.7.1) — paginated-tool schema validation hotfix.
 
 An **MCP server** for *static* navigation of compiled .NET assemblies — types, methods, attributes, signatures, IL, cross-references, and on-demand decompilation — designed as a **token-efficient alternative to feeding source code into an LLM context**.
 
@@ -25,6 +25,8 @@ Closed generic instantiations are first-class: `get_method` / `find_callers` acc
 The agent pays only for what it actually needs to see.
 
 ## Install
+
+For the full guide (single-file binaries, systemd / launchd / Scheduled Task supervisors, Kubernetes manifest), see [`docs/consumer-install.md`](./docs/consumer-install.md).
 
 ### As a global `dotnet tool` (stdio — local MCP clients)
 

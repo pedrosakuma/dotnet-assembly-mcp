@@ -24,13 +24,13 @@ public sealed record MethodSourceLocation(
     int MetadataToken,
     string Handle,
     bool Found,
-    string? File,
-    int? StartLine,
-    int? EndLine,
-    string? SourceLink,
-    PdbKind PdbKind,
-    int? PdbAge,
-    string? Reason);
+    string? File = null,
+    int? StartLine = null,
+    int? EndLine = null,
+    string? SourceLink = null,
+    PdbKind PdbKind = PdbKind.None,
+    int? PdbAge = null,
+    string? Reason = null);
 
 /// <summary>Result of <see cref="IMetadataIndex.GetMethodSource"/>.</summary>
 public readonly record struct MethodSourceResult(MethodSourceLocation? Location, AssemblyError? Error)

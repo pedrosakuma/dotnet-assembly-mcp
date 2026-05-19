@@ -1,0 +1,69 @@
+# systemd --user unit template for dotnet-assembly-mcp (HTTP transport).
+#
+# Install (per-user, no root required):
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/supervisors/linux/dotnet-assembly-mcp.service ~/.config/systemd/user/
+#   loginctl enable-linger "$USER"                # keep services running after logout
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now dotnet-assembly-mcp.service
+#
+# Verify:
+#
+#   systemctl --user status dotnet-assembly-mcp.service
+#   curl -fsS http://127.0.0.1:8788/health
+#
+# Logs:  journalctl --user -u dotnet-assembly-mcp.service -f
+#
+# This unit assumes `dotnet tool install -g dotnet-assembly-mcp` has placed the
+# `dotnet-assembly-mcp` executable under ~/.dotnet/tools. Adjust ExecStart and
+# Environment as needed if you prefer the single-file binary or a non-default port.
+
+[Unit]
+Description=dotnet-assembly-mcp — static MCP server for .NET assemblies
+Documentation=https://github.com/pedrosakuma/dotnet-assembly-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Default port pin matches the conventional split with dotnet-diagnostics-mcp:
+#   diagnostics → 127.0.0.1:8787
+#   assembly    → 127.0.0.1:8788
+Environment=ASPNETCORE_URLS=http://127.0.0.1:8788
+Environment=DOTNET_NOLOGO=1
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+ExecStart=%h/.dotnet/tools/dotnet-assembly-mcp
+
+# Cheap liveness probe before declaring the unit started. Retries cover the
+# few hundred ms Kestrel needs to bind. ExecStartPost is fire-and-forget so
+# we don't gate on it — the goal is a fast loud signal if the server is dead.
+ExecStartPost=/bin/sh -c 'for i in 1 2 3 4 5 6 7 8 9 10; do %h/.dotnet/tools/dotnet-assembly-mcp --health-check --url=http://127.0.0.1:8788/health && exit 0; sleep 1; done; exit 1'
+
+Restart=on-failure
+RestartSec=2s
+
+# Resource hygiene. Tune up if you load very large modules or build very large
+# xref caches (find_callers).
+MemoryHigh=512M
+MemoryMax=1G
+
+# Sandbox: this server only reads .NET assemblies and writes the xref cache
+# under ~/.cache/dotnet-assembly-mcp. No network listening beyond loopback,
+# no writes outside HOME.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.cache/dotnet-assembly-mcp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

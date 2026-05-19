@@ -85,6 +85,68 @@ jobs:
           name: nupkg
           path: artifacts/*.nupkg
 
+  publish-binaries:
+    name: Publish self-contained single-file binaries
+    needs: [version, build-test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  rid: linux-x64,   archive: tar  }
+          - { os: ubuntu-latest,  rid: linux-arm64, archive: tar  }
+          - { os: windows-latest, rid: win-x64,     archive: zip  }
+          - { os: windows-latest, rid: win-arm64,   archive: zip  }
+          - { os: macos-latest,   rid: osx-arm64,   archive: tar  }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Publish ${{ matrix.rid }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="publish/${{ matrix.rid }}"
+          dotnet publish src/DotnetAssemblyMcp.Server/DotnetAssemblyMcp.Server.csproj \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            -o "$out" \
+            --self-contained true \
+            /p:Version=${{ needs.version.outputs.version }} \
+            /p:PublishSingleFile=true \
+            /p:IncludeNativeLibrariesForSelfExtract=true \
+            /p:DebugType=embedded
+
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar'
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="dotnet-assembly-mcp-${{ needs.version.outputs.version }}-${{ matrix.rid }}"
+          mkdir -p dist
+          tar -C "publish/${{ matrix.rid }}" -czf "dist/${base}.tar.gz" .
+          (cd dist && sha256sum "${base}.tar.gz" > "${base}.tar.gz.sha256")
+
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $base = "dotnet-assembly-mcp-${{ needs.version.outputs.version }}-${{ matrix.rid }}"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "publish/${{ matrix.rid }}/*" -DestinationPath "dist/$base.zip" -Force
+          $hash = (Get-FileHash "dist/$base.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $base.zip" | Out-File -Encoding ascii "dist/$base.zip.sha256"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.rid }}
+          path: dist/*
+
   docker-ghcr:
     name: Build & Push Docker (GHCR)
     needs: [version, build-test]
@@ -130,7 +192,7 @@ jobs:
 
   github-release:
     name: GitHub Release
-    needs: [version, pack-nuget, docker-ghcr]
+    needs: [version, pack-nuget, publish-binaries, docker-ghcr]
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     steps:
@@ -139,10 +201,20 @@ jobs:
         with:
           name: nupkg
           path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: artifacts
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           generate_release_notes: true
-          files: artifacts/*.nupkg
+          files: |
+            artifacts/*.nupkg
+            artifacts/*.tar.gz
+            artifacts/*.tar.gz.sha256
+            artifacts/*.zip
+            artifacts/*.zip.sha256
