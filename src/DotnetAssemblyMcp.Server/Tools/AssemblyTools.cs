@@ -375,10 +375,10 @@ public sealed class AssemblyTools
         {
             // typeFullName misses surface as IdentityMalformed; both share the same recovery
             // (use list_types to discover a real handle) so we still prefer the centralized helper.
-            var hint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
+            var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
                 ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
                 : ErrorRecoveryHint(resolveErr);
-            return AssemblyResult.Fail<ListMethodsPage>(resolveErr.Message, resolveErr, hint);
+            return AssemblyResult.Fail<ListMethodsPage>(resolveErr.Message, resolveErr, resolveHint);
         }
 
         var query = new ListMethodsQuery(
