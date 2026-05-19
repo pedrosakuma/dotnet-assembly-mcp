@@ -60,6 +60,15 @@ public interface IMetadataIndex
     /// <param name="moduleVersionId">MVID of a loaded module.</param>
     /// <param name="query">Filter and paging options. Defaults yield 50 types in metadata order.</param>
     ListTypesResult ListTypes(Guid moduleVersionId, ListTypesQuery query);
+
+    /// <summary>
+    /// Tier-1 method enumeration scoped to one type: walks the type's method list, optionally
+    /// filtering by case-insensitive name substring, and returns a paginated slice.
+    /// </summary>
+    /// <param name="moduleVersionId">MVID of a loaded module.</param>
+    /// <param name="typeMetadataToken">TypeDef metadata token (table 0x02) of the declaring type.</param>
+    /// <param name="query">Filter and paging options.</param>
+    ListMethodsResult ListMethods(Guid moduleVersionId, int typeMetadataToken, ListMethodsQuery query);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

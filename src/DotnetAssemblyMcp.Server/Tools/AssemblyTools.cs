@@ -352,6 +352,81 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "list_methods",
+        Title = "List methods of a type with paging and name filtering",
+        Destructive = false,
+        ReadOnly = false,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Enumerates the methods of a single type. Identify the type either via a typeHandle " +
+        "('t:<mvid>:0x<typeToken>' returned by list_types) or via mvidOrPath + typeFullName " +
+        "(case-sensitive, uses '+' for nested types e.g. 'NS.Outer+Inner'). Returns one " +
+        "MethodSummary per method (handle, name, signature, ilSize, attributes); use cursor " +
+        "for paging. Drill in further with decompile_method, get_method_il or find_callers.")]
+    public static AssemblyResult<ListMethodsPage> ListMethods(
+        IMetadataIndex index,
+        [Description("Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.")] string? typeHandle = null,
+        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
+        [Description("Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null,
+        [Description("Optional case-insensitive substring filter on the method name.")] string? namePattern = null,
+        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
+        [Description("Max methods per page (default 50, capped at 500).")] int pageSize = ListMethodsQuery.DefaultPageSize)
+    {
+        if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
+            out var mvid, out var typeToken, out var resolveErr))
+        {
+            return AssemblyResult.Fail<ListMethodsPage>(resolveErr!.Message, resolveErr,
+                new NextActionHint("list_types", "Use list_types first to discover a valid type handle."));
+        }
+
+        var query = new ListMethodsQuery(
+            NamePattern: string.IsNullOrEmpty(namePattern) ? null : namePattern,
+            Cursor: cursor > 0 ? cursor : null,
+            PageSize: pageSize);
+
+        var result = index.ListMethods(mvid, typeToken, query);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<ListMethodsPage>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var p = result.Page!;
+        var summary = p.Methods.Count == 0
+            ? $"No methods in {p.TypeFullName} matched the filter."
+            : $"{p.Methods.Count} method(s) in {p.TypeFullName}{(p.Truncated ? $", more available (nextCursor={p.NextCursor})" : "")}.";
+
+        NextActionHint hint;
+        if (p.Truncated)
+        {
+            hint = new NextActionHint("list_methods", "Fetch the next page using the returned cursor.",
+                new Dictionary<string, object?>
+                {
+                    ["typeHandle"] = HandleFormat.FormatType(p.ModuleVersionId, p.TypeMetadataToken),
+                    ["cursor"] = p.NextCursor,
+                });
+        }
+        else if (p.Methods.Count > 0)
+        {
+            var first = p.Methods[0];
+            hint = new NextActionHint("decompile_method", "Read the C# source of a method to understand its behaviour.",
+                new Dictionary<string, object?>
+                {
+                    ["moduleVersionId"] = first.ModuleVersionId.ToString("D"),
+                    ["metadataToken"] = $"0x{first.MetadataToken:X8}",
+                });
+        }
+        else
+        {
+            hint = new NextActionHint("list_methods", "Drop the namePattern filter and retry to see all methods of the type.",
+                new Dictionary<string, object?>
+                {
+                    ["typeHandle"] = HandleFormat.FormatType(p.ModuleVersionId, p.TypeMetadataToken),
+                });
+        }
+        return AssemblyResult.Ok(p, summary, hint);
+    }
+
+    [McpServerTool(
         Name = "find_callers",
         Title = "Find callers of a method (same- and cross-module)",
         Destructive = false,
@@ -444,6 +519,86 @@ public sealed class AssemblyTools
         mvid = load.Module!.ModuleVersionId;
         error = null;
         return true;
+    }
+
+    private static bool TryResolveTypeIdentity(IMetadataIndex index, string? typeHandle,
+        string? mvidOrPath, string? typeFullName,
+        out Guid mvid, out int typeToken, out AssemblyError? error)
+    {
+        mvid = Guid.Empty;
+        typeToken = 0;
+
+        if (!string.IsNullOrWhiteSpace(typeHandle))
+        {
+            if (!TryParseTypeHandle(typeHandle!, out mvid, out typeToken))
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse typeHandle '{typeHandle}'. Expected 't:<mvid>:0x<typeToken>'.");
+                return false;
+            }
+            error = null;
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(mvidOrPath) || string.IsNullOrWhiteSpace(typeFullName))
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                "either typeHandle, or both mvidOrPath and typeFullName, are required.");
+            return false;
+        }
+
+        if (!TryResolveModuleId(index, mvidOrPath, out mvid, out var modErr))
+        {
+            error = modErr;
+            return false;
+        }
+
+        if (!TryFindTypeByFullName(index, mvid, typeFullName!, out typeToken))
+        {
+            error = new AssemblyError(ErrorKinds.IdentityMalformed,
+                $"type '{typeFullName}' not found in module {mvid:D}.");
+            return false;
+        }
+        error = null;
+        return true;
+    }
+
+    private static bool TryParseTypeHandle(string handle, out Guid mvid, out int token)
+    {
+        mvid = Guid.Empty;
+        token = 0;
+        var s = handle.Trim();
+        if (!s.StartsWith("t:", StringComparison.Ordinal)) return false;
+        var rest = s.AsSpan(2);
+        var sep = rest.IndexOf(':');
+        if (sep < 0) return false;
+        if (!Guid.TryParse(rest[..sep], out mvid)) return false;
+        return TryParseToken(rest[(sep + 1)..].ToString(), out token);
+    }
+
+    private static bool TryFindTypeByFullName(IMetadataIndex index, Guid mvid, string typeFullName, out int token)
+    {
+        token = 0;
+        // Paginate through all types until we find an exact-match full name. The page size cap
+        // protects giant assemblies; we read the whole table only on misses, which is acceptable
+        // for the typeFullName entry-point (callers should prefer typeHandle from list_types).
+        int? cursor = null;
+        while (true)
+        {
+            var page = index.ListTypes(mvid, new ListTypesQuery(
+                Cursor: cursor, PageSize: ListTypesQuery.MaxPageSize));
+            if (!page.IsSuccess) return false;
+            foreach (var t in page.Page!.Types)
+            {
+                if (string.Equals(t.FullName, typeFullName, StringComparison.Ordinal))
+                {
+                    token = t.MetadataToken;
+                    return true;
+                }
+            }
+            if (!page.Page.Truncated) return false;
+            cursor = page.Page.NextCursor;
+        }
     }
 
     private static bool TryParseToken(string raw, out int token)

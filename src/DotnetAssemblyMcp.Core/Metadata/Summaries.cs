@@ -82,3 +82,34 @@ public readonly record struct ListTypesResult(ListTypesPage? Page, AssemblyError
     public static ListTypesResult Ok(ListTypesPage p) => new(p, null);
     public static ListTypesResult Fail(AssemblyError e) => new(null, e);
 }
+
+/// <summary>
+/// Filter / paging knobs accepted by <see cref="IMetadataIndex.ListMethods"/>. All fields
+/// except the type identity are optional; the defaults return up to <see cref="PageSize"/>
+/// methods of the type in metadata order.
+/// </summary>
+public sealed record ListMethodsQuery(
+    string? NamePattern = null,
+    int? Cursor = null,
+    int PageSize = ListMethodsQuery.DefaultPageSize)
+{
+    public const int DefaultPageSize = 50;
+    public const int MaxPageSize = 500;
+}
+
+/// <summary>Paginated result of <see cref="IMetadataIndex.ListMethods"/>.</summary>
+public sealed record ListMethodsPage(
+    Guid ModuleVersionId,
+    int TypeMetadataToken,
+    string TypeFullName,
+    IReadOnlyList<MethodSummary> Methods,
+    int? NextCursor,
+    bool Truncated);
+
+/// <summary>Result of <see cref="IMetadataIndex.ListMethods"/>.</summary>
+public readonly record struct ListMethodsResult(ListMethodsPage? Page, AssemblyError? Error)
+{
+    public bool IsSuccess => Page is not null;
+    public static ListMethodsResult Ok(ListMethodsPage p) => new(p, null);
+    public static ListMethodsResult Fail(AssemblyError e) => new(null, e);
+}

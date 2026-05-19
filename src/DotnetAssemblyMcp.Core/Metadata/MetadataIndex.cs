@@ -267,6 +267,83 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return ListTypesResult.Ok(new ListTypesPage(moduleVersionId, results, nextCursor, truncated));
     }
 
+    /// <inheritdoc />
+    public ListMethodsResult ListMethods(Guid moduleVersionId, int typeMetadataToken, ListMethodsQuery query)
+    {
+        query ??= new ListMethodsQuery();
+        if (moduleVersionId == Guid.Empty)
+            return ListMethodsResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
+        if (!_modules.TryGetValue(moduleVersionId, out var module))
+            return ListMethodsResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {moduleVersionId}."));
+
+        // typeMetadataToken must be a TypeDef (table 0x02). Anything else is a user error;
+        // we won't try to dereference TypeRefs/TypeSpecs here.
+        EntityHandle handle;
+        try { handle = (EntityHandle)MetadataTokens.Handle(typeMetadataToken); }
+        catch (ArgumentException ex)
+        {
+            return ListMethodsResult.Fail(new AssemblyError(
+                ErrorKinds.IdentityMalformed,
+                $"could not interpret token 0x{typeMetadataToken:X8} as a metadata handle.",
+                ex.Message));
+        }
+        if (handle.Kind != HandleKind.TypeDefinition)
+        {
+            return ListMethodsResult.Fail(new AssemblyError(
+                ErrorKinds.TokenWrongTable,
+                $"token 0x{typeMetadataToken:X8} is in table {handle.Kind}, expected TypeDefinition (0x02)."));
+        }
+
+        var typeHandle = (TypeDefinitionHandle)handle;
+        TypeDefinition td;
+        try { td = module.MD.GetTypeDefinition(typeHandle); }
+        catch (Exception ex) when (ex is BadImageFormatException or ArgumentException)
+        {
+            return ListMethodsResult.Fail(new AssemblyError(
+                ErrorKinds.TokenOutOfRange,
+                $"TypeDef token 0x{typeMetadataToken:X8} is not present in this module."));
+        }
+
+        var typeFullName = TypeName(module, td);
+        var methodHandles = td.GetMethods();
+        var pageSize = query.PageSize <= 0 ? ListMethodsQuery.DefaultPageSize
+            : Math.Min(query.PageSize, ListMethodsQuery.MaxPageSize);
+        var nameFilter = string.IsNullOrEmpty(query.NamePattern) ? null : query.NamePattern;
+        var startToken = query.Cursor is { } c && c > 0 ? c : 0;
+
+        var results = new List<MethodSummary>(pageSize);
+        int? nextCursor = null;
+        bool truncated = false;
+
+        foreach (var mh in methodHandles)
+        {
+            var token = MetadataTokens.GetToken(mh);
+            // Cursor is exclusive — a cursor value says "start at the row AFTER this token".
+            // Callers echo back NextCursor verbatim and naturally pick up where they left off.
+            if (token <= startToken) continue;
+
+            MethodSummary summary;
+            try { summary = SummarizeMethod(module, mh, token); }
+            catch (BadImageFormatException) { continue; }
+
+            if (nameFilter is not null
+                && summary.MethodName.IndexOf(nameFilter, StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+            if (results.Count == pageSize)
+            {
+                // Set the cursor to the last token we *included* so the next page starts strictly after it.
+                nextCursor = results[^1].MetadataToken;
+                truncated = true;
+                break;
+            }
+            results.Add(summary);
+        }
+
+        return ListMethodsResult.Ok(new ListMethodsPage(
+            moduleVersionId, typeMetadataToken, typeFullName, results, nextCursor, truncated));
+    }
+
     private static bool MatchesNamespace(string fullName, string nsPrefix)
     {
         // `fullName` is "NS.Outer+Inner" or just "Name". Match the bare namespace portion
