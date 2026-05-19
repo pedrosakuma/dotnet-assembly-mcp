@@ -839,7 +839,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     /// <inheritdoc />
-    public IlBodyResult GetIlBody(MethodIdentity identity, int maxBytes = 0)
+    public IlBodyResult GetIlBody(MethodIdentity identity, int maxBytes = 0, CancellationToken cancellationToken = default)
     {
         var common = TryResolveMethod(identity);
         if (common.Error is not null) return IlBodyResult.Fail(common.Error);
@@ -884,7 +884,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     /// <inheritdoc />
-    public IlScanReadResult ScanIl(MethodIdentity identity)
+    public IlScanReadResult ScanIl(MethodIdentity identity, CancellationToken cancellationToken = default)
     {
         var common = TryResolveMethod(identity);
         if (common.Error is not null) return IlScanReadResult.Fail(common.Error);
@@ -984,7 +984,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     /// <inheritdoc />
-    public FindCallersReadResult FindCallers(MethodIdentity callee)
+    public FindCallersReadResult FindCallers(MethodIdentity callee, CancellationToken cancellationToken = default)
     {
         var common = TryResolveMethod(callee);
         if (common.Error is not null) return FindCallersReadResult.Fail(common.Error);
@@ -995,7 +995,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var xref = _xrefCache.GetOrAdd(module.Mvid, _ =>
         {
             fromCache = false;
-            return LoadOrBuildXref(module);
+            return LoadOrBuildXref(module, cancellationToken);
         });
 
         var callers = new List<CallerRef>();
@@ -1017,10 +1017,11 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var modulesSearched = 1;
         foreach (var other in _modules.Values)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (other.Mvid == module.Mvid) continue;
             modulesSearched++;
 
-            var otherXref = _xrefCache.GetOrAdd(other.Mvid, _ => LoadOrBuildXref(other));
+            var otherXref = _xrefCache.GetOrAdd(other.Mvid, _ => LoadOrBuildXref(other, cancellationToken));
             foreach (var outbound in otherXref.Outbound)
             {
                 if (!outbound.Matches(calleeKey)) continue;
@@ -1547,18 +1548,18 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     private string XrefCachePath(Guid mvid) => Path.Combine(_xrefCacheDir, $"{mvid:N}.xref");
 
-    private XrefData LoadOrBuildXref(Module module)
+    private XrefData LoadOrBuildXref(Module module, CancellationToken cancellationToken = default)
     {
         var cachePath = XrefCachePath(module.Mvid);
         if (TryReadXrefCache(cachePath, module, out var cached))
             return cached;
 
-        var built = BuildXref(module);
+        var built = BuildXref(module, cancellationToken);
         TryWriteXrefCache(cachePath, module, built);
         return built;
     }
 
-    private static XrefData BuildXref(Module module)
+    private static XrefData BuildXref(Module module, CancellationToken cancellationToken = default)
     {
         var data = new XrefData(new Dictionary<int, List<int>>(), new List<OutboundCallRef>());
         // Per-method dedup sets reset between methods: a single method may emit the same call
@@ -1566,8 +1567,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         // pair (caller, target) recorded only once on either side.
         var intraSeen = new HashSet<long>();
         var outboundSeen = new HashSet<OutboundCallRef>();
+        var i = 0;
         foreach (var methodHandle in module.MD.MethodDefinitions)
         {
+            if ((++i & 0xFF) == 0) cancellationToken.ThrowIfCancellationRequested();
             var def = module.MD.GetMethodDefinition(methodHandle);
             if (def.RelativeVirtualAddress == 0) continue;
 

@@ -66,13 +66,14 @@ public interface IMetadataIndex
     /// </summary>
     /// <param name="identity">A resolved method identity.</param>
     /// <param name="maxBytes">Hard upper bound on the bytes encoded in the response. Pass 0 for the default (4 KiB).</param>
-    IlBodyResult GetIlBody(MethodIdentity identity, int maxBytes = 0);
+    /// <param name="cancellationToken">Cancels the call cooperatively. Long-running operations check this periodically.</param>
+    IlBodyResult GetIlBody(MethodIdentity identity, int maxBytes = 0, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Walks the IL of the method and returns the structural references it contains:
     /// outbound calls, field accesses, type uses and string literals. No decompilation.
     /// </summary>
-    IlScanReadResult ScanIl(MethodIdentity identity);
+    IlScanReadResult ScanIl(MethodIdentity identity, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Tier-4 reverse-call lookup: returns every method in the callee's own module whose IL
@@ -82,7 +83,7 @@ public interface IMetadataIndex
     /// changes). Cross-module callers are out of scope for this iteration and tracked
     /// separately.
     /// </summary>
-    FindCallersReadResult FindCallers(MethodIdentity callee);
+    FindCallersReadResult FindCallers(MethodIdentity callee, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Tier-1 type enumeration: walks the module's <c>TypeDef</c> table, filters by namespace,

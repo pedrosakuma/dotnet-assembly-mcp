@@ -22,7 +22,8 @@ public interface IDecompiler
     /// and <see cref="DecompiledMethod.Truncated"/> is set. Pass 0 to use the implementation
     /// default (16 KiB).
     /// </param>
-    DecompileResult Decompile(MethodIdentity identity, int maxChars = 0);
+    /// <param name="cancellationToken">Cancels the call cooperatively. Checked before invoking the decompiler engine.</param>
+    DecompileResult Decompile(MethodIdentity identity, int maxChars = 0, CancellationToken cancellationToken = default);
 
     /// <summary>Number of entries currently cached. Exposed for diagnostics/tests.</summary>
     int CachedEntries { get; }

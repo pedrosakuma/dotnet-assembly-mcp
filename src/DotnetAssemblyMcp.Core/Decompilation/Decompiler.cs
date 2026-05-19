@@ -65,10 +65,12 @@ public sealed class Decompiler : IDecompiler
     }
 
     /// <inheritdoc />
-    public DecompileResult Decompile(MethodIdentity identity, int maxChars = 0)
+    public DecompileResult Decompile(MethodIdentity identity, int maxChars = 0, CancellationToken cancellationToken = default)
     {
         if (identity is null)
             return DecompileResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "identity is required."));
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         var cap = maxChars > 0 ? maxChars : DefaultMaxChars;
         var key = new CacheKey(identity.ModuleVersionId, identity.MetadataToken, cap);
@@ -91,6 +93,8 @@ public sealed class Decompiler : IDecompiler
         var engineResult = GetOrCreateEngine(identity.ModuleVersionId, module);
         if (!engineResult.IsSuccess)
             return DecompileResult.Fail(engineResult.Error!);
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         string source;
         try

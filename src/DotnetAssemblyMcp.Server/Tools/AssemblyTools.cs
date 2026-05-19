@@ -310,7 +310,8 @@ public sealed class AssemblyTools
         [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
         [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
         [Description("Optional cap on returned characters. Pass 0 to use the server default (16 KiB).")] int maxChars = 0,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null)
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
+        CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
         {
@@ -333,7 +334,7 @@ public sealed class AssemblyTools
             return AssemblyResult.Fail<DecompiledMethod>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
 
         var identity = new MethodIdentity(mvid, token);
-        var result = decompiler.Decompile(identity, maxChars);
+        var result = decompiler.Decompile(identity, maxChars, cancellationToken);
         if (!result.IsSuccess)
         {
             return AssemblyResult.Fail<DecompiledMethod>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
@@ -366,7 +367,8 @@ public sealed class AssemblyTools
         [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
         [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
         [Description("Optional cap on raw IL bytes encoded in the response. Pass 0 for the server default (4 KiB).")] int maxBytes = 0,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null)
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
+        CancellationToken cancellationToken = default)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
             return AssemblyResult.Fail<IlMethodBody>(err!.Message, err, ErrorRecoveryHint(err));
@@ -374,7 +376,7 @@ public sealed class AssemblyTools
         if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
             return AssemblyResult.Fail<IlMethodBody>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
 
-        var result = index.GetIlBody(identity, maxBytes);
+        var result = index.GetIlBody(identity, maxBytes, cancellationToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<IlMethodBody>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
 
@@ -407,7 +409,8 @@ public sealed class AssemblyTools
         IMetadataIndex index,
         [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
         [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null)
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
+        CancellationToken cancellationToken = default)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
             return AssemblyResult.Fail<IlScanResult>(err!.Message, err, ErrorRecoveryHint(err));
@@ -415,7 +418,7 @@ public sealed class AssemblyTools
         if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
             return AssemblyResult.Fail<IlScanResult>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
 
-        var result = index.ScanIl(identity);
+        var result = index.ScanIl(identity, cancellationToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<IlScanResult>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
 
@@ -683,7 +686,8 @@ public sealed class AssemblyTools
         [Description("Optional CLR reflection-style full names for the declaring type's generic arguments (see get_method).")] string[]? genericTypeArguments = null,
         [Description("Optional CLR reflection-style full names for the method's generic arguments. When supplied, the caller list is narrowed to call sites whose MethodSpec.Instantiation matches element-wise (docs/handoff-contract.md §3.5).")] string[]? genericMethodArguments = null,
         [Description("Optional fast-path (§3.5): ModuleVersionId of a MethodSpec row. Paired with methodSpecMetadataToken.")] string? methodSpecModuleVersionId = null,
-        [Description("Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B). When supplied, derives the instantiation directly from metadata.")] string? methodSpecMetadataToken = null)
+        [Description("Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B). When supplied, derives the instantiation directly from metadata.")] string? methodSpecMetadataToken = null,
+        CancellationToken cancellationToken = default)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
             return AssemblyResult.Fail<FindCallersResult>(err!.Message, err, ErrorRecoveryHint(err));
@@ -705,7 +709,7 @@ public sealed class AssemblyTools
             MethodSpec = methodSpec,
         };
 
-        var result = index.FindCallers(identity);
+        var result = index.FindCallers(identity, cancellationToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<FindCallersResult>(result.Error!.Message, result.Error,
                 ErrorRecoveryHint(result.Error));
@@ -738,7 +742,8 @@ public sealed class AssemblyTools
         "whole table in a single call. Over the cap → batch_too_large.")]
     public static AssemblyResult<BatchResponse<MethodSummary>> GetMethods(
         IMetadataIndex index,
-        [Description("Method identities to resolve. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items)
+        [Description("Method identities to resolve. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items,
+        CancellationToken cancellationToken = default)
         => RunBatch<MethodSummary>(items, (item, _) =>
         {
             if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
@@ -754,7 +759,7 @@ public sealed class AssemblyTools
             identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs, MethodSpec = methodSpec };
             var r = index.Resolve(identity);
             return r.IsSuccess ? (r.Method, null) : (null, r.Error);
-        }, summarize: (ok, total) => $"Resolved {ok}/{total} method identit(ies).");
+        }, summarize: (ok, total) => $"Resolved {ok}/{total} method identit(ies).", cancellationToken: cancellationToken);
 
     [McpServerTool(
         Name = "scan_methods_il",
@@ -769,16 +774,17 @@ public sealed class AssemblyTools
         "failure; assemblyPathHint honored per item. Over the cap → batch_too_large.")]
     public static AssemblyResult<BatchResponse<IlScanResult>> ScanMethodsIl(
         IMetadataIndex index,
-        [Description("Method identities to scan. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items)
+        [Description("Method identities to scan. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items,
+        CancellationToken cancellationToken = default)
         => RunBatch<IlScanResult>(items, (item, _) =>
         {
             if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
                 return (null, err);
             if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
                 return (null, loadErr);
-            var r = index.ScanIl(identity);
+            var r = index.ScanIl(identity, cancellationToken);
             return r.IsSuccess ? (r.Scan, null) : (null, r.Error);
-        }, summarize: (ok, total) => $"Scanned {ok}/{total} method(s) for outbound references.");
+        }, summarize: (ok, total) => $"Scanned {ok}/{total} method(s) for outbound references.", cancellationToken: cancellationToken);
 
     [McpServerTool(
         Name = "find_callers_batch",
@@ -793,7 +799,8 @@ public sealed class AssemblyTools
         "across items so repeated calls within the same module pay the build cost once.")]
     public static AssemblyResult<BatchResponse<FindCallersResult>> FindCallersBatch(
         IMetadataIndex index,
-        [Description("Callee identities. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items)
+        [Description("Callee identities. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items,
+        CancellationToken cancellationToken = default)
         => RunBatch<FindCallersResult>(items, (item, _) =>
         {
             if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
@@ -807,9 +814,9 @@ public sealed class AssemblyTools
             if (!TryParseMethodSpec(item.MethodSpecModuleVersionId, item.MethodSpecMetadataToken, out var methodSpec, out pErr))
                 return (null, pErr);
             identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs, MethodSpec = methodSpec };
-            var r = index.FindCallers(identity);
+            var r = index.FindCallers(identity, cancellationToken);
             return r.IsSuccess ? (r.Result, null) : (null, r.Error);
-        }, summarize: (ok, total) => $"Resolved callers for {ok}/{total} callee(s).");
+        }, summarize: (ok, total) => $"Resolved callers for {ok}/{total} callee(s).", cancellationToken: cancellationToken);
 
     /// <summary>Server-wide cap on batch items. See issue #5.</summary>
     public const int BatchCap = 100;
@@ -876,7 +883,8 @@ public sealed class AssemblyTools
     private static AssemblyResult<BatchResponse<T>> RunBatch<T>(
         IReadOnlyList<MethodBatchItem> items,
         Func<MethodBatchItem, int, (T? Data, AssemblyError? Error)> handler,
-        Func<int, int, string> summarize)
+        Func<int, int, string> summarize,
+        CancellationToken cancellationToken = default)
         where T : class
     {
         if (items is null || items.Count == 0)
@@ -903,6 +911,7 @@ public sealed class AssemblyTools
         int ok = 0, fail = 0;
         for (int i = 0; i < items.Count; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var item = items[i];
             if (item is null)
             {
