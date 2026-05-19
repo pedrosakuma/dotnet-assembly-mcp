@@ -1,6 +1,6 @@
 # dotnet-assembly-mcp
 
-> **Status:** 15 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool` and Docker image. Latest release: [`v0.4.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases/tag/v0.4.0) — closed generic instantiations on the handoff (§3.5).
+> **Status:** 16 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool` and Docker image. Latest release: [`v0.6.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases/tag/v0.6.0) — surface-alignment + 10 audit fixes; v0.7.0 (in progress) folds in dual-audit follow-ups.
 
 An **MCP server** for *static* navigation of compiled .NET assemblies — types, methods, attributes, signatures, IL, cross-references, and on-demand decompilation — designed as a **token-efficient alternative to feeding source code into an LLM context**.
 

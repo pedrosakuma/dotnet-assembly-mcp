@@ -157,7 +157,7 @@ The three result buckets partition the input: every entry appears in exactly one
 
 ### 3.3 Batch tools — one round-trip for N hotspots
 
-`get_methods`, `scan_methods_il` and `find_callers_batch` are batch variants of the matching single-call tools, sized for the common case where a producer hotspot dump contains 10–25 identities.
+`get_methods`, `scan_methods_il`, `find_callers_batch` and `get_methods_source` are batch variants of the matching single-call tools, sized for the common case where a producer hotspot dump contains 10–25 identities.
 
 ```jsonc
 get_methods({
@@ -185,7 +185,7 @@ Contract:
 - **Per-item ok/error.** A single bad item does not fail the batch — only the cap check does.
 - **Hint composition.** Each item may carry its own `assemblyPathHint` (semantics in §3.1). Combined with §3.2's lazy hint map, a single `import_assembly_manifest` + one `get_methods` call is usually enough to enrich an entire hotspot table.
 - **Cap = 100.** Sending more items returns the structured error `batch_too_large`; split the input and retry.
-- **`decompile_method` is single-call by design** (heavy + cache-friendly only on a small N). `scan_methods_il` and `find_callers_batch` share the xref/scan caches across items.
+- **`decompile_method` is single-call by design** (heavy + cache-friendly only on a small N). `scan_methods_il`, `find_callers_batch` and `get_methods_source` share the xref/scan/PDB caches across items.
 
 ### 3.4 `get_method_source` — PDB second-chance for SourceLink
 
