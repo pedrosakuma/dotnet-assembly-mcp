@@ -90,6 +90,7 @@ static void RegisterCoreServices(IServiceCollection services, IConfiguration con
         new MetadataIndex(watchForChanges:
             configuration.GetValue("AssemblyMcp:WatchForChanges", defaultValue: true)));
     services.AddSingleton<IDecompiler, Decompiler>();
+    services.AddSingleton<IIlDisassembler, IlDisassembler>();
 }
 
 static Microsoft.Extensions.DependencyInjection.IMcpServerBuilder ConfigureMcpServer(IServiceCollection services) =>
