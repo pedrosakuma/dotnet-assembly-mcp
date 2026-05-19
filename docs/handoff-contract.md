@@ -156,6 +156,38 @@ Semantics:
 
 The three result buckets partition the input: every entry appears in exactly one of `loaded`, `registered` or `skipped`.
 
+### 3.3 Batch tools — one round-trip for N hotspots
+
+`get_methods`, `scan_methods_il` and `find_callers_batch` are batch variants of the matching single-call tools, sized for the common case where a producer hotspot dump contains 10–25 identities.
+
+```jsonc
+get_methods({
+  "items": [
+    { "moduleVersionId": "…", "metadataToken": "0x06000020", "assemblyPathHint": "/app/A.dll" },
+    { "moduleVersionId": "…", "metadataToken": "0x06000031", "assemblyPathHint": "/app/A.dll" }
+    // …
+  ]
+})
+→
+{
+  "results": [
+    { "index": 0, "item": {…}, "ok": true,  "data":  { /* same shape as get_method */ } },
+    { "index": 1, "item": {…}, "ok": false, "error": { "kind": "token_out_of_range", "message": "…" } }
+    // …
+  ],
+  "okCount":    1,
+  "errorCount": 1
+}
+```
+
+Contract:
+
+- **Order preserved.** `results[i]` corresponds to `items[i]`; `index` is echoed for clients that re-order on receipt.
+- **Per-item ok/error.** A single bad item does not fail the batch — only the cap check does.
+- **Hint composition.** Each item may carry its own `assemblyPathHint` (semantics in §3.1). Combined with §3.2's lazy hint map, a single `import_assembly_manifest` + one `get_methods` call is usually enough to enrich an entire hotspot table.
+- **Cap = 100.** Sending more items returns the structured error `batch_too_large`; split the input and retry.
+- **`decompile_method` is single-call by design** (heavy + cache-friendly only on a small N). `scan_methods_il` and `find_callers_batch` share the xref/scan caches across items.
+
 ---
 
 ## 4. Error shape
@@ -169,6 +201,7 @@ When resolution fails, the consumer MUST return a structured error with one of t
 | `token_out_of_range` | The `MethodDef` row id encoded in `metadataToken` exceeds the module's `MethodDef` table size. |
 | `token_wrong_table`  | `metadataToken` decodes to a table other than `MethodDef` (`0x06`). |
 | `identity_malformed` | Required field missing or wrong type. |
+| `batch_too_large`    | A batch tool received more than 100 items in a single call. Split the input and retry. |
 
 Errors SHOULD include the offending identity (echoed back) to help the agent debug without a second round trip.
 

@@ -33,4 +33,7 @@ public static class ErrorKinds
 
     /// <summary>A parameter failed validation before any resolution was attempted.</summary>
     public const string InvalidArgument = "invalid_argument";
+
+    /// <summary>A batch call exceeded the server-side cap on items per request.</summary>
+    public const string BatchTooLarge = "batch_too_large";
 }

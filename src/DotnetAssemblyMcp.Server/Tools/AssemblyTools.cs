@@ -682,6 +682,149 @@ public sealed class AssemblyTools
                 }));
     }
 
+    [McpServerTool(
+        Name = "get_methods",
+        Title = "Batch: resolve many MethodIdentities in one call",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Batch variant of get_method. Resolves up to " + BatchCapStr + " (moduleVersionId, " +
+        "metadataToken) pairs in one round-trip. Per-item success/failure: one bad token does " +
+        "not fail the batch. Each item may carry an assemblyPathHint (same semantics as " +
+        "get_method). Use after a dotnet-diagnostics-mcp top-N hotspot dump to enrich the " +
+        "whole table in a single call. Over the cap → batch_too_large.")]
+    public static AssemblyResult<BatchResponse<MethodSummary>> GetMethods(
+        IMetadataIndex index,
+        [Description("Method identities to resolve. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items)
+        => RunBatch<MethodSummary>(items, (item, _) =>
+        {
+            if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
+                return (null, err);
+            if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
+                return (null, loadErr);
+            var r = index.Resolve(identity);
+            return r.IsSuccess ? (r.Method, null) : (null, r.Error);
+        }, summarize: (ok, total) => $"Resolved {ok}/{total} method identit(ies).");
+
+    [McpServerTool(
+        Name = "scan_methods_il",
+        Title = "Batch: scan IL of many methods in one call",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Batch variant of scan_method_il. Walks the IL of up to " + BatchCapStr + " methods " +
+        "and returns each one's outbound calls/fields/types/strings. Per-item success/" +
+        "failure; assemblyPathHint honored per item. Over the cap → batch_too_large.")]
+    public static AssemblyResult<BatchResponse<IlScanResult>> ScanMethodsIl(
+        IMetadataIndex index,
+        [Description("Method identities to scan. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items)
+        => RunBatch<IlScanResult>(items, (item, _) =>
+        {
+            if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
+                return (null, err);
+            if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
+                return (null, loadErr);
+            var r = index.ScanIl(identity);
+            return r.IsSuccess ? (r.Scan, null) : (null, r.Error);
+        }, summarize: (ok, total) => $"Scanned {ok}/{total} method(s) for outbound references.");
+
+    [McpServerTool(
+        Name = "find_callers_batch",
+        Title = "Batch: find callers of many methods in one call",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Batch variant of find_callers. Reverse-resolves up to " + BatchCapStr + " callees " +
+        "in one round-trip; per-item success/failure. The lazily-built xref cache is shared " +
+        "across items so repeated calls within the same module pay the build cost once.")]
+    public static AssemblyResult<BatchResponse<FindCallersResult>> FindCallersBatch(
+        IMetadataIndex index,
+        [Description("Callee identities. At most " + BatchCapStr + " items.")] IReadOnlyList<MethodBatchItem> items)
+        => RunBatch<FindCallersResult>(items, (item, _) =>
+        {
+            if (!TryParseIdentity(item.ModuleVersionId, item.MetadataToken, out var identity, out var err))
+                return (null, err);
+            if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
+                return (null, loadErr);
+            var r = index.FindCallers(identity);
+            return r.IsSuccess ? (r.Result, null) : (null, r.Error);
+        }, summarize: (ok, total) => $"Resolved callers for {ok}/{total} callee(s).");
+
+    /// <summary>Server-wide cap on batch items. See issue #5.</summary>
+    public const int BatchCap = 100;
+    private const string BatchCapStr = "100";
+
+    private static AssemblyResult<BatchResponse<T>> RunBatch<T>(
+        IReadOnlyList<MethodBatchItem> items,
+        Func<MethodBatchItem, int, (T? Data, AssemblyError? Error)> handler,
+        Func<int, int, string> summarize)
+        where T : class
+    {
+        if (items is null || items.Count == 0)
+        {
+            var empty = new BatchResponse<T>(Array.Empty<BatchItemResult<T>>(), 0, 0);
+            return AssemblyResult.Ok(
+                empty,
+                "Batch is empty — nothing to do.",
+                new NextActionHint("list_assemblies", "Confirm what is loaded before issuing a batch."));
+        }
+        if (items.Count > BatchCap)
+        {
+            var err = new AssemblyError(
+                ErrorKinds.BatchTooLarge,
+                $"batch contains {items.Count} items, max is {BatchCap}.");
+            return AssemblyResult.Fail<BatchResponse<T>>(
+                err.Message, err,
+                new NextActionHint(
+                    "get_methods",
+                    $"Split the input into chunks of at most {BatchCap} items and re-issue."));
+        }
+
+        var results = new List<BatchItemResult<T>>(items.Count);
+        int ok = 0, fail = 0;
+        for (int i = 0; i < items.Count; i++)
+        {
+            var item = items[i];
+            if (item is null)
+            {
+                var nullErr = new AssemblyError(ErrorKinds.InvalidArgument, "batch item is null.");
+                results.Add(new BatchItemResult<T>(i, new MethodBatchItem(string.Empty, string.Empty), false, null, nullErr));
+                fail++;
+                continue;
+            }
+            var (data, error) = handler(item, i);
+            if (data is not null && error is null)
+            {
+                results.Add(new BatchItemResult<T>(i, item, true, data, null));
+                ok++;
+            }
+            else
+            {
+                results.Add(new BatchItemResult<T>(i, item, false,
+                    null,
+                    error ?? new AssemblyError(ErrorKinds.InvalidArgument, "handler returned no data and no error.")));
+                fail++;
+            }
+        }
+
+        var response = new BatchResponse<T>(results, ok, fail);
+        var summary = summarize(ok, items.Count);
+        NextActionHint next = fail > 0
+            ? new NextActionHint(
+                "get_method",
+                $"{fail} item(s) failed — inspect each result's 'error.kind' and re-issue affected items individually.")
+            : new NextActionHint(
+                "decompile_method",
+                "Drill into a specific hotspot's source after the batch enrichment.");
+        return AssemblyResult.Ok(response, summary, next);
+    }
+
     private static bool TryParseIdentity(string moduleVersionId, string metadataToken,
         out MethodIdentity identity, out AssemblyError? error)
     {
