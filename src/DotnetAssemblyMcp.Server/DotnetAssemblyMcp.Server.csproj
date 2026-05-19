@@ -2,9 +2,26 @@
 
   <PropertyGroup>
     <UserSecretsId>dotnet-assembly-mcp-server</UserSecretsId>
-    <Description>MCP server exposing dotnet-assembly-mcp Core navigation primitives via Streamable HTTP transport.</Description>
+    <Description>MCP server exposing dotnet-assembly-mcp Core navigation primitives. Supports stdio (local tool installs) and Streamable HTTP (Docker / sidecar) transports.</Description>
     <RootNamespace>DotnetAssemblyMcp.Server</RootNamespace>
     <AssemblyName>DotnetAssemblyMcp.Server</AssemblyName>
+  </PropertyGroup>
+
+  <!-- Distribution as a global dotnet tool. Install with
+       'dotnet tool install -g dotnet-assembly-mcp' then invoke
+       'dotnet-assembly-mcp' from any MCP client (Claude Desktop, Cursor,
+       VS Code, Copilot CLI); pass the stdio flag in the client args.
+       The HTTP path remains available when the stdio flag is absent. -->
+  <PropertyGroup>
+    <PackAsTool>true</PackAsTool>
+    <IsPackable>true</IsPackable>
+    <ToolCommandName>dotnet-assembly-mcp</ToolCommandName>
+    <PackageId>dotnet-assembly-mcp</PackageId>
+    <PackageTags>mcp;dotnet;assembly;metadata;decompiler;diagnostics;model-context-protocol</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/pedrosakuma/dotnet-assembly-mcp</PackageProjectUrl>
+    <IncludeBuildOutput>true</IncludeBuildOutput>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,6 +35,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="..\..\docs\handoff-contract.md" Link="Resources\handoff-contract.md" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>
