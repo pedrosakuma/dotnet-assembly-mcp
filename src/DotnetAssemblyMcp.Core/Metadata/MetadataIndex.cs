@@ -344,6 +344,79 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             moduleVersionId, typeMetadataToken, typeFullName, results, nextCursor, truncated));
     }
 
+    /// <inheritdoc />
+    public FindMethodResult FindMethod(Guid moduleVersionId, FindMethodQuery query)
+    {
+        if (query is null)
+            return FindMethodResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "query is required."));
+        if (string.IsNullOrEmpty(query.NamePattern))
+            return FindMethodResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "namePattern is required."));
+        if (moduleVersionId == Guid.Empty)
+            return FindMethodResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
+        if (!_modules.TryGetValue(moduleVersionId, out var module))
+            return FindMethodResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {moduleVersionId}."));
+
+        System.Text.RegularExpressions.Regex regex;
+        try
+        {
+            regex = new System.Text.RegularExpressions.Regex(query.NamePattern,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                | System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+                TimeSpan.FromMilliseconds(200));
+        }
+        catch (ArgumentException ex)
+        {
+            return FindMethodResult.Fail(new AssemblyError(
+                ErrorKinds.InvalidArgument,
+                $"namePattern is not a valid regular expression: {ex.Message}"));
+        }
+
+        var pageSize = query.PageSize <= 0 ? FindMethodQuery.DefaultPageSize
+            : Math.Min(query.PageSize, FindMethodQuery.MaxPageSize);
+        var sigFilter = string.IsNullOrEmpty(query.SignatureContains) ? null : query.SignatureContains;
+        var startToken = query.Cursor is { } c && c > 0 ? c : 0;
+
+        var results = new List<MethodMatch>(pageSize);
+        int? nextCursor = null;
+        bool truncated = false;
+
+        foreach (var mh in module.MD.MethodDefinitions)
+        {
+            var token = MetadataTokens.GetToken(mh);
+            if (token <= startToken) continue;
+
+            string methodName;
+            try { methodName = module.MD.GetString(module.MD.GetMethodDefinition(mh).Name); }
+            catch (BadImageFormatException) { continue; }
+
+            bool nameMatches;
+            try { nameMatches = regex.IsMatch(methodName); }
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException) { continue; }
+            if (!nameMatches) continue;
+
+            MethodSummary summary;
+            try { summary = SummarizeMethod(module, mh, token); }
+            catch (BadImageFormatException) { continue; }
+
+            if (sigFilter is not null
+                && summary.Signature.IndexOf(sigFilter, StringComparison.OrdinalIgnoreCase) < 0) continue;
+
+            if (results.Count == pageSize)
+            {
+                nextCursor = results[^1].MetadataToken;
+                truncated = true;
+                break;
+            }
+            results.Add(new MethodMatch(
+                summary.ModuleVersionId, summary.MetadataToken, summary.Handle,
+                summary.TypeFullName, summary.MethodName, summary.Signature));
+        }
+
+        return FindMethodResult.Ok(new FindMethodPage(
+            moduleVersionId, query.NamePattern, results, nextCursor, truncated));
+    }
+
     private static bool MatchesNamespace(string fullName, string nsPrefix)
     {
         // `fullName` is "NS.Outer+Inner" or just "Name". Match the bare namespace portion

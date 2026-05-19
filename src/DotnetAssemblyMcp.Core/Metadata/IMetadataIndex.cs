@@ -69,6 +69,16 @@ public interface IMetadataIndex
     /// <param name="typeMetadataToken">TypeDef metadata token (table 0x02) of the declaring type.</param>
     /// <param name="query">Filter and paging options.</param>
     ListMethodsResult ListMethods(Guid moduleVersionId, int typeMetadataToken, ListMethodsQuery query);
+
+    /// <summary>
+    /// Module-wide method search. Matches every <c>MethodDef</c> whose short name matches the
+    /// supplied regex (and optionally whose signature contains a substring). Iterates the
+    /// <c>MethodDef</c> table directly so it is O(n) per call; pagination uses the metadata
+    /// token as an exclusive cursor.
+    /// </summary>
+    /// <param name="moduleVersionId">MVID of a loaded module.</param>
+    /// <param name="query">Required name pattern plus optional signature substring, cursor and page size.</param>
+    FindMethodResult FindMethod(Guid moduleVersionId, FindMethodQuery query);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

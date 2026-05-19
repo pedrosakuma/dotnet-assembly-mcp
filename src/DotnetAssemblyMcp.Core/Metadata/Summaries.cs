@@ -113,3 +113,44 @@ public readonly record struct ListMethodsResult(ListMethodsPage? Page, AssemblyE
     public static ListMethodsResult Ok(ListMethodsPage p) => new(p, null);
     public static ListMethodsResult Fail(AssemblyError e) => new(null, e);
 }
+
+/// <summary>
+/// Filter / paging knobs accepted by <see cref="IMetadataIndex.FindMethod"/>. The name pattern
+/// is treated as a regular expression matched against the method's short name (not the full
+/// signature). <see cref="SignatureContains"/> applies a case-insensitive substring filter on
+/// the decoded signature ('void NS.Type.Method(int)' format).
+/// </summary>
+public sealed record FindMethodQuery(
+    string NamePattern,
+    string? SignatureContains = null,
+    int? Cursor = null,
+    int PageSize = FindMethodQuery.DefaultPageSize)
+{
+    public const int DefaultPageSize = 20;
+    public const int MaxPageSize = 200;
+}
+
+/// <summary>A single hit returned by <see cref="IMetadataIndex.FindMethod"/>.</summary>
+public sealed record MethodMatch(
+    Guid ModuleVersionId,
+    int MetadataToken,
+    string Handle,
+    string TypeFullName,
+    string MethodName,
+    string Signature);
+
+/// <summary>Paginated result of <see cref="IMetadataIndex.FindMethod"/>.</summary>
+public sealed record FindMethodPage(
+    Guid ModuleVersionId,
+    string NamePattern,
+    IReadOnlyList<MethodMatch> Matches,
+    int? NextCursor,
+    bool Truncated);
+
+/// <summary>Result of <see cref="IMetadataIndex.FindMethod"/>.</summary>
+public readonly record struct FindMethodResult(FindMethodPage? Page, AssemblyError? Error)
+{
+    public bool IsSuccess => Page is not null;
+    public static FindMethodResult Ok(FindMethodPage p) => new(p, null);
+    public static FindMethodResult Fail(AssemblyError e) => new(null, e);
+}

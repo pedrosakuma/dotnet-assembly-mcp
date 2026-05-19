@@ -427,6 +427,76 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "find_method",
+        Title = "Search methods across a whole module by name regex",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Module-wide method search. Matches every MethodDef whose short name matches the " +
+        "supplied regular expression (case-insensitive) and, optionally, whose signature " +
+        "contains a substring. Returns hits with the canonical 'm:<mvid>:0x<token>' handle " +
+        "ready to feed into get_method / decompile_method / find_callers. Use this when you " +
+        "do not yet have a type in mind; otherwise prefer list_methods which is cheaper.")]
+    public static AssemblyResult<FindMethodPage> FindMethod(
+        IMetadataIndex index,
+        [Description("Either the MVID GUID ('D' format) of a previously loaded module, or an absolute path to a managed PE assembly (will be loaded on demand).")] string mvidOrPath,
+        [Description("Regular expression matched (case-insensitive) against each method's short name.")] string namePattern,
+        [Description("Optional case-insensitive substring filter on the decoded signature (e.g. 'CancellationToken').")] string? signatureContains = null,
+        [Description("Optional pagination cursor returned in a prior call (exclusive lower bound on MethodDef token).")] int? cursor = null,
+        [Description("Max matches per page (default 20, capped at 200).")] int pageSize = FindMethodQuery.DefaultPageSize)
+    {
+        if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var resolveErr))
+            return AssemblyResult.Fail<FindMethodPage>(resolveErr!.Message, resolveErr,
+                new NextActionHint("list_assemblies", "Inspect which modules are loaded."));
+
+        var query = new FindMethodQuery(namePattern, signatureContains, cursor, pageSize);
+        var result = index.FindMethod(mvid, query);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<FindMethodPage>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var p = result.Page!;
+        var summary = p.Matches.Count == 0
+            ? $"No method matched /{p.NamePattern}/ in module {p.ModuleVersionId:D}."
+            : $"{p.Matches.Count} match(es) for /{p.NamePattern}/{(p.Truncated ? $", more available (nextCursor={p.NextCursor})" : "")}.";
+
+        NextActionHint hint;
+        if (p.Truncated)
+        {
+            hint = new NextActionHint("find_method", "Fetch the next page of matches using the returned cursor.",
+                new Dictionary<string, object?>
+                {
+                    ["mvidOrPath"] = p.ModuleVersionId.ToString("D"),
+                    ["namePattern"] = p.NamePattern,
+                    ["signatureContains"] = signatureContains,
+                    ["cursor"] = p.NextCursor,
+                });
+        }
+        else if (p.Matches.Count > 0)
+        {
+            var first = p.Matches[0];
+            hint = new NextActionHint("decompile_method", "Read the C# source of the top match.",
+                new Dictionary<string, object?>
+                {
+                    ["moduleVersionId"] = first.ModuleVersionId.ToString("D"),
+                    ["metadataToken"] = $"0x{first.MetadataToken:X8}",
+                });
+        }
+        else
+        {
+            hint = new NextActionHint("find_method", "Relax the namePattern or drop signatureContains and retry.",
+                new Dictionary<string, object?>
+                {
+                    ["mvidOrPath"] = p.ModuleVersionId.ToString("D"),
+                    ["namePattern"] = ".*",
+                });
+        }
+        return AssemblyResult.Ok(p, summary, hint);
+    }
+
+    [McpServerTool(
         Name = "find_callers",
         Title = "Find callers of a method (same- and cross-module)",
         Destructive = false,
