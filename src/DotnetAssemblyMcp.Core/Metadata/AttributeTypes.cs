@@ -13,6 +13,9 @@ public enum AttributeTargetKind
     Type,
     Method,
     Parameter,
+    Field,
+    Property,
+    Event,
 }
 
 /// <summary>
@@ -40,6 +43,13 @@ public sealed record AttributeTarget(
     /// </summary>
     public static AttributeTarget Parameter(Guid mvid, int methodToken, int parameterSequence) =>
         new(AttributeTargetKind.Parameter, mvid, methodToken, parameterSequence);
+
+    public static AttributeTarget Field(Guid mvid, int fieldToken) =>
+        new(AttributeTargetKind.Field, mvid, fieldToken, 0);
+    public static AttributeTarget Property(Guid mvid, int propertyToken) =>
+        new(AttributeTargetKind.Property, mvid, propertyToken, 0);
+    public static AttributeTarget Event(Guid mvid, int eventToken) =>
+        new(AttributeTargetKind.Event, mvid, eventToken, 0);
 }
 
 /// <summary>

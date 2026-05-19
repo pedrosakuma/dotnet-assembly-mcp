@@ -148,6 +148,15 @@ public interface IMetadataIndex
     /// are tracked separately (issue #39 follow-up).
     /// </summary>
     ListDerivedTypesResult ListDerivedTypes(Guid moduleVersionId, int baseTypeMetadataToken, ListDerivedTypesQuery query);
+
+    /// <summary>
+    /// Enumerates the structural members (fields, properties, events) of a single type. Optional
+    /// <see cref="ListMembersQuery.Kind"/> narrows the kind; <see cref="ListMembersQuery.NamePattern"/>
+    /// and <see cref="ListMembersQuery.SignatureContains"/> apply case-insensitive substring filters
+    /// (no regex, mirroring the existing <c>list_methods</c> ergonomics). Methods are intentionally
+    /// excluded — they have their own <see cref="ListMethods"/> surface.
+    /// </summary>
+    ListMembersResult ListMembers(Guid moduleVersionId, int typeMetadataToken, ListMembersQuery query);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

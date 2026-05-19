@@ -946,16 +946,17 @@ public sealed class AssemblyTools
         UseStructuredContent = true)]
     [Description(
         "Enumerates the CustomAttribute rows attached to the entity identified by 'target'. " +
-        "Accepts a polymorphic handle: 'a:<mvid>' (assembly), 't:<mvid>:0x<token>' (type — " +
-        "same shape returned by list_types), 'm:<mvid>:0x<token>' (method — same shape " +
-        "returned by get_method / list_methods) or 'pa:<mvid>:0x<methodToken>:<sequence>' " +
-        "(parameter; sequence 0 targets the return value). Pure metadata — no IL decoded, no " +
-        "decompilation. Each entry includes the attribute's full type name, its declaring " +
-        "assembly's simple name (when cross-module), the decoded constructor arguments, and " +
-        "the named arguments (properties / fields set in the attribute usage).")]
+        "Accepts a polymorphic handle: 'a:<mvid>' (assembly), 't:<mvid>:0x<token>' (type), " +
+        "'m:<mvid>:0x<token>' (method), 'pa:<mvid>:0x<methodToken>:<sequence>' (parameter; " +
+        "sequence 0 = return value), 'f:<mvid>:0x<token>' (field), 'p:<mvid>:0x<token>' " +
+        "(property), or 'e:<mvid>:0x<token>' (event — same handles list_members returns). " +
+        "Pure metadata — no IL decoded, no decompilation. Each entry includes the " +
+        "attribute's full type name, its declaring assembly's simple name (when " +
+        "cross-module), the decoded constructor arguments, and the named arguments " +
+        "(properties / fields set in the attribute usage).")]
     public static AssemblyResult<ListAttributesPage> ListAttributes(
         IMetadataIndex index,
-        [Description("Target handle. One of: 'a:<mvid>', 't:<mvid>:0x<typeToken>', 'm:<mvid>:0x<methodToken>', 'pa:<mvid>:0x<methodToken>:<sequence>' (sequence 0 = return value).")] string target,
+        [Description("Target handle. One of: 'a:<mvid>', 't:<mvid>:0x<typeToken>', 'm:<mvid>:0x<methodToken>', 'pa:<mvid>:0x<methodToken>:<sequence>' (sequence 0 = return value), 'f:<mvid>:0x<fieldToken>', 'p:<mvid>:0x<propertyToken>', 'e:<mvid>:0x<eventToken>'.")] string target,
         [Description("Optional case-insensitive substring filter on the attribute type's full name (e.g. 'Authorize').")] string? nameContains = null,
         [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
         [Description("Max attributes per page (default 50, capped at 500).")] int pageSize = ListAttributesQuery.DefaultPageSize)
@@ -1094,6 +1095,70 @@ public sealed class AssemblyTools
         return AssemblyResult.Ok(p, summary, hint);
     }
 
+    [McpServerTool(
+        Name = "list_members",
+        Title = "List fields, properties, and events of a type",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Enumerates the structural members of a single type — fields, properties, and " +
+        "events — with paging and optional kind / name / signature filters. Methods are " +
+        "intentionally excluded; use list_methods for those (it carries IL-size + generic " +
+        "arity which don't apply to fields/properties/events). Each MemberSummary carries a " +
+        "prefix-tagged handle ('f:', 'p:', 'e:') accepted by list_attributes as a target.")]
+    public static AssemblyResult<ListMembersPage> ListMembers(
+        IMetadataIndex index,
+        [Description("Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.")] string? typeHandle = null,
+        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
+        [Description("Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null,
+        [Description("Optional kind filter: Field, Property, or Event. Omit to return all kinds in metadata order (fields, then properties, then events).")] MemberKind? kind = null,
+        [Description("Optional case-insensitive substring filter on the member name.")] string? namePattern = null,
+        [Description("Optional case-insensitive substring filter on the rendered signature (e.g. 'int', 'EventHandler').")] string? signatureContains = null,
+        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
+        [Description("Max members per page (default 50, capped at 500).")] int pageSize = ListMembersQuery.DefaultPageSize)
+    {
+        if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
+            out var mvid, out var typeToken, out var resolveErr))
+        {
+            var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
+                ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
+                : ErrorRecoveryHint(resolveErr);
+            return AssemblyResult.Fail<ListMembersPage>(resolveErr.Message, resolveErr, resolveHint);
+        }
+
+        var query = new ListMembersQuery(
+            Kind: kind,
+            NamePattern: string.IsNullOrEmpty(namePattern) ? null : namePattern,
+            SignatureContains: string.IsNullOrEmpty(signatureContains) ? null : signatureContains,
+            Cursor: cursor > 0 ? cursor : null,
+            PageSize: pageSize);
+
+        var result = index.ListMembers(mvid, typeToken, query);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<ListMembersPage>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var p = result.Page!;
+        var summary = p.Members.Count == 0
+            ? $"No members in {p.TypeFullName} matched the filter."
+            : $"{p.Members.Count} member(s) in {p.TypeFullName}{(p.Truncated ? $", more available (nextCursor={p.NextCursor})" : "")}.";
+        NextActionHint hint = p.Truncated
+            ? new NextActionHint("list_members", "Fetch the next page using the returned cursor.",
+                new Dictionary<string, object?>
+                {
+                    ["typeHandle"] = HandleFormat.FormatType(p.ModuleVersionId, p.TypeMetadataToken),
+                    ["cursor"] = p.NextCursor,
+                })
+            : new NextActionHint("list_attributes", "Inspect the custom attributes attached to one of the listed members.",
+                new Dictionary<string, object?>
+                {
+                    ["target"] = p.Members.Count > 0 ? p.Members[0].Handle : null,
+                });
+        return AssemblyResult.Ok(p, summary, hint);
+    }
+
     private static bool TryParseAttributeTarget(string target, out AttributeTarget parsed, out AssemblyError? error)
     {
         parsed = null!;
@@ -1175,9 +1240,57 @@ public sealed class AssemblyTools
             error = null;
             return true;
         }
+        // 'pa:' must be tested before 'p:' (parameter takes precedence).
+        if (s.StartsWith("f:", StringComparison.Ordinal))
+        {
+            if (!TryParsePrefixedHandle(s, 2, out var mvid, out var token))
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse '{target}' as 'f:<mvid>:0x<fieldToken>'.");
+                return false;
+            }
+            parsed = AttributeTarget.Field(mvid, token);
+            error = null;
+            return true;
+        }
+        if (s.StartsWith("p:", StringComparison.Ordinal))
+        {
+            if (!TryParsePrefixedHandle(s, 2, out var mvid, out var token))
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse '{target}' as 'p:<mvid>:0x<propertyToken>'.");
+                return false;
+            }
+            parsed = AttributeTarget.Property(mvid, token);
+            error = null;
+            return true;
+        }
+        if (s.StartsWith("e:", StringComparison.Ordinal))
+        {
+            if (!TryParsePrefixedHandle(s, 2, out var mvid, out var token))
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse '{target}' as 'e:<mvid>:0x<eventToken>'.");
+                return false;
+            }
+            parsed = AttributeTarget.Event(mvid, token);
+            error = null;
+            return true;
+        }
         error = new AssemblyError(ErrorKinds.InvalidArgument,
-            $"unknown target prefix in '{target}'. Expected one of: 'a:', 't:', 'm:', 'pa:'.");
+            $"unknown target prefix in '{target}'. Expected one of: 'a:', 't:', 'm:', 'pa:', 'f:', 'p:', 'e:'.");
         return false;
+    }
+
+    private static bool TryParsePrefixedHandle(string s, int prefixLen, out Guid mvid, out int token)
+    {
+        mvid = default;
+        token = 0;
+        var rest = s.AsSpan(prefixLen);
+        var sep = rest.IndexOf(':');
+        if (sep < 0) return false;
+        if (!Guid.TryParse(rest[..sep], out mvid)) return false;
+        return TryParseToken(rest[(sep + 1)..].ToString(), out token);
     }
 
     private static AssemblyResult<BatchResponse<T>> RunBatch<T>(

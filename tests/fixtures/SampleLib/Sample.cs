@@ -5,7 +5,7 @@ using SampleLib;
 
 namespace SampleLib;
 
-[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method | AttributeTargets.Parameter | AttributeTargets.Assembly,
+[AttributeUsage(AttributeTargets.Class | AttributeTargets.Method | AttributeTargets.Parameter | AttributeTargets.Assembly | AttributeTargets.Event | AttributeTargets.Property | AttributeTargets.Field,
     AllowMultiple = true)]
 public sealed class FixtureMarkerAttribute : Attribute
 {
@@ -120,4 +120,30 @@ public sealed class Puppy : Dog
 public sealed class ConsoleLogger : ILogger
 {
     public void Log(string message) => System.Console.WriteLine(message);
+}
+
+// POCO / DTO with a mix of field, property, and event for list_members coverage.
+public sealed class CustomerDto
+{
+    public const string DefaultRegion = "us-east";
+    public static readonly int Schema = 1;
+    private readonly Guid _id;
+#pragma warning disable CA1051 // public field is intentional — exercises list_members field-attribute formatting.
+    public int Age;
+#pragma warning restore CA1051
+
+    public CustomerDto(Guid id, string name)
+    {
+        _id = id;
+        Name = name;
+    }
+
+    public string Name { get; init; }
+    public string? Email { get; set; }
+    public Guid Id => _id;
+
+    [FixtureMarker("on-changed")]
+    public event System.EventHandler<string>? Changed;
+
+    public void RaiseChanged(string field) => Changed?.Invoke(this, field);
 }
