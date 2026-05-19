@@ -1,6 +1,21 @@
 using DotnetAssemblyMcp.Core.Decompilation;
 using DotnetAssemblyMcp.Core.Metadata;
+using DotnetAssemblyMcp.Server;
 using DotnetAssemblyMcp.Server.Tools;
+
+// `--health-check` short-circuits before any host is built: probe the HTTP
+// `/health` endpoint and exit 0/1. Used by systemd `ExecStartPre`, the Docker
+// HEALTHCHECK fallback, and Kubernetes `exec` probes when the network shape
+// makes httpGet awkward. Default URL matches our pinned port (8788); override
+// via `--url=` or `ASSEMBLY_MCP_HEALTH_URL` env var.
+if (args.Contains("--health-check"))
+{
+    var healthUrl =
+        args.FirstOrDefault(a => a.StartsWith("--url=", StringComparison.Ordinal))?["--url=".Length..]
+        ?? Environment.GetEnvironmentVariable("ASSEMBLY_MCP_HEALTH_URL")
+        ?? "http://127.0.0.1:8788/health";
+    return await HealthCheck.RunAsync(healthUrl).ConfigureAwait(false);
+}
 
 // Transport selection. `dotnet-assembly-mcp` is dual-mode:
 //
@@ -37,7 +52,7 @@ if (useStdio)
         .WithStdioServerTransport();
 
     await stdioBuilder.Build().RunAsync().ConfigureAwait(false);
-    return;
+    return 0;
 }
 
 var builder = WebApplication.CreateBuilder(args);
@@ -59,6 +74,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapMcp("/mcp");
 
 app.Run();
+return 0;
 
 static void RegisterCoreServices(IServiceCollection services, IConfiguration configuration)
 {

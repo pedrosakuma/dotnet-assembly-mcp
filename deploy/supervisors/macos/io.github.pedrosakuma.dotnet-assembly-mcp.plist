@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+launchd LaunchAgent template for dotnet-assembly-mcp (HTTP transport).
+
+Install (per-user, no sudo required):
+
+    mkdir -p ~/Library/LaunchAgents ~/Library/Logs/dotnet-assembly-mcp
+    cp deploy/supervisors/macos/io.github.pedrosakuma.dotnet-assembly-mcp.plist \
+       ~/Library/LaunchAgents/
+    # Edit the file in-place to substitute your $HOME if /Users/REPLACE_ME below
+    # is not your real home directory (LaunchAgents resolve env vars sparingly).
+    launchctl bootstrap gui/"$(id -u)" \
+        ~/Library/LaunchAgents/io.github.pedrosakuma.dotnet-assembly-mcp.plist
+    launchctl kickstart -k gui/"$(id -u)"/io.github.pedrosakuma.dotnet-assembly-mcp
+
+Verify:    curl -fsS http://127.0.0.1:8788/health
+Logs:      tail -F ~/Library/Logs/dotnet-assembly-mcp/server.{out,err}.log
+Uninstall: launchctl bootout gui/"$(id -u)" \
+              ~/Library/LaunchAgents/io.github.pedrosakuma.dotnet-assembly-mcp.plist
+           rm ~/Library/LaunchAgents/io.github.pedrosakuma.dotnet-assembly-mcp.plist
+
+Assumes `dotnet tool install -g dotnet-assembly-mcp` placed the executable under
+~/.dotnet/tools. Adjust ProgramArguments and EnvironmentVariables for a single-file
+binary or a non-default port.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.pedrosakuma.dotnet-assembly-mcp</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/REPLACE_ME/.dotnet/tools/dotnet-assembly-mcp</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Default port pin: matches the convention with dotnet-diagnostics-mcp (8787). -->
+        <key>ASPNETCORE_URLS</key>
+        <string>http://127.0.0.1:8788</string>
+        <key>DOTNET_NOLOGO</key>
+        <string>1</string>
+        <key>DOTNET_CLI_TELEMETRY_OPTOUT</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <!-- Only relaunch on non-zero exit. Avoids hot loops if the user invokes
+             `launchctl kickstart` with a clean shutdown. -->
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/REPLACE_ME/Library/Logs/dotnet-assembly-mcp/server.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/REPLACE_ME/Library/Logs/dotnet-assembly-mcp/server.err.log</string>
+</dict>
+</plist>

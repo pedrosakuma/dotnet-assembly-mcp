@@ -53,6 +53,6 @@ USER assemblymcp
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1
+    CMD dotnet DotnetAssemblyMcp.Server.dll --health-check --url=http://127.0.0.1:8080/health || exit 1
 
 ENTRYPOINT ["dotnet", "DotnetAssemblyMcp.Server.dll"]
