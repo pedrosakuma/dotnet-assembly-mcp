@@ -1198,14 +1198,16 @@ public sealed class AssemblyTools
             return new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {mvid:D}.");
         }
-        var load = index.Load(hint);
-        if (!load.IsSuccess) return load.Error;
-        if (load.Module!.ModuleVersionId != mvid)
+        var probe = index.Probe(hint);
+        if (probe.Error is not null) return probe.Error;
+        if (probe.Mvid != mvid)
         {
             return new AssemblyError(
                 ErrorKinds.MvidMismatch,
-                $"assemblyPathHint '{hint}' has MVID {load.Module.ModuleVersionId:D} but the caller requested {mvid:D}.");
+                $"assemblyPathHint '{hint}' has MVID {probe.Mvid:D} but the caller requested {mvid:D}.");
         }
+        var load = index.Load(hint);
+        if (!load.IsSuccess) return load.Error;
         return null;
     }
 

@@ -70,8 +70,8 @@ public sealed class AssemblyPathHintTests
 
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be(ErrorKinds.MvidMismatch);
-        // SampleConsumer ended up loaded (it's a valid PE), but the *requested* MVID never was.
-        index.List().Should().NotContain(m => m.ModuleVersionId == mvid);
+        // Hint is probed before load; mismatch must not pollute the registry with the wrong binary.
+        index.List().Should().BeEmpty();
         index.Dispose();
     }
 

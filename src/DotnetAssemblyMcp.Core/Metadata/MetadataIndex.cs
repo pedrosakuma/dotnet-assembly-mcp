@@ -644,9 +644,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 module.MD, typeRendered ?? Array.Empty<string>(), methodRendered ?? Array.Empty<string>());
             var sig = def.DecodeSignature(provider, genericContext: null);
             var paramList = string.Join(", ", sig.ParameterTypes);
-            var ns = module.MD.GetString(typeDef.Namespace);
-            var typeNameRaw = module.MD.GetString(typeDef.Name);
-            var fullType = string.IsNullOrEmpty(ns) ? typeNameRaw : $"{ns}.{typeNameRaw}";
+            var fullType = TypeName(module, typeDef);
             var methodName = module.MD.GetString(def.Name);
             var closedSig = $"{sig.ReturnType} {fullType}.{methodName}({paramList})";
 
@@ -1368,7 +1366,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private static readonly Guid SourceLinkCdiKind =
         new("CC110556-A091-4D38-9FEC-25AB9A351A6A");
 
-    private sealed record PdbHandle(MetadataReaderProvider Provider, MetadataReader Reader, PdbKind Kind, int Age);
+    private sealed record PdbHandle(MetadataReaderProvider? Provider, MetadataReader? Reader, PdbKind Kind, int Age);
 
     /// <inheritdoc />
     public MethodSourceResult GetMethodSource(MethodIdentity identity)
@@ -1388,13 +1386,23 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 PdbKind: PdbKind.None, PdbAge: null,
                 Reason: "no PDB found (embedded or sibling .pdb)"));
         }
+        if (pdb.Reader is null)
+        {
+            // Currently the only path here is a Windows (MSF7) PDB sibling that we can't read with
+            // System.Reflection.Metadata. Surface kind so consumers know a PDB exists but is unsupported.
+            return MethodSourceResult.Ok(new MethodSourceLocation(
+                module.Mvid, identity.MetadataToken, handleStr,
+                Found: false, File: null, StartLine: null, EndLine: null, SourceLink: null,
+                PdbKind: pdb.Kind, PdbAge: pdb.Age,
+                Reason: "PDB present but unsupported (Windows/MSF7 format; portable PDB required)"));
+        }
 
         // PDB MethodDebugInformation table is parallel to MethodDef — same row id.
         var rid = MetadataTokens.GetRowNumber(methodHandle);
         var debugHandle = MetadataTokens.MethodDebugInformationHandle(rid);
 
         MethodDebugInformation debugInfo;
-        try { debugInfo = pdb.Reader.GetMethodDebugInformation(debugHandle); }
+        try { debugInfo = pdb.Reader!.GetMethodDebugInformation(debugHandle); }
         catch (BadImageFormatException)
         {
             return MethodSourceResult.Ok(NoSeqPoints(module.Mvid, identity.MetadataToken, handleStr, pdb,
@@ -1476,9 +1484,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                     new MemoryStream(bytes, writable: false), MetadataStreamOptions.PrefetchMetadata);
                 return new PdbHandle(provider, provider.GetMetadataReader(), PdbKind.Portable, 0);
             }
-            // Windows PDB ('Microsoft C/C++ MSF 7.00\r\n…'): unsupported for read in System.Reflection.Metadata.
-            return new PdbHandle(MetadataReaderProvider.FromPortablePdbImage(default),
-                default!, PdbKind.Windows, 0);
+            // Windows PDB ('Microsoft C/C++ MSF 7.00\r\n…'): not readable via System.Reflection.Metadata.
+            // Return a sentinel with Reader=null so callers can surface a meaningful "unsupported" reason
+            // without crashing when they try to read sequence points.
+            return new PdbHandle(Provider: null, Reader: null, PdbKind.Windows, 0);
         }
         catch (BadImageFormatException) { return null; }
         catch (IOException) { return null; }
@@ -2258,9 +2267,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         var def = m.MD.GetMethodDefinition(h);
         var typeDef = m.MD.GetTypeDefinition(def.GetDeclaringType());
-        var ns = m.MD.GetString(typeDef.Namespace);
-        var typeName = m.MD.GetString(typeDef.Name);
-        var fullType = string.IsNullOrEmpty(ns) ? typeName : $"{ns}.{typeName}";
+        var fullType = TypeName(m, typeDef);
         var methodName = m.MD.GetString(def.Name);
 
         var sig = def.DecodeSignature(new StringSignatureProvider(m.MD), genericContext: null);
