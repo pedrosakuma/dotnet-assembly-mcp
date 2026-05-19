@@ -13,6 +13,7 @@
     <PackageReference Include="xunit.runner.visualstudio" />
     <PackageReference Include="FluentAssertions" />
     <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Xunit.SkippableFact" />
   </ItemGroup>
 
   <ItemGroup>
@@ -20,5 +21,16 @@
     <ProjectReference Include="..\fixtures\SampleLib\SampleLib.csproj" />
     <ProjectReference Include="..\fixtures\SampleConsumer\SampleConsumer.csproj" />
   </ItemGroup>
+
+  <!-- Build the counterpart CoreClrSample fixture (git submodule) before tests run, so
+       integration tests can load it via MetadataIndex. The submodule may be absent in
+       lightweight clones; the target is a no-op in that case and the integration tests
+       skip themselves with a clear message. -->
+  <PropertyGroup>
+    <CoreClrSamplePath>$(MSBuildThisFileDirectory)..\..\external\dotnet-diagnostics-mcp\samples\CoreClrSample\CoreClrSample.csproj</CoreClrSamplePath>
+  </PropertyGroup>
+  <Target Name="BuildCounterpartSample" BeforeTargets="BeforeBuild" Condition="Exists('$(CoreClrSamplePath)')">
+    <Exec Command="dotnet build &quot;$(CoreClrSamplePath)&quot; -c $(Configuration) --nologo -v quiet" />
+  </Target>
 
 </Project>

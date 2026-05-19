@@ -1,0 +1,3 @@
+[submodule "external/dotnet-diagnostics-mcp"]
+	path = external/dotnet-diagnostics-mcp
+	url = https://github.com/pedrosakuma/dotnet-diagnostics-mcp.git
