@@ -95,3 +95,29 @@ public class NestingHost
         public int Ping(int x) => x + 1;
     }
 }
+
+// Three-level hierarchy + interface implementer used by the type-hierarchy tests.
+public interface IAnimal
+{
+    string Speak();
+}
+
+public abstract class AnimalBase : IAnimal
+{
+    public abstract string Speak();
+}
+
+public class Dog : AnimalBase
+{
+    public override string Speak() => "woof";
+}
+
+public sealed class Puppy : Dog
+{
+    public override string Speak() => "yip";
+}
+
+public sealed class ConsoleLogger : ILogger
+{
+    public void Log(string message) => System.Console.WriteLine(message);
+}

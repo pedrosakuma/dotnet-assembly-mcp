@@ -42,6 +42,16 @@ public enum TypeKind
 }
 
 /// <summary>
+/// Lightweight reference to another type — used by <see cref="TypeSummary.BaseType"/> and
+/// <see cref="TypeSummary.Interfaces"/>. <see cref="AssemblyName"/> is the simple name of
+/// the assembly that owns the referenced type and is null when the reference resolves to a
+/// type defined in the same module.
+/// </summary>
+public sealed record TypeReferenceSummary(
+    string FullName,
+    string? AssemblyName = null);
+
+/// <summary>
 /// Tier-1 summary of a type definition. Returned by <c>list_types</c>.
 /// </summary>
 public sealed record TypeSummary(
@@ -51,7 +61,9 @@ public sealed record TypeSummary(
     string FullName,
     TypeKind Kind,
     int MethodCount,
-    bool IsPublic);
+    bool IsPublic,
+    TypeReferenceSummary? BaseType = null,
+    IReadOnlyList<TypeReferenceSummary>? Interfaces = null);
 
 /// <summary>
 /// Filter / paging knobs accepted by <see cref="IMetadataIndex.ListTypes"/>. All fields are
@@ -153,4 +165,43 @@ public readonly record struct FindMethodResult(FindMethodPage? Page, AssemblyErr
     public bool IsSuccess => Page is not null;
     public static FindMethodResult Ok(FindMethodPage p) => new(p, null);
     public static FindMethodResult Fail(AssemblyError e) => new(null, e);
+}
+
+/// <summary>
+/// Filter / paging knobs accepted by <see cref="IMetadataIndex.ListDerivedTypes"/>. The
+/// query is scoped to a single module: cross-module derived-type lookup is tracked
+/// separately and not part of the first iteration of issue #39.
+/// </summary>
+public sealed record ListDerivedTypesQuery(
+    int? Cursor = null,
+    int PageSize = ListDerivedTypesQuery.DefaultPageSize,
+    bool DirectOnly = true)
+{
+    public const int DefaultPageSize = 50;
+    public const int MaxPageSize = 500;
+}
+
+/// <summary>Paginated result of <see cref="IMetadataIndex.ListDerivedTypes"/>.</summary>
+public sealed record ListDerivedTypesPage(
+    Guid ModuleVersionId,
+    int BaseTypeMetadataToken,
+    string BaseTypeFullName,
+    IReadOnlyList<TypeSummary> Types,
+    int? NextCursor = null,
+    bool Truncated = false);
+
+/// <summary>Result of <see cref="IMetadataIndex.ListDerivedTypes"/>.</summary>
+public readonly record struct ListDerivedTypesResult(ListDerivedTypesPage? Page, AssemblyError? Error)
+{
+    public bool IsSuccess => Page is not null;
+    public static ListDerivedTypesResult Ok(ListDerivedTypesPage p) => new(p, null);
+    public static ListDerivedTypesResult Fail(AssemblyError e) => new(null, e);
+}
+
+/// <summary>Result of <see cref="IMetadataIndex.GetTypeDefinition"/>.</summary>
+public readonly record struct GetTypeResult(TypeSummary? Type, AssemblyError? Error)
+{
+    public bool IsSuccess => Type is not null;
+    public static GetTypeResult Ok(TypeSummary t) => new(t, null);
+    public static GetTypeResult Fail(AssemblyError e) => new(null, e);
 }
