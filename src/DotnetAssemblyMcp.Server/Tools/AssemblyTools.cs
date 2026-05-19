@@ -760,6 +760,64 @@ public sealed class AssemblyTools
     public const int BatchCap = 100;
     private const string BatchCapStr = "100";
 
+    [McpServerTool(
+        Name = "get_method_source",
+        Title = "Resolve a method's source-line coordinates from the PDB",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Reads the module's PDB (embedded portable PDB first, then sibling .pdb) and " +
+        "returns the file/startLine/endLine triple plus a resolved SourceLink URL when " +
+        "SourceLink CustomDebugInformation is present. Second-chance source resolver: use " +
+        "after dotnet-diagnostics-mcp has emitted a hotspot with no SourceLocation. " +
+        "Metadata-only (no HTTP). Returns found=false (not an error) when no PDB exists or " +
+        "the method has no non-hidden sequence points (compiler-generated bodies).")]
+    public static AssemblyResult<MethodSourceLocation> GetMethodSource(
+        IMetadataIndex index,
+        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
+        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null)
+    {
+        if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
+            return AssemblyResult.Fail<MethodSourceLocation>(err!.Message, err, ErrorRecoveryHint(err));
+
+        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<MethodSourceLocation>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+
+        var result = index.GetMethodSource(identity);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<MethodSourceLocation>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var loc = result.Location!;
+        if (loc.Found)
+        {
+            var sl = loc.SourceLink is null ? "" : $" → {loc.SourceLink}";
+            return AssemblyResult.Ok(
+                loc,
+                $"{loc.File}:{loc.StartLine}-{loc.EndLine} (PDB={loc.PdbKind}){sl}.",
+                new NextActionHint("decompile_method", "Read the method body if you need the surrounding code.",
+                    new Dictionary<string, object?>
+                    {
+                        ["moduleVersionId"] = loc.ModuleVersionId.ToString("D"),
+                        ["metadataToken"] = $"0x{loc.MetadataToken:X8}",
+                    }));
+        }
+
+        var reason = string.IsNullOrEmpty(loc.Reason) ? "no source coordinates available" : loc.Reason!;
+        return AssemblyResult.Ok(
+            loc,
+            $"Source not found: {reason} (PDB={loc.PdbKind}).",
+            new NextActionHint("decompile_method", "Fall back to decompilation for a reconstructed body.",
+                new Dictionary<string, object?>
+                {
+                    ["moduleVersionId"] = loc.ModuleVersionId.ToString("D"),
+                    ["metadataToken"] = $"0x{loc.MetadataToken:X8}",
+                }));
+    }
+
     private static AssemblyResult<BatchResponse<T>> RunBatch<T>(
         IReadOnlyList<MethodBatchItem> items,
         Func<MethodBatchItem, int, (T? Data, AssemblyError? Error)> handler,

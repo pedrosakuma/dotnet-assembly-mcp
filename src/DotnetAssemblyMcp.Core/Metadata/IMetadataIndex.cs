@@ -111,6 +111,16 @@ public interface IMetadataIndex
     /// <param name="moduleVersionId">MVID of a loaded module.</param>
     /// <param name="query">Required name pattern plus optional signature substring, cursor and page size.</param>
     FindMethodResult FindMethod(Guid moduleVersionId, FindMethodQuery query);
+
+    /// <summary>
+    /// Resolves a method to its source-location triple using the module's PDB (embedded
+    /// portable PDB first, then a sibling <c>.pdb</c> file). Returns a
+    /// <see cref="MethodSourceLocation"/> whose <c>Found</c> flag indicates whether a non-
+    /// hidden sequence point was found; the <c>SourceLink</c> URL is constructed from the
+    /// PDB's SourceLink CustomDebugInformation document when present. No HTTP. See
+    /// <c>docs/handoff-contract.md §3.4</c>.
+    /// </summary>
+    MethodSourceResult GetMethodSource(MethodIdentity identity);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

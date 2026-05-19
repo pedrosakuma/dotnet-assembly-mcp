@@ -188,6 +188,39 @@ Contract:
 - **Cap = 100.** Sending more items returns the structured error `batch_too_large`; split the input and retry.
 - **`decompile_method` is single-call by design** (heavy + cache-friendly only on a small N). `scan_methods_il` and `find_callers_batch` share the xref/scan caches across items.
 
+### 3.4 `get_method_source` — PDB second-chance for SourceLink
+
+`get_method_source(moduleVersionId, metadataToken, assemblyPathHint?)` reads the module's PDB and returns the file/startLine/endLine triple plus a resolved SourceLink URL when available. Pair it with `dotnet-diagnostics-mcp`: when that server emits a hotspot whose `SourceLocation` is `null` (PDB missing in the live process, or SourceLink stripped from the runtime image), the agent calls this tool against the on-disk PE for a second chance.
+
+```jsonc
+get_method_source({
+  "moduleVersionId": "1f5b2e84-…",
+  "metadataToken":   "0x06000020"
+})
+→
+{
+  "found":      true,
+  "file":       "/_/src/CoreClrSample/HotPath.cs",
+  "startLine":  42,
+  "endLine":    58,
+  "sourceLink": "https://raw.githubusercontent.com/owner/repo/<sha>/src/HotPath.cs",
+  "pdbKind":    "embedded" | "portable" | "windows" | "none",
+  "pdbAge":     1,
+  "reason":     null
+}
+```
+
+Resolution order:
+1. **Embedded portable PDB** in the PE's debug directory (`EmbeddedPortablePdb` entry).
+2. **Sibling `.pdb`** next to the assembly, portable format (`BSJB` signature).
+3. Otherwise `pdbKind = "none"`, `found = false`.
+
+Semantics:
+- **No HTTP.** SourceLink JSON in the PDB's CustomDebugInformation (Guid `CC110556-A091-4D38-9FEC-25AB9A351A6A`) is parsed locally; the URL is constructed by substituting the document path into the matching pattern. Fetching the URL is the agent's job.
+- **`found = false` is not an error** — it's the documented outcome when no PDB exists, or the method has only hidden sequence points (compiler-generated bodies). The accompanying `reason` field explains which case.
+- **Composes with `assemblyPathHint`** (§3.1) — same load semantics; once the module is loaded, its PDB is opened once and cached for the lifetime of the index.
+- Legacy Windows PDBs are detected (`pdbKind = "windows"`) but not read — `System.Reflection.Metadata` only handles portable PDBs.
+
 ---
 
 ## 4. Error shape
