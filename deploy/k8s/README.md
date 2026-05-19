@@ -41,18 +41,43 @@ however fits your build pipeline:
 The server's `import_assembly_manifest` tool also accepts arbitrary paths if
 you'd rather push assemblies on demand from an MCP client.
 
-## Auth (deferred)
+## Auth
 
-This server does **not** yet implement bearer authentication. Recommended
-mitigation today:
+Static bearer token, opt-in. Set `ASSEMBLY_MCP_BEARER_TOKEN` (or
+`MCP_BEARER_TOKEN` for the cross-server fallback shared with
+`dotnet-diagnostics-mcp`) on the server. When neither is set the HTTP
+transport accepts all requests — that's the back-compat path for local
+`127.0.0.1` deploys; **always set a token in any shared/clustered
+topology**.
 
-- Keep the Service `ClusterIP` (do not expose via Ingress or LoadBalancer).
-- Use a NetworkPolicy to restrict ingress to the namespaces that need the
-  resolver.
-- Track [#21](https://github.com/pedrosakuma/dotnet-assembly-mcp/issues/21) for
-  parity with `dotnet-diagnostics-mcp`'s `MCP_BEARER_TOKEN` pattern. When it
-  lands, this manifest will grow a Secret and the `Authorization: Bearer`
-  middleware will reject unauthenticated requests except on `/health`.
+When configured, every request to `/mcp` (and any other route) must
+carry `Authorization: Bearer <token>`. `/health` is always exempt so
+liveness/readiness probes don't need the secret. Comparison is
+fixed-time (`CryptographicOperations.FixedTimeEquals`). Mismatch or
+missing header returns `401 Unauthorized` with `WWW-Authenticate:
+Bearer`.
+
+Out of scope here: OAuth/OIDC (overkill for tooling), mTLS (handle at
+the ingress), per-tool ACLs (one global token).
+
+Example manifest snippet:
+
+```yaml
+env:
+  - name: ASSEMBLY_MCP_BEARER_TOKEN
+    valueFrom:
+      secretKeyRef: { name: dotnet-assembly-mcp-auth, key: token }
+```
+
+```bash
+kubectl -n assemblymcp create secret generic dotnet-assembly-mcp-auth \
+  --from-literal=token="$(openssl rand -hex 32)"
+```
+
+Defence in depth still recommended:
+
+- Keep the Service `ClusterIP` (no Ingress / LoadBalancer).
+- Use a NetworkPolicy to restrict ingress to the consuming namespaces.
 
 ## Verification
 
