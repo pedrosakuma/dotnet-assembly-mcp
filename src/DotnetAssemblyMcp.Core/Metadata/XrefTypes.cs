@@ -309,6 +309,48 @@ public readonly record struct FindPropertyReferencesReadResult(FindPropertyRefer
     public static FindPropertyReferencesReadResult Fail(AssemblyError e) => new(null, e);
 }
 
+/// <summary>Which accessor of an event a hit comes from.</summary>
+public enum EventAccessor
+{
+    Adder,
+    Remover,
+    Raiser,
+}
+
+/// <summary>Filter applied to a <c>find_event_references</c> call.</summary>
+public enum EventAccessorFilter
+{
+    All,
+    AdderOnly,
+    RemoverOnly,
+    RaiserOnly,
+}
+
+/// <summary>A single event-accessor call site recorded by reusing find_callers under the hood.</summary>
+public sealed record EventReferenceRef(
+    Guid ModuleVersionId,
+    int CallerMethodToken,
+    string CallerHandle,
+    string CallerDisplay,
+    EventAccessor Accessor);
+
+/// <summary>Tier-4 payload for <c>find_event_references</c>.</summary>
+public sealed record FindEventReferencesResult(
+    Guid TargetModuleVersionId,
+    int TargetEventToken,
+    string TargetHandle,
+    IReadOnlyList<EventReferenceRef> References,
+    int ModulesSearched,
+    bool FromCache);
+
+/// <summary>Result of <see cref="IMetadataIndex.FindEventReferences"/>.</summary>
+public readonly record struct FindEventReferencesReadResult(FindEventReferencesResult? Result, AssemblyError? Error)
+{
+    public bool IsSuccess => Result is not null;
+    public static FindEventReferencesReadResult Ok(FindEventReferencesResult r) => new(r, null);
+    public static FindEventReferencesReadResult Fail(AssemblyError e) => new(null, e);
+}
+
 /// <summary>A single cross-module field-access site recorded while scanning a module's IL.</summary>
 internal sealed record FieldOutboundRef(
     int CallerToken,

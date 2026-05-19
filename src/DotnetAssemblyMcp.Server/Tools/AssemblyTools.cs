@@ -865,6 +865,69 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "find_event_references",
+        Title = "Find every method that subscribes, unsubscribes, or raises a given event",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Reverse event-accessor lookup: resolves 'eventHandle' ('e:<mvid>:0x<eventToken>') " +
+        "to its adder / remover / raiser MethodDefs and reuses the call xref to list every " +
+        "invocation, tagged with which accessor was hit. 'accessor' filters the result " +
+        "('all' default, 'add', 'remove', or 'raise'). Same-module and cross-module hits both " +
+        "supported. Typical use: 'who subscribes to Service.OnTick?' / 'every handler attached " +
+        "to AppDomain.UnhandledException' / pairing with dotnet-diagnostics-mcp's delegate-target " +
+        "view to root-cause 'event handler never unsubscribed' leaks.")]
+    public static AssemblyResult<FindEventReferencesResult> FindEventReferences(
+        IMetadataIndex index,
+        [Description("Event handle 'e:<mvid>:0x<eventToken>' (as returned by list_members kind=Event).")] string eventHandle,
+        [Description("Optional accessor filter: 'all' (default), 'add', 'remove', or 'raise'.")] string? accessor = null,
+        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(eventHandle))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, "eventHandle is required.");
+            return AssemblyResult.Fail<FindEventReferencesResult>(err.Message, err);
+        }
+        if (!eventHandle.StartsWith("e:", StringComparison.Ordinal)
+            || !TryParsePrefixedHandle(eventHandle, 2, out var mvid, out var token))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse '{eventHandle}' as 'e:<mvid>:0x<eventToken>'.");
+            return AssemblyResult.Fail<FindEventReferencesResult>(err.Message, err);
+        }
+
+        var accessorFilter = EventAccessorFilter.All;
+        if (!string.IsNullOrEmpty(accessor))
+        {
+            if (string.Equals(accessor, "all", StringComparison.OrdinalIgnoreCase)) accessorFilter = EventAccessorFilter.All;
+            else if (string.Equals(accessor, "add", StringComparison.OrdinalIgnoreCase)) accessorFilter = EventAccessorFilter.AdderOnly;
+            else if (string.Equals(accessor, "remove", StringComparison.OrdinalIgnoreCase)) accessorFilter = EventAccessorFilter.RemoverOnly;
+            else if (string.Equals(accessor, "raise", StringComparison.OrdinalIgnoreCase)) accessorFilter = EventAccessorFilter.RaiserOnly;
+            else
+            {
+                var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"accessor must be 'all', 'add', 'remove', or 'raise' (got '{accessor}').");
+                return AssemblyResult.Fail<FindEventReferencesResult>(err.Message, err);
+            }
+        }
+
+        var result = index.FindEventReferences(mvid, token, accessorFilter, maxHits, cancellationToken);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<FindEventReferencesResult>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var r = result.Result!;
+        var summary = r.References.Count == 0
+            ? $"No references to {r.TargetHandle} across {r.ModulesSearched} module(s)."
+            : $"{r.References.Count} reference(s) to {r.TargetHandle} across {r.ModulesSearched} module(s).";
+        return AssemblyResult.Ok(r, summary,
+            new NextActionHint("get_method", "Inspect a specific subscriber for context."));
+    }
+
+    [McpServerTool(
         Name = "list_methods",
         Title = "List methods of a type with paging and name filtering",
         Destructive = false,

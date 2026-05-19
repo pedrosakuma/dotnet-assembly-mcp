@@ -77,3 +77,21 @@ public sealed class NestedCaller
         return second + label.Length;
     }
 }
+
+/// <summary>
+/// Cross-module fixture for find_event_references: subscribes to and unsubscribes from
+/// CustomerDto.Changed declared in SampleLib, so the test can prove the xref index
+/// resolves event accessors across assemblies.
+/// </summary>
+public static class CrossModuleEventConsumer
+{
+    public static void SubscribeChanged(CustomerDto dto, System.EventHandler<string> handler)
+    {
+        dto.Changed += handler;
+    }
+
+    public static void UnsubscribeChanged(CustomerDto dto, System.EventHandler<string> handler)
+    {
+        dto.Changed -= handler;
+    }
+}

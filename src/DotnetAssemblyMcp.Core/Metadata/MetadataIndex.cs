@@ -1642,6 +1642,93 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             hits, modulesSearchedMax, fromCacheAll));
     }
 
+    public FindEventReferencesReadResult FindEventReferences(
+        Guid moduleVersionId,
+        int eventMetadataToken,
+        EventAccessorFilter accessor = EventAccessorFilter.All,
+        int maxHits = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (moduleVersionId == Guid.Empty)
+            return FindEventReferencesReadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "moduleVersionId is required."));
+        if (!_modules.TryGetValue(moduleVersionId, out var module))
+            return FindEventReferencesReadResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleNotFound, $"no loaded module has MVID {moduleVersionId:D}."));
+
+        EntityHandle eh;
+        try { eh = (EntityHandle)MetadataTokens.Handle(eventMetadataToken); }
+        catch (ArgumentOutOfRangeException)
+        {
+            return FindEventReferencesReadResult.Fail(new AssemblyError(
+                ErrorKinds.TokenOutOfRange, $"token 0x{eventMetadataToken:X8} is not a valid metadata handle."));
+        }
+        if (eh.Kind != HandleKind.EventDefinition)
+            return FindEventReferencesReadResult.Fail(new AssemblyError(
+                ErrorKinds.InvalidArgument, $"token 0x{eventMetadataToken:X8} is not an EventDefinition (table 0x14)."));
+
+        EventAccessors accessors;
+        try { accessors = module.MD.GetEventDefinition((EventDefinitionHandle)eh).GetAccessors(); }
+        catch (BadImageFormatException)
+        {
+            return FindEventReferencesReadResult.Fail(new AssemblyError(
+                ErrorKinds.TokenOutOfRange, $"EventDefinition 0x{eventMetadataToken:X8} could not be read."));
+        }
+
+        const int DefaultMaxHits = 1000;
+        const int HardMaxHits = 10_000;
+        if (maxHits <= 0) maxHits = DefaultMaxHits;
+        if (maxHits > HardMaxHits) maxHits = HardMaxHits;
+
+        var hits = new List<EventReferenceRef>();
+        var fromCacheAll = true;
+        var modulesSearchedMax = 0;
+
+        bool wantAdder = accessor is EventAccessorFilter.All or EventAccessorFilter.AdderOnly;
+        bool wantRemover = accessor is EventAccessorFilter.All or EventAccessorFilter.RemoverOnly;
+        bool wantRaiser = accessor is EventAccessorFilter.All or EventAccessorFilter.RaiserOnly;
+
+        bool Collect(MethodDefinitionHandle methodHandle, EventAccessor kind, out AssemblyError? err)
+        {
+            err = null;
+            if (methodHandle.IsNil) return true;
+            var r = FindCallers(BuildMethodIdentity(module, methodHandle), cancellationToken);
+            if (r.Error is not null) { err = r.Error; return false; }
+            if (r.Result is null) return true;
+            if (!r.Result.FromCache) fromCacheAll = false;
+            if (r.Result.ModulesSearched > modulesSearchedMax) modulesSearchedMax = r.Result.ModulesSearched;
+            foreach (var c in r.Result.Callers)
+            {
+                if (hits.Count >= maxHits) return false; // signal stop, no error
+                hits.Add(new EventReferenceRef(
+                    c.ModuleVersionId, c.MetadataToken, c.Handle, c.Display, kind));
+            }
+            return true;
+        }
+
+        AssemblyError? perError;
+        if (wantAdder && !Collect(accessors.Adder, EventAccessor.Adder, out perError))
+        {
+            if (perError is not null) return FindEventReferencesReadResult.Fail(perError);
+            goto done;
+        }
+        if (wantRemover && !Collect(accessors.Remover, EventAccessor.Remover, out perError))
+        {
+            if (perError is not null) return FindEventReferencesReadResult.Fail(perError);
+            goto done;
+        }
+        if (wantRaiser && !Collect(accessors.Raiser, EventAccessor.Raiser, out perError))
+        {
+            if (perError is not null) return FindEventReferencesReadResult.Fail(perError);
+            goto done;
+        }
+    done:
+
+        return FindEventReferencesReadResult.Ok(new FindEventReferencesResult(
+            module.Mvid, eventMetadataToken,
+            HandleFormat.FormatEvent(module.Mvid, eventMetadataToken),
+            hits, modulesSearchedMax, fromCacheAll));
+    }
+
     private static MethodIdentity BuildMethodIdentity(Module module, MethodDefinitionHandle h) =>
         new(module.Mvid, MetadataTokens.GetToken(h));
 
