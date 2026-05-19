@@ -495,8 +495,54 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var methodCount = td.GetMethods().Count;
         var vis = td.Attributes & TypeAttributes.VisibilityMask;
         var isPublic = vis == TypeAttributes.Public || vis == TypeAttributes.NestedPublic;
+        var baseType = TryRenderTypeReferenceSummary(module, td.BaseType);
+        var interfaces = ReadInterfaceImplementations(module, td);
         return new TypeSummary(module.Mvid, token, HandleFormat.FormatType(module.Mvid, token),
-            fullName, kind, methodCount, isPublic);
+            fullName, kind, methodCount, isPublic, baseType, interfaces);
+    }
+
+    private static TypeReferenceSummary? TryRenderTypeReferenceSummary(Module module, EntityHandle handle)
+    {
+        if (handle.IsNil) return null;
+        try
+        {
+            switch (handle.Kind)
+            {
+                case HandleKind.TypeReference:
+                {
+                    var name = ResolveTypeRefName(module, (TypeReferenceHandle)handle, out var asmName);
+                    return name is null ? null : new TypeReferenceSummary(name, asmName);
+                }
+                case HandleKind.TypeDefinition:
+                    return new TypeReferenceSummary(RenderTypeDef(module, (TypeDefinitionHandle)handle));
+                case HandleKind.TypeSpecification:
+                {
+                    var name = ResolveOutboundTypeName(module, handle, out var asmName);
+                    return name is null ? null : new TypeReferenceSummary(name, asmName);
+                }
+                default:
+                    return null;
+            }
+        }
+        catch (BadImageFormatException) { return null; }
+    }
+
+    private static IReadOnlyList<TypeReferenceSummary> ReadInterfaceImplementations(Module module, TypeDefinition td)
+    {
+        var impls = td.GetInterfaceImplementations();
+        if (impls.Count == 0) return Array.Empty<TypeReferenceSummary>();
+        var list = new List<TypeReferenceSummary>(impls.Count);
+        foreach (var ih in impls)
+        {
+            try
+            {
+                var imp = module.MD.GetInterfaceImplementation(ih);
+                var summary = TryRenderTypeReferenceSummary(module, imp.Interface);
+                if (summary is not null) list.Add(summary);
+            }
+            catch (BadImageFormatException) { /* skip malformed row */ }
+        }
+        return list;
     }
 
     private static TypeKind ClassifyTypeKind(Module module, TypeDefinition td)
@@ -2370,6 +2416,167 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private sealed record Module(Guid Mvid, string Path, PEReader PE, MetadataReader MD);
+
+    /// <inheritdoc />
+    public GetTypeResult GetTypeDefinition(Guid moduleVersionId, int typeMetadataToken)
+    {
+        if (moduleVersionId == Guid.Empty)
+            return GetTypeResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
+        if (!_modules.TryGetValue(moduleVersionId, out var module))
+            return GetTypeResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {moduleVersionId:D}."));
+
+        EntityHandle handle;
+        try { handle = (EntityHandle)MetadataTokens.Handle(typeMetadataToken); }
+        catch (ArgumentException ex)
+        {
+            return GetTypeResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
+                $"could not interpret token 0x{typeMetadataToken:X8} as a metadata handle.", ex.Message));
+        }
+        if (handle.Kind != HandleKind.TypeDefinition)
+        {
+            return GetTypeResult.Fail(new AssemblyError(ErrorKinds.TokenWrongTable,
+                $"token 0x{typeMetadataToken:X8} is in table {handle.Kind}, expected TypeDefinition (0x02)."));
+        }
+
+        var row = MetadataTokens.GetRowNumber((TypeDefinitionHandle)handle);
+        if (row <= 0 || row > module.MD.TypeDefinitions.Count)
+            return GetTypeResult.Fail(new AssemblyError(ErrorKinds.TokenOutOfRange,
+                $"TypeDef token 0x{typeMetadataToken:X8} is not present in this module."));
+
+        TypeSummary? summary;
+        try { summary = TrySummarizeType(module, row); }
+        catch (BadImageFormatException ex)
+        {
+            return GetTypeResult.Fail(new AssemblyError(ErrorKinds.TokenOutOfRange,
+                $"could not read TypeDef row {row}: {ex.Message}"));
+        }
+        if (summary is null)
+            return GetTypeResult.Fail(new AssemblyError(ErrorKinds.TokenOutOfRange,
+                $"TypeDef row {row} is the synthetic <Module> row."));
+        return GetTypeResult.Ok(summary);
+    }
+
+    /// <inheritdoc />
+    public ListDerivedTypesResult ListDerivedTypes(Guid moduleVersionId, int baseTypeMetadataToken, ListDerivedTypesQuery query)
+    {
+        query ??= new ListDerivedTypesQuery();
+        if (moduleVersionId == Guid.Empty)
+            return ListDerivedTypesResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
+        if (!_modules.TryGetValue(moduleVersionId, out var module))
+            return ListDerivedTypesResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {moduleVersionId:D}."));
+
+        EntityHandle baseHandle;
+        try { baseHandle = (EntityHandle)MetadataTokens.Handle(baseTypeMetadataToken); }
+        catch (ArgumentException ex)
+        {
+            return ListDerivedTypesResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
+                $"could not interpret token 0x{baseTypeMetadataToken:X8} as a metadata handle.", ex.Message));
+        }
+        if (baseHandle.Kind != HandleKind.TypeDefinition)
+        {
+            return ListDerivedTypesResult.Fail(new AssemblyError(ErrorKinds.TokenWrongTable,
+                $"token 0x{baseTypeMetadataToken:X8} is in table {baseHandle.Kind}, expected TypeDefinition (0x02)."));
+        }
+        TypeDefinition baseTd;
+        try { baseTd = module.MD.GetTypeDefinition((TypeDefinitionHandle)baseHandle); }
+        catch (Exception ex) when (ex is BadImageFormatException or ArgumentException)
+        {
+            return ListDerivedTypesResult.Fail(new AssemblyError(ErrorKinds.TokenOutOfRange,
+                $"TypeDef token 0x{baseTypeMetadataToken:X8} is not present in this module."));
+        }
+        var baseFullName = TypeName(module, baseTd);
+
+        var pageSize = query.PageSize <= 0 ? ListDerivedTypesQuery.DefaultPageSize
+            : Math.Min(query.PageSize, ListDerivedTypesQuery.MaxPageSize);
+        var startRow = query.Cursor is { } c && c > 0 ? c : 1;
+        var totalRows = module.MD.TypeDefinitions.Count;
+
+        // Transitive mode: collect every TypeDef whose ancestor chain inside this module
+        // includes the target, then page over that set in metadata order. Pre-computed once
+        // per call (no cache yet — fine for typical hierarchies that are not huge).
+        HashSet<int>? transitiveDescendants = null;
+        if (!query.DirectOnly)
+        {
+            transitiveDescendants = ComputeTransitiveDescendants(module, baseTypeMetadataToken, totalRows);
+        }
+
+        var results = new List<TypeSummary>(Math.Min(pageSize, 16));
+        int? nextCursor = null;
+        bool truncated = false;
+
+        for (int row = startRow; row <= totalRows; row++)
+        {
+            int rowToken = MetadataTokens.GetToken(MetadataTokens.TypeDefinitionHandle(row));
+            if (query.DirectOnly)
+            {
+                if (!TypeDefHasBase(module, row, baseTypeMetadataToken)) continue;
+            }
+            else if (!transitiveDescendants!.Contains(rowToken))
+            {
+                continue;
+            }
+
+            TypeSummary? summary;
+            try { summary = TrySummarizeType(module, row); }
+            catch (BadImageFormatException) { continue; }
+            if (summary is null) continue;
+
+            if (results.Count == pageSize)
+            {
+                nextCursor = row;
+                truncated = true;
+                break;
+            }
+            results.Add(summary);
+        }
+
+        return ListDerivedTypesResult.Ok(new ListDerivedTypesPage(
+            moduleVersionId, baseTypeMetadataToken, baseFullName, results, nextCursor, truncated));
+    }
+
+    private static bool TypeDefHasBase(Module module, int derivedRow, int baseToken)
+    {
+        try
+        {
+            var td = module.MD.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(derivedRow));
+            if (td.BaseType.IsNil) return false;
+            if (td.BaseType.Kind != HandleKind.TypeDefinition) return false;
+            return MetadataTokens.GetToken(td.BaseType) == baseToken;
+        }
+        catch (BadImageFormatException) { return false; }
+    }
+
+    private static HashSet<int> ComputeTransitiveDescendants(Module module, int rootToken, int totalRows)
+    {
+        // child -> direct parent map (TypeDef tokens). Cross-module bases (TypeRef) are
+        // ignored — they can't be the root anyway because the root is a TypeDef in this module.
+        var parentByChild = new Dictionary<int, int>(capacity: totalRows);
+        for (int row = 1; row <= totalRows; row++)
+        {
+            try
+            {
+                var td = module.MD.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(row));
+                if (td.BaseType.IsNil || td.BaseType.Kind != HandleKind.TypeDefinition) continue;
+                var childToken = MetadataTokens.GetToken(MetadataTokens.TypeDefinitionHandle(row));
+                parentByChild[childToken] = MetadataTokens.GetToken(td.BaseType);
+            }
+            catch (BadImageFormatException) { /* skip */ }
+        }
+
+        var descendants = new HashSet<int>();
+        foreach (var (child, _) in parentByChild)
+        {
+            var cursor = child;
+            while (parentByChild.TryGetValue(cursor, out var parent))
+            {
+                if (parent == rootToken) { descendants.Add(child); break; }
+                cursor = parent;
+            }
+        }
+        return descendants;
+    }
 
     /// <inheritdoc />
     public ListAttributesResult ListAttributes(AttributeTarget target, ListAttributesQuery query)

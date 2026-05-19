@@ -131,6 +131,23 @@ public interface IMetadataIndex
     /// touched; this is pure metadata.
     /// </summary>
     ListAttributesResult ListAttributes(AttributeTarget target, ListAttributesQuery query);
+
+    /// <summary>
+    /// Returns a single <see cref="TypeSummary"/> for the requested TypeDef, fully populated
+    /// with base type and implemented interfaces (the same shape <see cref="ListTypes"/>
+    /// emits). Cheaper than paginating <see cref="ListTypes"/> when you already know the
+    /// target token.
+    /// </summary>
+    GetTypeResult GetTypeDefinition(Guid moduleVersionId, int typeMetadataToken);
+
+    /// <summary>
+    /// Tier-1 type-hierarchy walk: returns every <c>TypeDef</c> in the same module whose
+    /// <c>BaseType</c> resolves to <paramref name="baseTypeMetadataToken"/>. When
+    /// <see cref="ListDerivedTypesQuery.DirectOnly"/> is <c>false</c> the walk is transitive
+    /// (every descendant, not just immediate children). Cross-module derived-type lookups
+    /// are tracked separately (issue #39 follow-up).
+    /// </summary>
+    ListDerivedTypesResult ListDerivedTypes(Guid moduleVersionId, int baseTypeMetadataToken, ListDerivedTypesQuery query);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

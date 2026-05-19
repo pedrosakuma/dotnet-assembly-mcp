@@ -991,6 +991,109 @@ public sealed class AssemblyTools
         return AssemblyResult.Ok(p, summary, hint);
     }
 
+    [McpServerTool(
+        Name = "get_type",
+        Title = "Get a TypeSummary for a single type, including base type and implemented interfaces",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Returns the full TypeSummary (kind, attributes, generic arity, base type, implemented " +
+        "interfaces) for a single type. Identify the type via 'typeHandle' " +
+        "('t:<mvid>:0x<typeToken>' from list_types) or via mvidOrPath + typeFullName. " +
+        "Cross-module base types and interfaces are reported as TypeReferenceSummary " +
+        "(FullName + declaring assembly simple name) without forcing the other module to load.")]
+    public static AssemblyResult<TypeSummary> GetType(
+        IMetadataIndex index,
+        [Description("Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.")] string? typeHandle = null,
+        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
+        [Description("Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null)
+    {
+        if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
+            out var mvid, out var typeToken, out var resolveErr))
+        {
+            var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
+                ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
+                : ErrorRecoveryHint(resolveErr);
+            return AssemblyResult.Fail<TypeSummary>(resolveErr.Message, resolveErr, resolveHint);
+        }
+
+        var result = index.GetTypeDefinition(mvid, typeToken);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<TypeSummary>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var t = result.Type!;
+        var baseSummary = t.BaseType is null ? "no base type" : $"base = {t.BaseType.FullName}";
+        var ifaceCount = t.Interfaces?.Count ?? 0;
+        var summary = $"{t.FullName} ({t.Kind}); {baseSummary}; {ifaceCount} interface(s).";
+        NextActionHint hint = new("list_derived_types", "Walk the descendants of this type within the same module.",
+            new Dictionary<string, object?>
+            {
+                ["typeHandle"] = HandleFormat.FormatType(t.ModuleVersionId, t.MetadataToken),
+            });
+        return AssemblyResult.Ok(t, summary, hint);
+    }
+
+    [McpServerTool(
+        Name = "list_derived_types",
+        Title = "List types derived from a given base type within a single module",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Enumerates TypeDef rows in the same module whose base type chain reaches the " +
+        "supplied base type. With directOnly=true (default) only immediate subclasses are " +
+        "returned; with directOnly=false the full transitive descendant set is returned. " +
+        "Scope is intentionally intra-module: cross-module derived-type lookup is deferred. " +
+        "Identify the base type via 'typeHandle' or via mvidOrPath + typeFullName, exactly " +
+        "like get_type / list_methods.")]
+    public static AssemblyResult<ListDerivedTypesPage> ListDerivedTypes(
+        IMetadataIndex index,
+        [Description("Type handle 't:<mvid>:0x<typeToken>' of the base type, as returned by list_types or get_type.")] string? typeHandle = null,
+        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
+        [Description("Full base-type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null,
+        [Description("When true (default) only immediate subclasses are returned; when false, the full transitive descendant set is returned.")] bool directOnly = true,
+        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
+        [Description("Max types per page (default 50, capped at 500).")] int pageSize = ListDerivedTypesQuery.DefaultPageSize)
+    {
+        if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
+            out var mvid, out var typeToken, out var resolveErr))
+        {
+            var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
+                ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
+                : ErrorRecoveryHint(resolveErr);
+            return AssemblyResult.Fail<ListDerivedTypesPage>(resolveErr.Message, resolveErr, resolveHint);
+        }
+
+        var query = new ListDerivedTypesQuery(
+            DirectOnly: directOnly,
+            Cursor: cursor > 0 ? cursor : null,
+            PageSize: pageSize);
+
+        var result = index.ListDerivedTypes(mvid, typeToken, query);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<ListDerivedTypesPage>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var p = result.Page!;
+        var summary = p.Types.Count == 0
+            ? $"No derived types found for {p.BaseTypeFullName} in this module."
+            : $"{p.Types.Count} derived type(s) of {p.BaseTypeFullName}{(p.Truncated ? $", more available (nextCursor={p.NextCursor})" : "")}.";
+        NextActionHint hint = p.Truncated
+            ? new NextActionHint("list_derived_types", "Fetch the next page using the returned cursor.",
+                new Dictionary<string, object?>
+                {
+                    ["typeHandle"] = HandleFormat.FormatType(p.ModuleVersionId, p.BaseTypeMetadataToken),
+                    ["cursor"] = p.NextCursor,
+                    ["directOnly"] = directOnly,
+                })
+            : new NextActionHint("list_methods", "Drill into one of the derived types to inspect its methods.");
+        return AssemblyResult.Ok(p, summary, hint);
+    }
+
     private static bool TryParseAttributeTarget(string target, out AttributeTarget parsed, out AssemblyError? error)
     {
         parsed = null!;
