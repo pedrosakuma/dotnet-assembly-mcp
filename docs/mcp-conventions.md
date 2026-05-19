@@ -38,9 +38,9 @@ samples|fixtures/
 
 ### 2.1 Budget: **~10 tools, justify every addition**
 
-Anthropic recommends ≤10 tools per LLM context. This server currently exposes **23**
+Anthropic recommends ≤10 tools per LLM context. This server currently exposes **24**
 because the consumer-side handoff (§3.5) plus the full Tier-4 cross-reference suite
-each earn their slot — but the bar for adding the 24th must stay high. Before
+each earn their slot — but the bar for adding the 25th must stay high. Before
 adding a new tool, check the alternatives:
 
 1. Extend an existing tool with a parameter, or
@@ -54,7 +54,7 @@ If you still need a new tool, justify it in the PR description: which producer
 hotspot or agent workflow needs it, why a Resource or parameter wouldn't carry the
 same payload, and what the total count will be after the addition.
 
-Current surface (23 tools — keep this table in sync with `AssemblyTools.cs`):
+Current surface (24 tools — keep this table in sync with `AssemblyTools.cs`):
 
 | Tool | Purpose | Tier |
 |---|---|---|
@@ -81,6 +81,7 @@ Current surface (23 tools — keep this table in sync with `AssemblyTools.cs`):
 | `find_attribute_targets` | Reverse attribute index | T4 |
 | `find_field_references` | Inbound field-access xref | T4 |
 | `find_property_references` | Inbound property-accessor xref | T4 |
+| `find_event_references` | Inbound event-accessor (add/remove/raise) xref | T4 |
 
 ### 2.2 Attribute checklist
 

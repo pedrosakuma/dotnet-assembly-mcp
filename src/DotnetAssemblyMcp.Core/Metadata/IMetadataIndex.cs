@@ -239,6 +239,20 @@ public interface IMetadataIndex
         PropertyAccessorFilter accessor = PropertyAccessorFilter.All,
         int maxHits = 0,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reverse event-accessor lookup: resolves the event identified by
+    /// (<paramref name="moduleVersionId"/>, <paramref name="eventMetadataToken"/>) to its
+    /// adder / remover / raiser MethodDefs and reuses the existing call-xref index to list
+    /// every invocation, tagged by which accessor was hit. <paramref name="accessor"/> filters
+    /// the result to a single accessor when desired.
+    /// </summary>
+    FindEventReferencesReadResult FindEventReferences(
+        Guid moduleVersionId,
+        int eventMetadataToken,
+        EventAccessorFilter accessor = EventAccessorFilter.All,
+        int maxHits = 0,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>
