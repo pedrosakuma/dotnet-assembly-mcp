@@ -165,3 +165,25 @@ public sealed class CustomerDto
     [Obsolete("kept for find_attribute_targets fixture")]
     public void LegacyTouch() { }
 }
+
+/// <summary>
+/// Fixture for find_field_references: a static counter field with deliberate readers, writers,
+/// and an address-taker, plus a cross-module-visible reader exercised from SampleConsumer.
+/// </summary>
+public static class CounterFixture
+{
+#pragma warning disable CA2211 // public static field is intentional for IL-scan coverage.
+    public static int Count;
+#pragma warning restore CA2211
+
+    public static int ReadCount() => Count;
+
+    public static void WriteCount(int value) => Count = value;
+
+    public static void Bump()
+    {
+        Count = Count + 1;
+    }
+
+    public static int ReadTwice() => Count + Count;
+}

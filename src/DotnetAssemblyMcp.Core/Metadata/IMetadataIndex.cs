@@ -209,6 +209,36 @@ public interface IMetadataIndex
         IReadOnlyCollection<AttributeTargetKind>? targetKindsFilter = null,
         int maxHits = 0,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reverse field-access lookup: returns every method whose IL touches the field identified
+    /// by (<paramref name="moduleVersionId"/>, <paramref name="fieldMetadataToken"/>) via one
+    /// of the six field opcodes (<c>ldfld</c> / <c>stfld</c> / <c>ldflda</c> / <c>ldsfld</c> /
+    /// <c>stsfld</c> / <c>ldsflda</c>). Same-module hits resolve through FieldDef tokens;
+    /// cross-module hits match via assembly + declaring-type-full-name + field-name. The
+    /// per-module field-access index is built lazily on first call and invalidated together
+    /// with the xref cache when the underlying file changes.
+    /// </summary>
+    FindFieldReferencesReadResult FindFieldReferences(
+        Guid moduleVersionId,
+        int fieldMetadataToken,
+        FieldAccessMode mode = FieldAccessMode.All,
+        int maxHits = 0,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reverse property-access lookup: resolves the property identified by
+    /// (<paramref name="moduleVersionId"/>, <paramref name="propertyMetadataToken"/>) to its
+    /// getter / setter MethodDefs and reuses the existing call-xref index to list every
+    /// invocation, tagged by which accessor was hit. <paramref name="accessor"/> filters the
+    /// result to a single accessor when desired.
+    /// </summary>
+    FindPropertyReferencesReadResult FindPropertyReferences(
+        Guid moduleVersionId,
+        int propertyMetadataToken,
+        PropertyAccessorFilter accessor = PropertyAccessorFilter.All,
+        int maxHits = 0,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

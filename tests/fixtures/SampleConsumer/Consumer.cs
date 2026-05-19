@@ -43,6 +43,24 @@ public sealed class NullLogger : ILogger
 }
 
 /// <summary>
+/// Cross-module fixtures for find_field_references / find_property_references:
+/// one method reads SampleLib.CounterFixture.Count, another writes it, and a property method
+/// exercises the CustomerDto.Email getter + setter through SampleLib.
+/// </summary>
+public static class CrossModuleFieldAndPropertyConsumer
+{
+    public static int SnapshotCounter() => CounterFixture.Count;
+
+    public static void BumpCounter(int by) => CounterFixture.Count = CounterFixture.Count + by;
+
+    public static string? RoundTripEmail(CustomerDto dto, string value)
+    {
+        dto.Email = value;
+        return dto.Email;
+    }
+}
+
+/// <summary>
 /// Exercises two cross-module xref edge cases:
 /// 1) Calling a method on a nested type (LibNS.NestingHost+Inner.Ping).
 /// 2) Calling the same target twice from one caller with a non-call statement in between,

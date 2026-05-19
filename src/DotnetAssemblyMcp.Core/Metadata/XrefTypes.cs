@@ -220,3 +220,118 @@ public readonly record struct FindAttributeTargetsReadResult(FindAttributeTarget
 /// </summary>
 internal sealed record AttributeIndexData(
     Dictionary<string, List<(AttributeTargetKind Kind, int TargetToken, int ParameterSequence, int AttributeToken)>> ByAttributeType);
+
+/// <summary>How a method's IL touches a field. Mirrors the six field-access opcodes.</summary>
+public enum FieldAccessKind
+{
+    /// <summary><c>ldfld</c> / <c>ldsfld</c>.</summary>
+    Read,
+    /// <summary><c>stfld</c> / <c>stsfld</c>.</summary>
+    Write,
+    /// <summary><c>ldflda</c> / <c>ldsflda</c> — taking the field's address (typically for ref-returns or interop).</summary>
+    Address,
+}
+
+/// <summary>Filter applied to a <c>find_field_references</c> call.</summary>
+public enum FieldAccessMode
+{
+    /// <summary>Return all access kinds.</summary>
+    All,
+    /// <summary>Only loads (read or address).</summary>
+    Read,
+    /// <summary>Only stores.</summary>
+    Write,
+}
+
+/// <summary>Which accessor of a property a hit comes from.</summary>
+public enum PropertyAccessor
+{
+    Getter,
+    Setter,
+}
+
+/// <summary>Filter applied to a <c>find_property_references</c> call.</summary>
+public enum PropertyAccessorFilter
+{
+    All,
+    GetterOnly,
+    SetterOnly,
+}
+
+/// <summary>A single field-access site recorded by the field-access index.</summary>
+public sealed record FieldReferenceRef(
+    Guid ModuleVersionId,
+    int CallerMethodToken,
+    string CallerHandle,
+    string CallerDisplay,
+    int IlOffset,
+    FieldAccessKind AccessKind);
+
+/// <summary>Tier-4 payload for <c>find_field_references</c>.</summary>
+public sealed record FindFieldReferencesResult(
+    Guid TargetModuleVersionId,
+    int TargetFieldToken,
+    string TargetHandle,
+    IReadOnlyList<FieldReferenceRef> References,
+    int ModulesSearched,
+    bool FromCache);
+
+/// <summary>Result of <see cref="IMetadataIndex.FindFieldReferences"/>.</summary>
+public readonly record struct FindFieldReferencesReadResult(FindFieldReferencesResult? Result, AssemblyError? Error)
+{
+    public bool IsSuccess => Result is not null;
+    public static FindFieldReferencesReadResult Ok(FindFieldReferencesResult r) => new(r, null);
+    public static FindFieldReferencesReadResult Fail(AssemblyError e) => new(null, e);
+}
+
+/// <summary>A single property-accessor call site recorded by reusing find_callers under the hood.</summary>
+public sealed record PropertyReferenceRef(
+    Guid ModuleVersionId,
+    int CallerMethodToken,
+    string CallerHandle,
+    string CallerDisplay,
+    PropertyAccessor Accessor);
+
+/// <summary>Tier-4 payload for <c>find_property_references</c>.</summary>
+public sealed record FindPropertyReferencesResult(
+    Guid TargetModuleVersionId,
+    int TargetPropertyToken,
+    string TargetHandle,
+    IReadOnlyList<PropertyReferenceRef> References,
+    int ModulesSearched,
+    bool FromCache);
+
+/// <summary>Result of <see cref="IMetadataIndex.FindPropertyReferences"/>.</summary>
+public readonly record struct FindPropertyReferencesReadResult(FindPropertyReferencesResult? Result, AssemblyError? Error)
+{
+    public bool IsSuccess => Result is not null;
+    public static FindPropertyReferencesReadResult Ok(FindPropertyReferencesResult r) => new(r, null);
+    public static FindPropertyReferencesReadResult Fail(AssemblyError e) => new(null, e);
+}
+
+/// <summary>A single cross-module field-access site recorded while scanning a module's IL.</summary>
+internal sealed record FieldOutboundRef(
+    int CallerToken,
+    int IlOffset,
+    FieldAccessKind AccessKind,
+    string TargetAssemblyName,
+    string TargetTypeFullName,
+    string TargetFieldName)
+{
+    public bool Matches(FieldKey key) =>
+        string.Equals(TargetFieldName, key.FieldName, StringComparison.Ordinal)
+        && string.Equals(TargetTypeFullName, key.TypeFullName, StringComparison.Ordinal)
+        && string.Equals(TargetAssemblyName, key.AssemblyName, StringComparison.Ordinal);
+}
+
+/// <summary>Signature-level identity used to match cross-module field-access sites against a callee.</summary>
+internal readonly record struct FieldKey(string AssemblyName, string TypeFullName, string FieldName);
+
+/// <summary>
+/// Per-module reverse field-access index: same-module hits keyed by FieldDef token plus a
+/// flat list of cross-module hits matched by <see cref="FieldKey"/>. Built lazily and
+/// invalidated together with the other xref caches when the underlying file changes.
+/// </summary>
+internal sealed record FieldAccessIndexData(
+    Dictionary<int, List<(int CallerToken, int IlOffset, FieldAccessKind Kind)>> Intra,
+    List<FieldOutboundRef> Outbound);
