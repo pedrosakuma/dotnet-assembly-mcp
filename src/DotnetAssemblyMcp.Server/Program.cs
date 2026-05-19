@@ -1,6 +1,7 @@
 using DotnetAssemblyMcp.Core.Decompilation;
 using DotnetAssemblyMcp.Core.Metadata;
 using DotnetAssemblyMcp.Server;
+using DotnetAssemblyMcp.Server.Auth;
 using DotnetAssemblyMcp.Server.Tools;
 
 // `--health-check` short-circuits before any host is built: probe the HTTP
@@ -69,6 +70,13 @@ ConfigureMcpServer(builder.Services)
     .WithHttpTransport();
 
 var app = builder.Build();
+
+// Static bearer-token gate (opt-in). When neither ASSEMBLY_MCP_BEARER_TOKEN nor
+// MCP_BEARER_TOKEN is set, the HTTP transport stays unauthenticated to preserve back-compat
+// for local 127.0.0.1 deploys. /health is exempt either way (see BearerTokenMiddleware).
+var bearerOptions = BearerTokenOptions.TryLoad(app.Logger);
+if (bearerOptions is not null)
+    app.UseMiddleware<BearerTokenMiddleware>(bearerOptions);
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapMcp("/mcp");

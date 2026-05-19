@@ -30,6 +30,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="DotnetAssemblyMcp.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\DotnetAssemblyMcp.Core\DotnetAssemblyMcp.Core.csproj" />
   </ItemGroup>
 
