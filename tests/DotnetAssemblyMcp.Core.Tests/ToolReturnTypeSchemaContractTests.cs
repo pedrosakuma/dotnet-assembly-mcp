@@ -87,7 +87,7 @@ public sealed class ToolReturnTypeSchemaContractTests
         if (!ShouldWalk(type)) return;
         if (!seen.Add(type)) return;
 
-        // Recurse through generic args (covers IReadOnlyList<T>, BatchResponse<T>, ValueTuple, etc.).
+        // Recurse through generic args (covers IReadOnlyList<T>, ValueTuple, etc.).
         if (type.IsGenericType)
         {
             foreach (var arg in type.GetGenericArguments())

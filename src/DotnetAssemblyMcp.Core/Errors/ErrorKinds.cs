@@ -35,7 +35,7 @@ public static class ErrorKinds
     public const string InvalidArgument = "invalid_argument";
 
     /// <summary>A batch call exceeded the server-side cap on items per request.</summary>
-    public const string BatchTooLarge = "batch_too_large";
+    public const string BatchTooLarge = "batch_too_large"; // retained for ABI compat with older clients; no current tool emits it.
 
     /// <summary>A type-arg name in <c>genericTypeArguments</c> (§3.5) did not resolve in any loaded module.</summary>
     public const string GenericInstantiationUnresolvable = "generic_instantiation_unresolvable";

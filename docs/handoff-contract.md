@@ -155,37 +155,18 @@ Semantics:
 
 The three result buckets partition the input: every entry appears in exactly one of `loaded`, `registered` or `skipped`.
 
-### 3.3 Batch tools — one round-trip for N hotspots
+### 3.3 Loop singular tools for N hotspots
 
-`get_methods`, `scan_methods_il`, `find_callers_batch` and `get_methods_source` are batch variants of the matching single-call tools, sized for the common case where a producer hotspot dump contains 10–25 identities.
+Earlier versions of this server shipped dedicated `*_batch` variants of `get_method`,
+`scan_method_il`, `find_callers` and `get_method_source`. They were dropped in v0.10:
+the xref / scan / PDB caches are already lazy and module-scoped, so issuing N
+singular calls amortises identically on the second call onwards, and the MCP-over-stdio
+transport cost of N requests is negligible. For producer hotspot dumps, loop the
+matching singular tool — `get_method`, `scan_method_il`, `find_callers`,
+`get_method_source` — and aggregate the results client-side.
 
-```jsonc
-get_methods({
-  "items": [
-    { "moduleVersionId": "…", "metadataToken": "0x06000020", "assemblyPathHint": "/app/A.dll" },
-    { "moduleVersionId": "…", "metadataToken": "0x06000031", "assemblyPathHint": "/app/A.dll" }
-    // …
-  ]
-})
-→
-{
-  "results": [
-    { "index": 0, "item": {…}, "ok": true,  "data":  { /* same shape as get_method */ } },
-    { "index": 1, "item": {…}, "ok": false, "error": { "kind": "token_out_of_range", "message": "…" } }
-    // …
-  ],
-  "okCount":    1,
-  "errorCount": 1
-}
-```
-
-Contract:
-
-- **Order preserved.** `results[i]` corresponds to `items[i]`; `index` is echoed for clients that re-order on receipt.
-- **Per-item ok/error.** A single bad item does not fail the batch — only the cap check does.
-- **Hint composition.** Each item may carry its own `assemblyPathHint` (semantics in §3.1). Combined with §3.2's lazy hint map, a single `import_assembly_manifest` + one `get_methods` call is usually enough to enrich an entire hotspot table.
-- **Cap = 100.** Sending more items returns the structured error `batch_too_large`; split the input and retry.
-- **`decompile_method` is single-call by design** (heavy + cache-friendly only on a small N). `scan_methods_il`, `find_callers_batch` and `get_methods_source` share the xref/scan/PDB caches across items.
+`decompile_method` was always single-call by design (heavy + cache-friendly only on
+a small N) and is unaffected.
 
 ### 3.4 `get_method_source` — PDB second-chance for SourceLink
 
@@ -273,11 +254,11 @@ The consumer:
 5. Materializes a synthetic closed signature in memory (no row written to the metadata stream).
 6. Returns the **closed** signature in the response, while keeping the original `(MVID, token)` of the open def as the identity anchor.
 
-Tools that accept the §3.5 parameters: `get_method`, `find_callers`, plus the batch variants (`get_methods`, `find_callers_batch`). `find_callers` with a closed identity restricts results to `MethodSpec` rows whose `Method` resolves to the open def AND whose `Instantiation` blob matches — i.e. *only* callers of the int instantiation, not all callers of `List<T>.Add`. Type-level filtering (e.g. `Box<int>.ctor` vs `Box<string>.ctor`) is supported by matching the `MemberRef`'s `TypeSpec` parent against the requested `genericTypeArguments`.
+Tools that accept the §3.5 parameters: `get_method` and `find_callers`. `find_callers` with a closed identity restricts results to `MethodSpec` rows whose `Method` resolves to the open def AND whose `Instantiation` blob matches — i.e. *only* callers of the int instantiation, not all callers of `List<T>.Add`. Type-level filtering (e.g. `Box<int>.ctor` vs `Box<string>.ctor`) is supported by matching the `MemberRef`'s `TypeSpec` parent against the requested `genericTypeArguments`.
 
 `decompile_method` intentionally does **not** accept the generic args: ICSharpCode.Decompiler operates on `MethodDef`, not on closed instantiations, so it always emits the open C# (`T Echo(T value)`). The open form is the correct decompiler output — for a closed *signature* view, use `get_method` with `genericTypeArguments` / `genericMethodArguments` (or the `methodSpec` fast-path). Tracked in [issue #10](https://github.com/pedrosakuma/dotnet-assembly-mcp/issues/10) if demand arises for a header-substitution mode.
 
-`scan_method_il`, `scan_methods_il`, and `get_method_source` do not accept the §3.5 parameters either: IL token references are invariant across instantiations (the IL of an open generic method is identical regardless of how it's invoked), and PDB sequence points anchor on the open `MethodDef`. Pass the closed args to `get_method` if you need a closed signature alongside the IL/source view.
+`scan_method_il` and `get_method_source` do not accept the §3.5 parameters either: IL token references are invariant across instantiations (the IL of an open generic method is identical regardless of how it's invoked), and PDB sequence points anchor on the open `MethodDef`. Pass the closed args to `get_method` if you need a closed signature alongside the IL/source view.
 
 #### Out of scope
 
@@ -302,7 +283,7 @@ When resolution fails, the consumer MUST return a structured error with one of t
 | `identity_malformed` | Required field missing or wrong type in the `MethodIdentity` payload. |
 | `invalid_argument`   | A parameter failed validation before any resolution was attempted (e.g. unparseable token, malformed GUID, paired `methodSpec*` fields supplied incompletely). |
 | `path_not_allowed`   | The supplied path is outside the configured search roots and explicit loading is disabled by configuration. |
-| `batch_too_large`    | A batch tool received more than 100 items in a single call. Split the input and retry. |
+| `batch_too_large`    | Retained for backward compatibility with clients of the dropped `*_batch` tools; no current tool emits it. |
 | `generic_instantiation_unresolvable` | A type-arg name in `genericTypeArguments` (§3.5) did not resolve in any loaded module. Recovery: `load_assembly` for the missing dependency, or supply `assemblyPathHint`. |
 | `generic_instantiation_ambiguous`    | A type-arg name in `genericTypeArguments` (§3.5) resolved in 2+ modules with conflicting MVIDs. Error echoes candidate MVIDs; producer should qualify or consumer should narrow the manifest. |
 | `generic_instantiation_open`         | A type-arg referenced an open type parameter (`!0` / `!!0`). Instantiations on the wire MUST be closed. |
