@@ -937,6 +937,146 @@ public sealed class AssemblyTools
         }, summarize: (ok, total) => $"Resolved source for {ok}/{total} method(s).",
            overCapToolName: "get_methods_source", cancellationToken: cancellationToken);
 
+    [McpServerTool(
+        Name = "list_attributes",
+        Title = "List custom attributes on an assembly, type, method, or parameter",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Enumerates the CustomAttribute rows attached to the entity identified by 'target'. " +
+        "Accepts a polymorphic handle: 'a:<mvid>' (assembly), 't:<mvid>:0x<token>' (type — " +
+        "same shape returned by list_types), 'm:<mvid>:0x<token>' (method — same shape " +
+        "returned by get_method / list_methods) or 'pa:<mvid>:0x<methodToken>:<sequence>' " +
+        "(parameter; sequence 0 targets the return value). Pure metadata — no IL decoded, no " +
+        "decompilation. Each entry includes the attribute's full type name, its declaring " +
+        "assembly's simple name (when cross-module), the decoded constructor arguments, and " +
+        "the named arguments (properties / fields set in the attribute usage).")]
+    public static AssemblyResult<ListAttributesPage> ListAttributes(
+        IMetadataIndex index,
+        [Description("Target handle. One of: 'a:<mvid>', 't:<mvid>:0x<typeToken>', 'm:<mvid>:0x<methodToken>', 'pa:<mvid>:0x<methodToken>:<sequence>' (sequence 0 = return value).")] string target,
+        [Description("Optional case-insensitive substring filter on the attribute type's full name (e.g. 'Authorize').")] string? nameContains = null,
+        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
+        [Description("Max attributes per page (default 50, capped at 500).")] int pageSize = ListAttributesQuery.DefaultPageSize)
+    {
+        if (!TryParseAttributeTarget(target, out var parsed, out var parseErr))
+            return AssemblyResult.Fail<ListAttributesPage>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+
+        if (TryEnsureModuleLoaded(index, parsed.ModuleVersionId, assemblyPathHint: null) is { } loadErr)
+            return AssemblyResult.Fail<ListAttributesPage>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+
+        var query = new ListAttributesQuery(
+            NameContains: string.IsNullOrEmpty(nameContains) ? null : nameContains,
+            Cursor: cursor > 0 ? cursor : null,
+            PageSize: pageSize);
+
+        var result = index.ListAttributes(parsed, query);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<ListAttributesPage>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var p = result.Page!;
+        var summary = p.Attributes.Count == 0
+            ? "No custom attributes matched."
+            : $"{p.Attributes.Count} attribute(s){(p.Truncated ? $", more available (nextCursor={p.NextCursor})" : "")}.";
+        NextActionHint hint = p.Truncated
+            ? new NextActionHint("list_attributes", "Fetch the next page using the returned cursor.",
+                new Dictionary<string, object?>
+                {
+                    ["target"] = target,
+                    ["cursor"] = p.NextCursor,
+                })
+            : new NextActionHint("get_method", "Drill into one of the surrounding methods or types to see what the attribute decorates.");
+        return AssemblyResult.Ok(p, summary, hint);
+    }
+
+    private static bool TryParseAttributeTarget(string target, out AttributeTarget parsed, out AssemblyError? error)
+    {
+        parsed = null!;
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument, "target is required.");
+            return false;
+        }
+        var s = target.Trim();
+        // Order matters: 'pa:' must be tested before 'p:' (no 'p:' kind here but be defensive).
+        if (s.StartsWith("a:", StringComparison.Ordinal))
+        {
+            if (!Guid.TryParse(s.AsSpan(2), out var mvid))
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse '{target}' as 'a:<mvid>'.");
+                return false;
+            }
+            parsed = AttributeTarget.Assembly(mvid);
+            error = null;
+            return true;
+        }
+        if (s.StartsWith("t:", StringComparison.Ordinal))
+        {
+            if (!TryParseTypeHandle(s, out var mvid, out var typeToken))
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse '{target}' as 't:<mvid>:0x<typeToken>'.");
+                return false;
+            }
+            parsed = AttributeTarget.Type(mvid, typeToken);
+            error = null;
+            return true;
+        }
+        if (s.StartsWith("m:", StringComparison.Ordinal))
+        {
+            var rest = s.AsSpan(2);
+            var sep = rest.IndexOf(':');
+            if (sep < 0 || !Guid.TryParse(rest[..sep], out var mvid)
+                || !TryParseToken(rest[(sep + 1)..].ToString(), out var methodToken))
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse '{target}' as 'm:<mvid>:0x<methodToken>'.");
+                return false;
+            }
+            parsed = AttributeTarget.Method(mvid, methodToken);
+            error = null;
+            return true;
+        }
+        if (s.StartsWith("pa:", StringComparison.Ordinal))
+        {
+            var rest = s.AsSpan(3);
+            var sep1 = rest.IndexOf(':');
+            if (sep1 < 0)
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse '{target}' as 'pa:<mvid>:0x<methodToken>:<sequence>'.");
+                return false;
+            }
+            if (!Guid.TryParse(rest[..sep1], out var mvid))
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse '{target}' as 'pa:<mvid>:0x<methodToken>:<sequence>'.");
+                return false;
+            }
+            var afterMvid = rest[(sep1 + 1)..];
+            var sep2 = afterMvid.IndexOf(':');
+            if (sep2 < 0
+                || !TryParseToken(afterMvid[..sep2].ToString(), out var methodToken)
+                || !int.TryParse(afterMvid[(sep2 + 1)..], System.Globalization.NumberStyles.Integer,
+                       System.Globalization.CultureInfo.InvariantCulture, out var seq)
+                || seq < 0)
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"could not parse '{target}' as 'pa:<mvid>:0x<methodToken>:<sequence>'.");
+                return false;
+            }
+            parsed = AttributeTarget.Parameter(mvid, methodToken, seq);
+            error = null;
+            return true;
+        }
+        error = new AssemblyError(ErrorKinds.InvalidArgument,
+            $"unknown target prefix in '{target}'. Expected one of: 'a:', 't:', 'm:', 'pa:'.");
+        return false;
+    }
+
     private static AssemblyResult<BatchResponse<T>> RunBatch<T>(
         IReadOnlyList<MethodBatchItem> items,
         Func<MethodBatchItem, int, (T? Data, AssemblyError? Error)> handler,
