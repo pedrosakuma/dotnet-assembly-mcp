@@ -351,6 +351,56 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "get_method_il_text",
+        Title = "Get ildasm-like textual IL dump for a method",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Returns an ildasm-style textual dump of a single method's IL via " +
+        "ICSharpCode.Decompiler's ReflectionDisassembler. Operand tokens are resolved to " +
+        "readable names; cross-module MemberRefs render with an assembly hint " +
+        "(e.g. '[System.Runtime]System.Object::GetHashCode'). Capped server-side by " +
+        "maxLines (default 256, hard cap 4096) and LRU-cached by (mvid, token, maxLines). " +
+        "Sits between get_method_il (raw hex bytes) and decompile_method (C#): use this " +
+        "when prefixes (tail./volatile./unaligned.), box/unbox.any placement, or " +
+        "call-vs-callvirt dispatch matters. Generic methods rendered in open form, like " +
+        "decompile_method.")]
+    public static AssemblyResult<MethodIlText> GetMethodIlText(
+        IIlDisassembler disassembler,
+        IMetadataIndex index,
+        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
+        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
+        [Description("Optional cap on output lines. Pass 0 for the server default (256). Hard cap 4096.")] int maxLines = 0,
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
+            return AssemblyResult.Fail<MethodIlText>(err!.Message, err, ErrorRecoveryHint(err));
+
+        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<MethodIlText>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+
+        var result = disassembler.Disassemble(identity, maxLines, cancellationToken);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<MethodIlText>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
+
+        var t = result.Text!;
+        var prefix = t.CacheHit ? "[cache hit] " : string.Empty;
+        var suffix = t.Truncated ? $" — truncated at {t.LineCount} lines" : string.Empty;
+        return AssemblyResult.Ok(
+            t,
+            $"{prefix}{t.TypeFullName}.{t.MethodName} — {t.InstructionCount} IL instruction(s), {t.LineCount} line(s){suffix}.",
+            new NextActionHint("decompile_method", "Read the reconstructed C# if the IL is hard to follow.",
+                new Dictionary<string, object?>
+                {
+                    ["moduleVersionId"] = t.ModuleVersionId.ToString("D"),
+                    ["metadataToken"] = $"0x{t.MetadataToken:X8}",
+                }));
+    }
+
+    [McpServerTool(
         Name = "get_method_il",
         Title = "Get raw IL of a method",
         Destructive = false,
