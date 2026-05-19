@@ -220,6 +220,109 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     /// <inheritdoc />
+    public ListTypesResult ListTypes(Guid moduleVersionId, ListTypesQuery query)
+    {
+        query ??= new ListTypesQuery();
+        if (moduleVersionId == Guid.Empty)
+            return ListTypesResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
+        if (!_modules.TryGetValue(moduleVersionId, out var module))
+            return ListTypesResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {moduleVersionId}."));
+
+        var pageSize = query.PageSize <= 0 ? ListTypesQuery.DefaultPageSize
+            : Math.Min(query.PageSize, ListTypesQuery.MaxPageSize);
+        var startRow = query.Cursor is { } c && c > 0 ? c : 1;
+        var nsFilter = query.NamespacePrefix;
+        var nameFilter = query.NameContains;
+        var kindFilter = query.Kind;
+
+        var results = new List<TypeSummary>(pageSize);
+        int? nextCursor = null;
+        bool truncated = false;
+
+        var totalRows = module.MD.TypeDefinitions.Count;
+        for (int row = startRow; row <= totalRows; row++)
+        {
+            // Defensive: bad metadata shouldn't take the whole enumeration down.
+            TypeSummary? summary;
+            try { summary = TrySummarizeType(module, row); }
+            catch (BadImageFormatException) { continue; }
+            if (summary is null) continue;
+
+            if (nsFilter is not null && !MatchesNamespace(summary.FullName, nsFilter)) continue;
+            if (nameFilter is not null
+                && summary.FullName.IndexOf(nameFilter, StringComparison.OrdinalIgnoreCase) < 0) continue;
+            if (kindFilter is { } k && summary.Kind != k) continue;
+
+            if (results.Count == pageSize)
+            {
+                // We already filled the page — this match becomes the next cursor.
+                nextCursor = row;
+                truncated = true;
+                break;
+            }
+            results.Add(summary);
+        }
+
+        return ListTypesResult.Ok(new ListTypesPage(moduleVersionId, results, nextCursor, truncated));
+    }
+
+    private static bool MatchesNamespace(string fullName, string nsPrefix)
+    {
+        // `fullName` is "NS.Outer+Inner" or just "Name". Match the bare namespace portion
+        // so "MyApp" matches both "MyApp.Foo" and "MyApp.Bar.Baz" but not "MyAppExt.Foo".
+        var plus = fullName.IndexOf('+');
+        var head = plus >= 0 ? fullName[..plus] : fullName;
+        var dot = head.LastIndexOf('.');
+        var ns = dot >= 0 ? head[..dot] : string.Empty;
+        if (ns.Length == 0) return nsPrefix.Length == 0;
+        if (!ns.StartsWith(nsPrefix, StringComparison.Ordinal)) return false;
+        return ns.Length == nsPrefix.Length || ns[nsPrefix.Length] == '.';
+    }
+
+    private static TypeSummary? TrySummarizeType(Module module, int row)
+    {
+        var handle = MetadataTokens.TypeDefinitionHandle(row);
+        var td = module.MD.GetTypeDefinition(handle);
+        var name = module.MD.GetString(td.Name);
+        // Skip the synthetic <Module> row (always row 1 in well-formed assemblies).
+        if (name == "<Module>") return null;
+
+        var fullName = TypeName(module, td);
+        var token = MetadataTokens.GetToken(handle);
+        var kind = ClassifyTypeKind(module, td);
+        var methodCount = td.GetMethods().Count;
+        var vis = td.Attributes & TypeAttributes.VisibilityMask;
+        var isPublic = vis == TypeAttributes.Public || vis == TypeAttributes.NestedPublic;
+        return new TypeSummary(module.Mvid, token, HandleFormat.FormatType(module.Mvid, token),
+            fullName, kind, methodCount, isPublic);
+    }
+
+    private static TypeKind ClassifyTypeKind(Module module, TypeDefinition td)
+    {
+        if ((td.Attributes & TypeAttributes.Interface) != 0) return TypeKind.Interface;
+
+        // Resolve the base type's full name through a TypeRef or TypeDef. Anything we can't
+        // resolve safely defaults to Class — that's the right answer for object-rooted types.
+        var baseHandle = td.BaseType;
+        if (baseHandle.IsNil) return TypeKind.Class;
+
+        string? baseFullName = baseHandle.Kind switch
+        {
+            HandleKind.TypeReference => RenderTypeRef(module, (TypeReferenceHandle)baseHandle),
+            HandleKind.TypeDefinition => RenderTypeDef(module, (TypeDefinitionHandle)baseHandle),
+            _ => null,
+        };
+        return baseFullName switch
+        {
+            "System.Enum" => TypeKind.Enum,
+            "System.ValueType" => TypeKind.Struct,
+            "System.MulticastDelegate" or "System.Delegate" => TypeKind.Delegate,
+            _ => TypeKind.Class,
+        };
+    }
+
+    /// <inheritdoc />
     public ResolveResult Resolve(MethodIdentity identity)
     {
         if (identity.ModuleVersionId == Guid.Empty)
@@ -1274,6 +1377,9 @@ public sealed class ModuleReloadedEventArgs : EventArgs
 public static class HandleFormat
 {
     public static string Format(Guid mvid, int token) => $"m:{mvid:D}:0x{token:X8}";
+
+    /// <summary>Format for a type-definition handle (table 0x02), distinct from method handles.</summary>
+    public static string FormatType(Guid mvid, int token) => $"t:{mvid:D}:0x{token:X8}";
 }
 
 /// <summary>

@@ -269,6 +269,89 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "list_types",
+        Title = "List types in a loaded assembly with paging and filtering",
+        Destructive = false,
+        ReadOnly = false,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Enumerates the type definitions of a module. Accepts either an MVID of an already " +
+        "loaded module or an absolute path (auto-loads on first call). Supports filtering by " +
+        "namespace prefix, name substring (case-insensitive) and kind (class/struct/interface/" +
+        "enum/delegate); results are paginated via cursor (pass nextCursor from the previous " +
+        "response). Each entry includes a type handle 't:<mvid>:0x<token>' suitable for the " +
+        "follow-up list_methods tool.")]
+    public static AssemblyResult<ListTypesPage> ListTypes(
+        IMetadataIndex index,
+        [Description("Either the MVID GUID (D format) of a loaded module, or an absolute path to a .NET PE assembly (auto-loaded).")] string mvidOrPath,
+        [Description("Optional namespace prefix filter, matched as a dot-segmented prefix (e.g. 'MyApp' matches 'MyApp.Foo' but not 'MyAppExt.Foo').")] string? namespacePrefix = null,
+        [Description("Optional case-insensitive substring matched against the full type name (including '+' for nested types).")] string? nameContains = null,
+        [Description("Optional kind filter. One of: class, struct, interface, enum, delegate.")] string? kind = null,
+        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
+        [Description("Max types per page (default 50, capped at 500).")] int pageSize = ListTypesQuery.DefaultPageSize)
+    {
+        if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var loadErr))
+            return AssemblyResult.Fail<ListTypesPage>(loadErr!.Message, loadErr,
+                new NextActionHint("load_assembly", "Pass a valid absolute path to a managed PE file or the MVID of a loaded module."));
+
+        TypeKind? kindFilter = null;
+        if (!string.IsNullOrWhiteSpace(kind))
+        {
+            if (!Enum.TryParse<TypeKind>(kind, ignoreCase: true, out var parsed))
+            {
+                return AssemblyResult.Fail<ListTypesPage>(
+                    $"unknown kind '{kind}'. Accepted: class, struct, interface, enum, delegate.",
+                    new AssemblyError(ErrorKinds.InvalidArgument, $"unknown kind '{kind}'."),
+                    new NextActionHint("list_types", "Drop the kind argument or pass one of: class, struct, interface, enum, delegate."));
+            }
+            kindFilter = parsed;
+        }
+
+        var query = new ListTypesQuery(
+            NamespacePrefix: string.IsNullOrEmpty(namespacePrefix) ? null : namespacePrefix,
+            NameContains: string.IsNullOrEmpty(nameContains) ? null : nameContains,
+            Kind: kindFilter,
+            Cursor: cursor > 0 ? cursor : null,
+            PageSize: pageSize);
+
+        var result = index.ListTypes(mvid, query);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<ListTypesPage>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var p = result.Page!;
+        var summary = p.Types.Count == 0
+            ? "No types matched the filter."
+            : $"{p.Types.Count} type(s){(p.Truncated ? $", more available (nextCursor={p.NextCursor})" : "")}.";
+        NextActionHint hint;
+        if (p.Truncated)
+        {
+            hint = new NextActionHint("list_types", "Fetch the next page using the returned cursor.",
+                new Dictionary<string, object?>
+                {
+                    ["mvidOrPath"] = mvid.ToString("D"),
+                    ["cursor"] = p.NextCursor,
+                });
+        }
+        else if (p.Types.Count > 0)
+        {
+            var first = p.Types[0];
+            hint = new NextActionHint("list_methods", "Drill into a type's methods using its type handle.",
+                new Dictionary<string, object?>
+                {
+                    ["typeHandle"] = first.Handle,
+                });
+        }
+        else
+        {
+            hint = new NextActionHint("list_types", "Relax the filter (drop namespacePrefix or nameContains) and retry.",
+                new Dictionary<string, object?> { ["mvidOrPath"] = mvid.ToString("D") });
+        }
+        return AssemblyResult.Ok(p, summary, hint);
+    }
+
+    [McpServerTool(
         Name = "find_callers",
         Title = "Find callers of a method (same- and cross-module)",
         Destructive = false,
@@ -335,6 +418,33 @@ public sealed class AssemblyTools
         error.Kind == ErrorKinds.ModuleNotFound
             ? new NextActionHint("load_assembly", "Load the assembly whose MVID matches the requested method.")
             : new NextActionHint("get_method", "Confirm the identity resolves with get_method before retrying.");
+
+    private static bool TryResolveModuleId(IMetadataIndex index, string mvidOrPath,
+        out Guid mvid, out AssemblyError? error)
+    {
+        mvid = Guid.Empty;
+        if (string.IsNullOrWhiteSpace(mvidOrPath))
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument, "mvidOrPath is required.");
+            return false;
+        }
+        if (Guid.TryParse(mvidOrPath, out var parsed))
+        {
+            mvid = parsed;
+            error = null;
+            return true;
+        }
+        // Treat as path — auto-load (idempotent if MVID already known).
+        var load = index.Load(mvidOrPath);
+        if (!load.IsSuccess)
+        {
+            error = load.Error;
+            return false;
+        }
+        mvid = load.Module!.ModuleVersionId;
+        error = null;
+        return true;
+    }
 
     private static bool TryParseToken(string raw, out int token)
     {

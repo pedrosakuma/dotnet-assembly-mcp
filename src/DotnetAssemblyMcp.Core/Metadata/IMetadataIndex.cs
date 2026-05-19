@@ -51,6 +51,15 @@ public interface IMetadataIndex
     /// separately.
     /// </summary>
     FindCallersReadResult FindCallers(MethodIdentity callee);
+
+    /// <summary>
+    /// Tier-1 type enumeration: walks the module's <c>TypeDef</c> table, filters by namespace,
+    /// name substring and coarse <see cref="TypeKind"/>, and returns a paginated slice.
+    /// Synthetic types (the global <c>&lt;Module&gt;</c> placeholder) are skipped.
+    /// </summary>
+    /// <param name="moduleVersionId">MVID of a loaded module.</param>
+    /// <param name="query">Filter and paging options. Defaults yield 50 types in metadata order.</param>
+    ListTypesResult ListTypes(Guid moduleVersionId, ListTypesQuery query);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>
