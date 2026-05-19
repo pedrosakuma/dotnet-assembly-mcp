@@ -26,8 +26,8 @@ public sealed record BatchItemResult<T>(
     int Index,
     MethodBatchItem Item,
     bool Ok,
-    T? Data,
-    AssemblyError? Error);
+    T? Data = default,
+    AssemblyError? Error = null);
 
 /// <summary>
 /// Aggregate payload for a batch tool. <see cref="Results"/> contains exactly one entry per
