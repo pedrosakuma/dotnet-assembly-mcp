@@ -186,4 +186,71 @@ public sealed class BatchToolsTests
             result.Data.Results.Should().OnlyContain(r => r.Data!.CalleeModuleVersionId == mvid);
         }
     }
+
+    [Fact]
+    public void Scan_methods_il_rejects_generic_args_with_invalid_argument()
+    {
+        var (index, mvid, tokens) = LoadAndPickFiveMethods();
+        using (index)
+        {
+            IReadOnlyList<string> typeArgs = new[] { "System.Int32" };
+            var items = new[]
+            {
+                new MethodBatchItem(
+                    mvid.ToString("D"),
+                    $"0x{tokens[0]:X8}",
+                    GenericTypeArguments: typeArgs),
+            };
+
+            var result = AssemblyTools.ScanMethodsIl(index, items);
+
+            result.IsError.Should().BeFalse(result.Summary);
+            result.Data!.ErrorCount.Should().Be(1);
+            result.Data.Results[0].Ok.Should().BeFalse();
+            result.Data.Results[0].Error!.Kind.Should().Be(ErrorKinds.InvalidArgument);
+        }
+    }
+
+    [Fact]
+    public void Get_methods_source_resolves_every_item_per_position()
+    {
+        var (index, mvid, tokens) = LoadAndPickFiveMethods();
+        using (index)
+        {
+            var items = tokens.Take(3)
+                .Select(t => new MethodBatchItem(mvid.ToString("D"), $"0x{t:X8}"))
+                .ToList();
+
+            var result = AssemblyTools.GetMethodsSource(index, items);
+
+            result.IsError.Should().BeFalse(result.Summary);
+            result.Data!.Results.Should().HaveCount(3);
+            // Each item is either a successful lookup or a documented found=false result;
+            // a hard error must come through ErrorCount, not be silently swallowed.
+            result.Data.ErrorCount.Should().Be(0);
+        }
+    }
+
+    [Fact]
+    public void Get_methods_source_rejects_generic_args_with_invalid_argument()
+    {
+        var (index, mvid, tokens) = LoadAndPickFiveMethods();
+        using (index)
+        {
+            var items = new[]
+            {
+                new MethodBatchItem(
+                    mvid.ToString("D"),
+                    $"0x{tokens[0]:X8}",
+                    MethodSpecModuleVersionId: mvid.ToString("D"),
+                    MethodSpecMetadataToken: "0x2B000001"),
+            };
+
+            var result = AssemblyTools.GetMethodsSource(index, items);
+
+            result.IsError.Should().BeFalse(result.Summary);
+            result.Data!.ErrorCount.Should().Be(1);
+            result.Data.Results[0].Error!.Kind.Should().Be(ErrorKinds.InvalidArgument);
+        }
+    }
 }
