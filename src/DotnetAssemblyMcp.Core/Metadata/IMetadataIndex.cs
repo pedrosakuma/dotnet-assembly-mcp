@@ -191,6 +191,24 @@ public interface IMetadataIndex
         Guid moduleVersionIdFilter = default,
         int maxHits = 0,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reverse attribute lookup: returns every target (assembly / type / method / parameter /
+    /// field / property / event) decorated with an attribute whose constructor's declaring
+    /// type full name matches <paramref name="attributeTypeFullName"/>. Match is by the
+    /// attribute type's identity (case-sensitive full name including '+' for nested types),
+    /// not by IL spelling, so using-aliases are irrelevant. <paramref name="targetKindsFilter"/>
+    /// (when non-null) restricts the result to the listed kinds. <paramref name="moduleVersionIdFilter"/>
+    /// scopes to a single loaded module when set; otherwise every loaded module is searched.
+    /// The per-module index is built lazily on first call and invalidated together with the
+    /// xref cache when the underlying file changes.
+    /// </summary>
+    FindAttributeTargetsReadResult FindAttributeTargets(
+        string attributeTypeFullName,
+        Guid moduleVersionIdFilter = default,
+        IReadOnlyCollection<AttributeTargetKind>? targetKindsFilter = null,
+        int maxHits = 0,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

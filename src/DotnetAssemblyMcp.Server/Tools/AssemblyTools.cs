@@ -672,6 +672,75 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "find_attribute_targets",
+        Title = "Find every API decorated with a given custom attribute",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Reverse attribute lookup: returns every assembly / type / method / parameter / field / " +
+        "property / event decorated with an attribute whose constructor's declaring type matches " +
+        "'attributeTypeFullName' (case-sensitive full name, '+' for nested types — e.g. " +
+        "'System.ObsoleteAttribute' or 'Xunit.FactAttribute'). Match is by attribute type identity, " +
+        "not by IL spelling, so using-aliases are irrelevant. Scope is every loaded module unless " +
+        "'mvidOrPath' is supplied. Optional 'targetKinds' filters the result (comma-separated " +
+        "subset of assembly,type,method,parameter,field,property,event). Per-module reverse " +
+        "attribute index is built lazily and invalidated with the xref cache on file change. " +
+        "Result is capped at 'maxHits' (default 1000, hard cap 10000); 'truncated' = true when hit. " +
+        "Typical use: 'find every [Obsolete] API' / 'every [Authorize] controller method'.")]
+    public static AssemblyResult<FindAttributeTargetsResult> FindAttributeTargets(
+        IMetadataIndex index,
+        [Description("Full name of the attribute type, including '+' for nested types (e.g. 'System.ObsoleteAttribute'). Required.")] string attributeTypeFullName,
+        [Description("Optional scope. MVID GUID or absolute path of a single module. Omit / pass null to search every loaded module.")] string? mvidOrPath = null,
+        [Description("Optional comma-separated subset of {assembly, type, method, parameter, field, property, event}. Omit for all kinds.")] string? targetKinds = null,
+        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(attributeTypeFullName))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, "attributeTypeFullName is required.");
+            return AssemblyResult.Fail<FindAttributeTargetsResult>(err.Message, err);
+        }
+
+        HashSet<AttributeTargetKind>? kindFilter = null;
+        if (!string.IsNullOrWhiteSpace(targetKinds))
+        {
+            kindFilter = new HashSet<AttributeTargetKind>();
+            foreach (var raw in targetKinds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (!Enum.TryParse<AttributeTargetKind>(raw, ignoreCase: true, out var k))
+                {
+                    var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                        $"unknown targetKind '{raw}'. Allowed: assembly, type, method, parameter, field, property, event.");
+                    return AssemblyResult.Fail<FindAttributeTargetsResult>(err.Message, err);
+                }
+                kindFilter.Add(k);
+            }
+        }
+
+        var mvidFilter = Guid.Empty;
+        if (!string.IsNullOrEmpty(mvidOrPath))
+        {
+            if (!TryResolveModuleId(index, mvidOrPath, out mvidFilter, out var loadErr))
+                return AssemblyResult.Fail<FindAttributeTargetsResult>(loadErr!.Message, loadErr, ErrorRecoveryHint(loadErr));
+        }
+
+        var result = index.FindAttributeTargets(attributeTypeFullName, mvidFilter, kindFilter, maxHits, cancellationToken);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<FindAttributeTargetsResult>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var r = result.Result!;
+        var truncTag = r.Truncated ? " (truncated)" : "";
+        var summary = r.Hits.Count == 0
+            ? $"No targets of {attributeTypeFullName} found across {r.ModulesSearched} module(s)."
+            : $"{r.Hits.Count} target(s) of {attributeTypeFullName} across {r.ModulesSearched} module(s){truncTag}.";
+        return AssemblyResult.Ok(r, summary,
+            new NextActionHint("list_attributes", "Inspect the decoded arguments of a specific attribute occurrence."));
+    }
+
+    [McpServerTool(
         Name = "list_methods",
         Title = "List methods of a type with paging and name filtering",
         Destructive = false,

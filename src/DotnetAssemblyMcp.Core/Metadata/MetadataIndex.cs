@@ -36,6 +36,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     private readonly ConcurrentDictionary<Guid, XrefData> _xrefCache = new();
     private readonly ConcurrentDictionary<Guid, StringIndexData> _stringIndexCache = new();
+    private readonly ConcurrentDictionary<Guid, AttributeIndexData> _attributeIndexCache = new();
     private readonly string _xrefCacheDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".cache", "dotnet-assembly-mcp");
@@ -1383,6 +1384,238 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     /// <inheritdoc />
+    public FindAttributeTargetsReadResult FindAttributeTargets(
+        string attributeTypeFullName,
+        Guid moduleVersionIdFilter = default,
+        IReadOnlyCollection<AttributeTargetKind>? targetKindsFilter = null,
+        int maxHits = 0,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(attributeTypeFullName))
+            return FindAttributeTargetsReadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "attributeTypeFullName is required."));
+
+        const int DefaultMaxHits = 1000;
+        const int HardMaxHits = 10_000;
+        if (maxHits <= 0) maxHits = DefaultMaxHits;
+        if (maxHits > HardMaxHits) maxHits = HardMaxHits;
+
+        IEnumerable<Module> targets;
+        if (moduleVersionIdFilter != Guid.Empty)
+        {
+            if (!_modules.TryGetValue(moduleVersionIdFilter, out var only))
+            {
+                return FindAttributeTargetsReadResult.Fail(new AssemblyError(
+                    ErrorKinds.ModuleNotFound,
+                    $"no loaded module has MVID {moduleVersionIdFilter:D}."));
+            }
+            targets = new[] { only };
+        }
+        else
+        {
+            targets = _modules.Values;
+        }
+
+        HashSet<AttributeTargetKind>? kindFilter = null;
+        if (targetKindsFilter is { Count: > 0 })
+            kindFilter = new HashSet<AttributeTargetKind>(targetKindsFilter);
+
+        var hits = new List<AttributeTargetRef>();
+        var fromCache = true;
+        var modulesSearched = 0;
+        var truncated = false;
+
+        foreach (var module in targets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            modulesSearched++;
+            var index = _attributeIndexCache.GetOrAdd(module.Mvid, _ =>
+            {
+                fromCache = false;
+                return BuildAttributeIndex(module, cancellationToken);
+            });
+
+            if (!index.ByAttributeType.TryGetValue(attributeTypeFullName, out var entries))
+                continue;
+
+            foreach (var (kind, targetToken, paramSeq, attrToken) in entries)
+            {
+                if (kindFilter is not null && !kindFilter.Contains(kind)) continue;
+                if (hits.Count >= maxHits) { truncated = true; break; }
+                var (handle, display) = RenderAttributeTarget(module, kind, targetToken, paramSeq);
+                hits.Add(new AttributeTargetRef(
+                    module.Mvid, kind, targetToken, paramSeq, handle, display, attrToken));
+            }
+
+            if (truncated) break;
+        }
+
+        return FindAttributeTargetsReadResult.Ok(new FindAttributeTargetsResult(
+            attributeTypeFullName, hits, modulesSearched, fromCache, truncated));
+    }
+
+    private static (string Handle, string Display) RenderAttributeTarget(
+        Module module, AttributeTargetKind kind, int targetToken, int paramSeq)
+    {
+        try
+        {
+            switch (kind)
+            {
+                case AttributeTargetKind.Assembly:
+                {
+                    var name = module.MD.IsAssembly
+                        ? module.MD.GetString(module.MD.GetAssemblyDefinition().Name)
+                        : "<module>";
+                    return (HandleFormat.FormatAssembly(module.Mvid), name);
+                }
+                case AttributeTargetKind.Type:
+                {
+                    var h = (TypeDefinitionHandle)MetadataTokens.Handle(targetToken);
+                    return (HandleFormat.FormatType(module.Mvid, targetToken),
+                            TypeName(module, module.MD.GetTypeDefinition(h)));
+                }
+                case AttributeTargetKind.Method:
+                {
+                    var h = (MethodDefinitionHandle)MetadataTokens.Handle(targetToken);
+                    return (HandleFormat.Format(module.Mvid, targetToken),
+                            RenderMethodDef(module, h));
+                }
+                case AttributeTargetKind.Parameter:
+                {
+                    var h = (MethodDefinitionHandle)MetadataTokens.Handle(targetToken);
+                    var methodDisplay = RenderMethodDef(module, h);
+                    return (HandleFormat.FormatParameter(module.Mvid, targetToken, paramSeq),
+                            $"{methodDisplay}#param={paramSeq}");
+                }
+                case AttributeTargetKind.Field:
+                {
+                    var h = (FieldDefinitionHandle)MetadataTokens.Handle(targetToken);
+                    return (HandleFormat.FormatField(module.Mvid, targetToken),
+                            RenderFieldDef(module, h));
+                }
+                case AttributeTargetKind.Property:
+                {
+                    var h = (PropertyDefinitionHandle)MetadataTokens.Handle(targetToken);
+                    return (HandleFormat.FormatProperty(module.Mvid, targetToken),
+                            RenderPropertyDef(module, h));
+                }
+                case AttributeTargetKind.Event:
+                {
+                    var h = (EventDefinitionHandle)MetadataTokens.Handle(targetToken);
+                    return (HandleFormat.FormatEvent(module.Mvid, targetToken),
+                            RenderEventDef(module, h));
+                }
+            }
+        }
+        catch (BadImageFormatException) { /* fall through to placeholder */ }
+        return ($"<{kind} 0x{targetToken:X8}>", $"<{kind} 0x{targetToken:X8}>");
+    }
+
+    private static AttributeIndexData BuildAttributeIndex(Module module, CancellationToken cancellationToken)
+    {
+        var dict = new Dictionary<string, List<(AttributeTargetKind Kind, int TargetToken, int ParameterSequence, int AttributeToken)>>(StringComparer.Ordinal);
+        var md = module.MD;
+
+        void Add(string name, AttributeTargetKind kind, int targetToken, int paramSeq, int attrToken)
+        {
+            if (!dict.TryGetValue(name, out var list))
+            {
+                list = new List<(AttributeTargetKind, int, int, int)>(1);
+                dict[name] = list;
+            }
+            list.Add((kind, targetToken, paramSeq, attrToken));
+        }
+
+        void Process(CustomAttributeHandleCollection handles, AttributeTargetKind kind, int targetToken, int paramSeq)
+        {
+            foreach (var ah in handles)
+            {
+                string? typeName;
+                try { typeName = TryReadAttributeTypeFullName(module, ah); }
+                catch (BadImageFormatException) { continue; }
+                if (typeName is null) continue;
+                Add(typeName, kind, targetToken, paramSeq, MetadataTokens.GetToken(ah));
+            }
+        }
+
+        if (md.IsAssembly)
+        {
+            try
+            {
+                Process(md.GetAssemblyDefinition().GetCustomAttributes(), AttributeTargetKind.Assembly, 0, 0);
+            }
+            catch (BadImageFormatException) { /* skip */ }
+        }
+
+        foreach (var th in md.TypeDefinitions)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            TypeDefinition td;
+            try { td = md.GetTypeDefinition(th); }
+            catch (BadImageFormatException) { continue; }
+            var typeToken = MetadataTokens.GetToken(th);
+
+            try { Process(td.GetCustomAttributes(), AttributeTargetKind.Type, typeToken, 0); }
+            catch (BadImageFormatException) { /* skip */ }
+
+            foreach (var fh in td.GetFields())
+            {
+                try { Process(md.GetFieldDefinition(fh).GetCustomAttributes(), AttributeTargetKind.Field, MetadataTokens.GetToken(fh), 0); }
+                catch (BadImageFormatException) { }
+            }
+            foreach (var ph in td.GetProperties())
+            {
+                try { Process(md.GetPropertyDefinition(ph).GetCustomAttributes(), AttributeTargetKind.Property, MetadataTokens.GetToken(ph), 0); }
+                catch (BadImageFormatException) { }
+            }
+            foreach (var eh in td.GetEvents())
+            {
+                try { Process(md.GetEventDefinition(eh).GetCustomAttributes(), AttributeTargetKind.Event, MetadataTokens.GetToken(eh), 0); }
+                catch (BadImageFormatException) { }
+            }
+            foreach (var mh in td.GetMethods())
+            {
+                MethodDefinition methodDef;
+                try { methodDef = md.GetMethodDefinition(mh); }
+                catch (BadImageFormatException) { continue; }
+                var methodToken = MetadataTokens.GetToken(mh);
+                try { Process(methodDef.GetCustomAttributes(), AttributeTargetKind.Method, methodToken, 0); }
+                catch (BadImageFormatException) { }
+                foreach (var paramH in methodDef.GetParameters())
+                {
+                    Parameter param;
+                    try { param = md.GetParameter(paramH); }
+                    catch (BadImageFormatException) { continue; }
+                    try { Process(param.GetCustomAttributes(), AttributeTargetKind.Parameter, methodToken, param.SequenceNumber); }
+                    catch (BadImageFormatException) { }
+                }
+            }
+        }
+
+        return new AttributeIndexData(dict);
+    }
+
+    private static string? TryReadAttributeTypeFullName(Module module, CustomAttributeHandle handle)
+    {
+        var ca = module.MD.GetCustomAttribute(handle);
+        switch (ca.Constructor.Kind)
+        {
+            case HandleKind.MemberReference:
+            {
+                var mr = module.MD.GetMemberReference((MemberReferenceHandle)ca.Constructor);
+                return ResolveOutboundTypeName(module, mr.Parent, out _);
+            }
+            case HandleKind.MethodDefinition:
+            {
+                var md = module.MD.GetMethodDefinition((MethodDefinitionHandle)ca.Constructor);
+                var td = module.MD.GetTypeDefinition(md.GetDeclaringType());
+                return TypeName(module, td);
+            }
+            default:
+                return null;
+        }
+    }
+
+    /// <inheritdoc />
     public FindTypeReferencesReadResult FindTypeReferences(Guid moduleVersionId, int typeMetadataToken, CancellationToken cancellationToken = default)
     {
         if (moduleVersionId == Guid.Empty)
@@ -1760,6 +1993,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         _xrefCache.TryRemove(mvid, out _);
         _stringIndexCache.TryRemove(mvid, out _);
+        _attributeIndexCache.TryRemove(mvid, out _);
         try
         {
             var path = XrefCachePath(mvid);
@@ -3794,6 +4028,22 @@ public static class HandleFormat
 
     /// <summary>Format for a type-definition handle (table 0x02), distinct from method handles.</summary>
     public static string FormatType(Guid mvid, int token) => $"t:{mvid:D}:0x{token:X8}";
+
+    /// <summary>Format for a field-definition handle (table 0x04).</summary>
+    public static string FormatField(Guid mvid, int token) => $"f:{mvid:D}:0x{token:X8}";
+
+    /// <summary>Format for a property-definition handle (table 0x17).</summary>
+    public static string FormatProperty(Guid mvid, int token) => $"p:{mvid:D}:0x{token:X8}";
+
+    /// <summary>Format for an event-definition handle (table 0x14).</summary>
+    public static string FormatEvent(Guid mvid, int token) => $"e:{mvid:D}:0x{token:X8}";
+
+    /// <summary>Format for a single parameter (1-based sequence) of a method-definition handle.</summary>
+    public static string FormatParameter(Guid mvid, int methodToken, int parameterSequence)
+        => $"m:{mvid:D}:0x{methodToken:X8}#param={parameterSequence}";
+
+    /// <summary>Format for the assembly-definition row of a module (no token component).</summary>
+    public static string FormatAssembly(Guid mvid) => $"a:{mvid:D}";
 }
 
 /// <summary>

@@ -141,6 +141,7 @@ public sealed class CustomerDto
     public static readonly int Schema = 1;
     private readonly Guid _id;
 #pragma warning disable CA1051 // public field is intentional — exercises list_members field-attribute formatting.
+    [FixtureMarker("age-field")]
     public int Age;
 #pragma warning restore CA1051
 
@@ -151,6 +152,8 @@ public sealed class CustomerDto
     }
 
     public string Name { get; init; }
+
+    [FixtureMarker("email-property")]
     public string? Email { get; set; }
     public Guid Id => _id;
 
@@ -158,4 +161,7 @@ public sealed class CustomerDto
     public event System.EventHandler<string>? Changed;
 
     public void RaiseChanged(string field) => Changed?.Invoke(this, field);
+
+    [Obsolete("kept for find_attribute_targets fixture")]
+    public void LegacyTouch() { }
 }
