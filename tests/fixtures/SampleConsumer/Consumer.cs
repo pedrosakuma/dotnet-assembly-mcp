@@ -21,6 +21,12 @@ public sealed class ConsumerService
         var box = new Box<int>(value);
         return box.Value;
     }
+
+    public int CallEchoOfInt(int v) => _orders.Echo(v);
+
+    public string CallEchoOfString(string v) => _orders.Echo(v);
+
+    public string CallEchoOfStringAgain(string v) => _orders.Echo(v);
 }
 
 public sealed class NullLogger : ILogger

@@ -669,13 +669,26 @@ public sealed class AssemblyTools
         IMetadataIndex index,
         [Description("ModuleVersionId GUID of the callee, as a string ('D' format).")] string moduleVersionId,
         [Description("Callee MethodDef metadata token (table 0x06). Accepts decimal or hex.")] string metadataToken,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null)
+        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
+        [Description("Optional CLR reflection-style full names for the declaring type's generic arguments (see get_method).")] string[]? genericTypeArguments = null,
+        [Description("Optional CLR reflection-style full names for the method's generic arguments. When supplied, the caller list is narrowed to call sites whose MethodSpec.Instantiation matches element-wise (docs/handoff-contract.md §3.5).")] string[]? genericMethodArguments = null)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
             return AssemblyResult.Fail<FindCallersResult>(err!.Message, err, ErrorRecoveryHint(err));
 
         if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
             return AssemblyResult.Fail<FindCallersResult>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+
+        if (!TryParseGenericArgs(genericTypeArguments, nameof(genericTypeArguments), out var typeArgs, out var parseErr))
+            return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+        if (!TryParseGenericArgs(genericMethodArguments, nameof(genericMethodArguments), out var methodArgs, out parseErr))
+            return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+
+        identity = identity with
+        {
+            TypeGenericArguments = typeArgs,
+            MethodGenericArguments = methodArgs,
+        };
 
         var result = index.FindCallers(identity);
         if (!result.IsSuccess)
@@ -717,6 +730,11 @@ public sealed class AssemblyTools
                 return (null, err);
             if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
                 return (null, loadErr);
+            if (!TryParseGenericArgs(item.GenericTypeArguments, "genericTypeArguments", out var typeArgs, out var pErr))
+                return (null, pErr);
+            if (!TryParseGenericArgs(item.GenericMethodArguments, "genericMethodArguments", out var methodArgs, out pErr))
+                return (null, pErr);
+            identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs };
             var r = index.Resolve(identity);
             return r.IsSuccess ? (r.Method, null) : (null, r.Error);
         }, summarize: (ok, total) => $"Resolved {ok}/{total} method identit(ies).");
@@ -765,6 +783,11 @@ public sealed class AssemblyTools
                 return (null, err);
             if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, item.AssemblyPathHint) is { } loadErr)
                 return (null, loadErr);
+            if (!TryParseGenericArgs(item.GenericTypeArguments, "genericTypeArguments", out var typeArgs, out var pErr))
+                return (null, pErr);
+            if (!TryParseGenericArgs(item.GenericMethodArguments, "genericMethodArguments", out var methodArgs, out pErr))
+                return (null, pErr);
+            identity = identity with { TypeGenericArguments = typeArgs, MethodGenericArguments = methodArgs };
             var r = index.FindCallers(identity);
             return r.IsSuccess ? (r.Result, null) : (null, r.Error);
         }, summarize: (ok, total) => $"Resolved callers for {ok}/{total} callee(s).");
@@ -976,12 +999,16 @@ public sealed class AssemblyTools
     /// </summary>
     private static bool TryParseGenericArgs(string[]? raw, string paramName,
         out IReadOnlyList<GenericTypeName>? parsed, out AssemblyError? error)
+        => TryParseGenericArgs((IReadOnlyList<string>?)raw, paramName, out parsed, out error);
+
+    private static bool TryParseGenericArgs(IReadOnlyList<string>? raw, string paramName,
+        out IReadOnlyList<GenericTypeName>? parsed, out AssemblyError? error)
     {
         parsed = null;
         error = null;
-        if (raw is null || raw.Length == 0) return true;
-        var list = new List<GenericTypeName>(raw.Length);
-        for (int i = 0; i < raw.Length; i++)
+        if (raw is null || raw.Count == 0) return true;
+        var list = new List<GenericTypeName>(raw.Count);
+        for (int i = 0; i < raw.Count; i++)
         {
             if (!GenericTypeName.TryParse(raw[i], out var node, out var kind, out var msg))
             {

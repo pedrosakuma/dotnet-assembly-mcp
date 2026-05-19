@@ -10,7 +10,9 @@ using DotnetAssemblyMcp.Core;
 public sealed record MethodBatchItem(
     string ModuleVersionId,
     string MetadataToken,
-    string? AssemblyPathHint = null);
+    string? AssemblyPathHint = null,
+    IReadOnlyList<string>? GenericTypeArguments = null,
+    IReadOnlyList<string>? GenericMethodArguments = null);
 
 /// <summary>
 /// One result slot in a batch response. Either <see cref="Data"/> is populated and

@@ -230,3 +230,88 @@ internal sealed class SubstitutingStringSignatureProvider : System.Reflection.Me
     public string GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind) =>
         reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
 }
+
+/// <summary>
+/// Signature provider emitting CLR reflection-style FullName strings that match the wire
+/// format defined by <see cref="GenericTypeName.Format()"/> (see docs/handoff-contract.md §3.5).
+/// Used for comparing decoded MethodSpec/TypeSpec blobs against the strings produced by
+/// <see cref="GenericArgResolver.RenderAndValidate"/>.
+/// </summary>
+internal sealed class WireFormatSignatureProvider : System.Reflection.Metadata.ISignatureTypeProvider<string, object?>
+{
+    public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode switch
+    {
+        PrimitiveTypeCode.Boolean => "System.Boolean",
+        PrimitiveTypeCode.Byte => "System.Byte",
+        PrimitiveTypeCode.SByte => "System.SByte",
+        PrimitiveTypeCode.Char => "System.Char",
+        PrimitiveTypeCode.Int16 => "System.Int16",
+        PrimitiveTypeCode.UInt16 => "System.UInt16",
+        PrimitiveTypeCode.Int32 => "System.Int32",
+        PrimitiveTypeCode.UInt32 => "System.UInt32",
+        PrimitiveTypeCode.Int64 => "System.Int64",
+        PrimitiveTypeCode.UInt64 => "System.UInt64",
+        PrimitiveTypeCode.Single => "System.Single",
+        PrimitiveTypeCode.Double => "System.Double",
+        PrimitiveTypeCode.String => "System.String",
+        PrimitiveTypeCode.Object => "System.Object",
+        PrimitiveTypeCode.Void => "System.Void",
+        PrimitiveTypeCode.IntPtr => "System.IntPtr",
+        PrimitiveTypeCode.UIntPtr => "System.UIntPtr",
+        PrimitiveTypeCode.TypedReference => "System.TypedReference",
+        _ => typeCode.ToString(),
+    };
+
+    public string GetSZArrayType(string elementType) => elementType + "[]";
+    public string GetArrayType(string elementType, ArrayShape shape)
+    {
+        if (shape.Rank == 1 && shape.LowerBounds.Length > 0 && shape.LowerBounds[0] != 0)
+            return elementType + "[*]";
+        return elementType + "[" + new string(',', Math.Max(0, shape.Rank - 1)) + "]";
+    }
+    public string GetByReferenceType(string elementType) => elementType + "&";
+    public string GetPointerType(string elementType) => elementType + "*";
+    public string GetPinnedType(string elementType) => elementType;
+    public string GetGenericInstantiation(string genericType, ImmutableArray<string> typeArguments) =>
+        genericType + "[" + string.Join(",", typeArguments) + "]";
+    public string GetGenericMethodParameter(object? genericContext, int index) => "!!" + index;
+    public string GetGenericTypeParameter(object? genericContext, int index) => "!" + index;
+    public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) => unmodifiedType;
+    public string GetFunctionPointerType(MethodSignature<string> signature) => "fnptr";
+
+    public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind)
+        => BuildClrFullName(reader, reader.GetTypeDefinition(handle));
+
+    public string GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind)
+    {
+        var t = reader.GetTypeReference(handle);
+        var n = reader.GetString(t.Name);
+        // Walk the ResolutionScope chain for nested TypeRefs to prepend "Outer+".
+        if (t.ResolutionScope.Kind == HandleKind.TypeReference)
+        {
+            var outer = GetTypeFromReference(reader, (TypeReferenceHandle)t.ResolutionScope, rawTypeKind);
+            return outer + "+" + n;
+        }
+        var ns = reader.GetString(t.Namespace);
+        return string.IsNullOrEmpty(ns) ? n : ns + "." + n;
+    }
+
+    public string GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind) =>
+        reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
+
+    private static string BuildClrFullName(MetadataReader md, TypeDefinition td)
+    {
+        var chain = new List<string> { md.GetString(td.Name) };
+        var ns = md.GetString(td.Namespace);
+        var current = td;
+        while (current.IsNested)
+        {
+            var enclosingHandle = current.GetDeclaringType();
+            current = md.GetTypeDefinition(enclosingHandle);
+            chain.Insert(0, md.GetString(current.Name));
+            ns = md.GetString(current.Namespace);
+        }
+        var nameChain = string.Join("+", chain);
+        return string.IsNullOrEmpty(ns) ? nameChain : ns + "." + nameChain;
+    }
+}

@@ -816,10 +816,176 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             }
         }
 
+        // §3.5 Phase Ω(e): if the caller supplied method-level generic args, narrow the candidate
+        // set to callers whose IL contains a MethodSpec call site whose Instantiation blob matches.
+        // This is a best-effort post-pass; the xref index doesn't persist per-edge instantiation
+        // info (would require a format bump). Type-level-only filtering (typeArgs without
+        // methodArgs) is not yet implemented; the unfiltered set is returned in that case.
+        if (callee.MethodGenericArguments is { Count: > 0 } methodArgsAst)
+        {
+            var readers = SnapshotReaders();
+            var (rendered, renderErr) = GenericArgResolver.RenderAndValidate(
+                methodArgsAst, callee.ModuleVersionId, readers);
+            if (renderErr is not null) return FindCallersReadResult.Fail(renderErr);
+            var expected = rendered!;
+            var filtered = new List<CallerRef>(callers.Count);
+            foreach (var c in callers)
+            {
+                if (!_modules.TryGetValue(c.ModuleVersionId, out var callerMod)) continue;
+                if (CallerHasMatchingInstantiation(
+                        callerMod, c.MetadataToken, module, methodHandle, calleeKey, expected))
+                {
+                    filtered.Add(c);
+                }
+            }
+            callers = filtered;
+        }
+
         var calleeHandleStr = HandleFormat.Format(module.Mvid, callee.MetadataToken);
         return FindCallersReadResult.Ok(new FindCallersResult(
             module.Mvid, callee.MetadataToken, calleeHandleStr,
             callers, modulesSearched, FromCache: fromCache));
+    }
+
+    /// <summary>
+    /// Walks the caller's IL looking for any <c>MethodSpec</c> call site whose <c>Method</c>
+    /// resolves to the callee (intra MethodDef or cross-module MemberRef matching
+    /// <paramref name="calleeKey"/>) and whose <c>Instantiation</c> blob, decoded in wire
+    /// format, matches <paramref name="expectedMethodArgs"/> element-wise.
+    /// </summary>
+    private static bool CallerHasMatchingInstantiation(
+        Module callerModule, int callerToken,
+        Module calleeModule, MethodDefinitionHandle calleeHandle,
+        CalleeKey calleeKey, IReadOnlyList<string> expectedMethodArgs)
+    {
+        MethodDefinitionHandle callerHandle;
+        try { callerHandle = (MethodDefinitionHandle)MetadataTokens.Handle(callerToken); }
+        catch (ArgumentOutOfRangeException) { return false; }
+        catch (InvalidCastException) { return false; }
+
+        MethodDefinition callerDef;
+        try { callerDef = callerModule.MD.GetMethodDefinition(callerHandle); }
+        catch (BadImageFormatException) { return false; }
+        if (callerDef.RelativeVirtualAddress == 0) return false;
+
+        byte[] ilBytes;
+        try
+        {
+            var body = callerModule.PE.GetMethodBody(callerDef.RelativeVirtualAddress);
+            ilBytes = body.GetILBytes() ?? Array.Empty<byte>();
+        }
+        catch (BadImageFormatException) { return false; }
+
+        var calleeIsSameModule = callerModule.Mvid == calleeModule.Mvid;
+        var calleeIntraToken = MetadataTokens.GetToken(calleeHandle);
+
+        var span = ilBytes.AsSpan();
+        int pos = 0;
+        var provider = new WireFormatSignatureProvider();
+        while (pos < span.Length)
+        {
+            var b1 = span[pos++];
+            IlOpcodeTable.Op op;
+            if (b1 == 0xFE)
+            {
+                if (pos >= span.Length) break;
+                op = IlOpcodeTable.TwoByteOp(span[pos++]);
+            }
+            else
+            {
+                op = IlOpcodeTable.OneByteOp(b1);
+            }
+            var size = IlOpcodeTable.OperandSize(op);
+            if (size == -1)
+            {
+                if (pos + 4 > span.Length) break;
+                var n = BitConverter.ToInt32(span.Slice(pos, 4));
+                if (n < 0 || n > (span.Length - pos - 4) / 4) break;
+                pos += 4 + n * 4;
+                continue;
+            }
+            if (size == 4 && pos + 4 <= span.Length && op == IlOpcodeTable.Op.InlineMethod)
+            {
+                var token = BitConverter.ToInt32(span.Slice(pos, 4));
+                if (TryMatchMethodSpecCall(
+                        callerModule, token, calleeIsSameModule, calleeIntraToken, calleeKey,
+                        expectedMethodArgs, provider))
+                {
+                    return true;
+                }
+            }
+            pos += Math.Max(0, size);
+        }
+        return false;
+    }
+
+    private static bool TryMatchMethodSpecCall(
+        Module callerModule, int token,
+        bool calleeIsSameModule, int calleeIntraToken, CalleeKey calleeKey,
+        IReadOnlyList<string> expectedMethodArgs, WireFormatSignatureProvider provider)
+    {
+        EntityHandle h;
+        try { h = (EntityHandle)MetadataTokens.Handle(token); }
+        catch (ArgumentOutOfRangeException) { return false; }
+        if (h.Kind != HandleKind.MethodSpecification) return false;
+
+        MethodSpecification spec;
+        try { spec = callerModule.MD.GetMethodSpecification((MethodSpecificationHandle)h); }
+        catch (BadImageFormatException) { return false; }
+
+        // Does spec.Method resolve to the callee?
+        switch (spec.Method.Kind)
+        {
+            case HandleKind.MethodDefinition:
+                if (!calleeIsSameModule) return false;
+                if (MetadataTokens.GetToken(spec.Method) != calleeIntraToken) return false;
+                break;
+            case HandleKind.MemberReference:
+                MemberReference mr;
+                try { mr = callerModule.MD.GetMemberReference((MemberReferenceHandle)spec.Method); }
+                catch (BadImageFormatException) { return false; }
+                if (mr.GetKind() != MemberReferenceKind.Method) return false;
+                if (!MemberRefMatchesCalleeKey(callerModule, mr, calleeKey)) return false;
+                break;
+            default:
+                return false;
+        }
+
+        // Decode Instantiation blob in wire format and compare element-wise.
+        ImmutableArray<string> decoded;
+        try
+        {
+            decoded = spec.DecodeSignature(provider, genericContext: (object?)null);
+        }
+        catch (BadImageFormatException) { return false; }
+
+        if (decoded.Length != expectedMethodArgs.Count) return false;
+        for (int i = 0; i < decoded.Length; i++)
+            if (!string.Equals(decoded[i], expectedMethodArgs[i], StringComparison.Ordinal))
+                return false;
+        return true;
+    }
+
+    private static bool MemberRefMatchesCalleeKey(Module callerModule, MemberReference mr, CalleeKey key)
+    {
+        try
+        {
+            var typeName = ResolveOutboundTypeName(callerModule, mr.Parent, out var assemblyName);
+            if (typeName is null || assemblyName is null) return false;
+            if (!string.Equals(assemblyName, key.AssemblyName, StringComparison.Ordinal)) return false;
+            if (!string.Equals(typeName, key.TypeFullName, StringComparison.Ordinal)) return false;
+            var methodName = callerModule.MD.GetString(mr.Name);
+            if (!string.Equals(methodName, key.MethodName, StringComparison.Ordinal)) return false;
+            var decoder = new SignatureDecoder<string, object?>(
+                new StringSignatureProvider(callerModule.MD), callerModule.MD, genericContext: null);
+            var blob = callerModule.MD.GetBlobReader(mr.Signature);
+            var sig = decoder.DecodeMethodSignature(ref blob);
+            if (sig.ParameterTypes.Length != key.ParameterCount) return false;
+            if (sig.GenericParameterCount != key.GenericArity) return false;
+            var paramSig = string.Join(",", sig.ParameterTypes);
+            return string.Equals(paramSig, key.ParameterSignature, StringComparison.Ordinal);
+        }
+        catch (BadImageFormatException) { return false; }
     }
 
     private void InvalidateXref(Guid mvid)
