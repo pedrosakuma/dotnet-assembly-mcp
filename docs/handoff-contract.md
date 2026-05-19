@@ -124,6 +124,38 @@ Semantics, applied before the underlying resolution:
 
 The hint is a hint — trust is anchored to the MVID match, never to the path. Producers SHOULD populate the hint from `MethodIdentity.modulePath`.
 
+### 3.2 `import_assembly_manifest` — bulk handshake from a sidecar producer
+
+When the producer can enumerate every loaded assembly inside the target process (e.g. `dotnet-diagnostics-mcp` reading `TraceLog.ModuleFile`), it SHOULD hand the consumer a single bulk manifest instead of one `assemblyPathHint` per hotspot:
+
+```jsonc
+import_assembly_manifest({
+  "entries": [
+    { "moduleVersionId": "1f5b2e84-…", "path": "/app/MyApp.dll",  "name": "MyApp.dll"  },
+    { "moduleVersionId": "2a3b4c5d-…", "path": "/app/Lib.dll",    "name": "Lib.dll"    }
+    // …
+  ],
+  "mode": "lazy"   // default. "tier1" opens every PE eagerly.
+})
+→
+{
+  "mode":       "lazy",
+  "loaded":     [{ "moduleVersionId": "…", "moduleName": "…", "methodCount": 1234, "status": "loaded"|"already_loaded" }],
+  "registered": [{ "moduleVersionId": "…", "path": "…" }],
+  "skipped":    [{ "moduleVersionId": "…", "path": "…", "reason": "mvid_mismatch_with_path"|"file_not_found"|"invalid_argument"|"module_load_failed", "detail": "…" }]
+}
+```
+
+Semantics:
+
+- **`lazy` mode (default)** records each `(mvid → path)` in the resolver without opening the PE. A subsequent `get_method` for that MVID — *with no explicit `assemblyPathHint`* — uses the stored path automatically. Cheap for large manifests where the agent only drills into a small fraction of modules.
+- **`tier1` mode** opens every entry eagerly (same code path as `load_assembly`) and adds it to the metadata index.
+- Every entry is verified against the on-disk MVID before use. An entry whose actual MVID differs from the manifest is **rejected** with reason `mvid_mismatch_with_path` and the PE is **not** loaded — same safety property as §3.1.
+- Re-importing an already-loaded MVID is a no-op (`status: "already_loaded"`); the manifest is idempotent.
+- Imported lazy paths join the per-directory `FileSystemWatcher` so subsequent rebuilds are observed.
+
+The three result buckets partition the input: every entry appears in exactly one of `loaded`, `registered` or `skipped`.
+
 ---
 
 ## 4. Error shape

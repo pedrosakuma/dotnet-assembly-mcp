@@ -26,6 +26,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     public static readonly TimeSpan WatchDebounce = TimeSpan.FromMilliseconds(250);
 
     private readonly ConcurrentDictionary<Guid, Module> _modules = new();
+    private readonly ConcurrentDictionary<Guid, string> _pathHints = new();
     private readonly ConcurrentDictionary<string, FileSystemWatcher> _watchers =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, DateTime> _pendingReloads =
@@ -217,6 +218,49 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         foreach (var m in _modules.Values)
             list.Add(SummarizeModule(m));
         return list;
+    }
+
+    /// <inheritdoc />
+    public ProbeResult Probe(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return ProbeResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "path is required."));
+        if (!File.Exists(path))
+            return ProbeResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, $"file not found: {path}"));
+        var fullPath = Path.GetFullPath(path);
+        var opened = OpenModule(fullPath);
+        if (opened.Error is not null) return ProbeResult.Fail(opened.Error);
+        try { return ProbeResult.Ok(opened.Module!.Mvid); }
+        finally { opened.PE!.Dispose(); }
+    }
+
+    /// <inheritdoc />
+    public void RegisterPathHint(Guid moduleVersionId, string path)
+    {
+        if (moduleVersionId == Guid.Empty || string.IsNullOrWhiteSpace(path)) return;
+        _pathHints[moduleVersionId] = Path.GetFullPath(path);
+    }
+
+    /// <inheritdoc />
+    public bool TryGetPathHint(Guid moduleVersionId, out string? path)
+    {
+        if (_pathHints.TryGetValue(moduleVersionId, out var p))
+        {
+            path = p;
+            return true;
+        }
+        path = null;
+        return false;
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyDictionary<Guid, string> PathHints => _pathHints;
+
+    /// <inheritdoc />
+    public void WatchPath(string path)
+    {
+        if (!_watch || string.IsNullOrWhiteSpace(path)) return;
+        EnsureWatcher(Path.GetFullPath(path));
     }
 
     /// <inheritdoc />

@@ -85,6 +85,131 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "import_assembly_manifest",
+        Title = "Bulk-import an (mvid, path) manifest from a producer",
+        Destructive = false,
+        ReadOnly = false,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Bulk handshake intended for sidecar scenarios: a producer (typically " +
+        "dotnet-diagnostics-mcp) supplies a manifest of (moduleVersionId, path) pairs " +
+        "observed in a running process. In 'lazy' mode (default) each entry is recorded as " +
+        "a (mvid → path) hint without opening the PE — later get_method calls for that MVID " +
+        "use the hint automatically. In 'tier1' mode each entry is opened eagerly and added " +
+        "to the metadata index. Every entry's on-disk MVID is verified before use; an entry " +
+        "whose actual MVID differs from the manifest is rejected with reason " +
+        "'mvid_mismatch_with_path' (the path is never silently re-mapped). Re-importing the " +
+        "same MVID is idempotent.")]
+    public static AssemblyResult<ManifestImportResult> ImportAssemblyManifest(
+        IMetadataIndex index,
+        [Description("Manifest entries. Each must carry moduleVersionId (GUID 'D' format) and an absolute path; name is optional.")] IReadOnlyList<ManifestEntry> entries,
+        [Description("'lazy' (default) records (mvid → path) hints without opening the PEs; 'tier1' eagerly loads every entry into the metadata index.")] ManifestImportMode mode = ManifestImportMode.Lazy)
+    {
+        if (entries is null || entries.Count == 0)
+        {
+            var empty = new ManifestImportResult(mode, Array.Empty<ManifestImportLoaded>(),
+                Array.Empty<ManifestImportRegistered>(), Array.Empty<ManifestImportSkipped>());
+            return AssemblyResult.Ok(
+                empty,
+                "Manifest is empty — nothing to import.",
+                new NextActionHint("list_assemblies", "Inspect the modules currently loaded."));
+        }
+
+        var loaded = new List<ManifestImportLoaded>();
+        var registered = new List<ManifestImportRegistered>();
+        var skipped = new List<ManifestImportSkipped>();
+
+        var alreadyLoaded = new HashSet<Guid>();
+        foreach (var m in index.List()) alreadyLoaded.Add(m.ModuleVersionId);
+
+        foreach (var entry in entries)
+        {
+            if (entry is null)
+            {
+                skipped.Add(new ManifestImportSkipped(Guid.Empty, string.Empty,
+                    ErrorKinds.InvalidArgument, "entry is null."));
+                continue;
+            }
+            if (entry.ModuleVersionId == Guid.Empty || string.IsNullOrWhiteSpace(entry.Path))
+            {
+                skipped.Add(new ManifestImportSkipped(entry.ModuleVersionId, entry.Path ?? string.Empty,
+                    ErrorKinds.InvalidArgument, "moduleVersionId and path are required."));
+                continue;
+            }
+
+            if (alreadyLoaded.Contains(entry.ModuleVersionId))
+            {
+                var existing = index.List().First(m => m.ModuleVersionId == entry.ModuleVersionId);
+                loaded.Add(new ManifestImportLoaded(
+                    existing.ModuleVersionId, existing.ModuleName, existing.MethodCount, "already_loaded"));
+                continue;
+            }
+
+            if (!File.Exists(entry.Path))
+            {
+                skipped.Add(new ManifestImportSkipped(entry.ModuleVersionId, entry.Path,
+                    "file_not_found", $"no file exists at '{entry.Path}'."));
+                continue;
+            }
+
+            var probe = index.Probe(entry.Path);
+            if (!probe.IsSuccess)
+            {
+                skipped.Add(new ManifestImportSkipped(entry.ModuleVersionId, entry.Path,
+                    probe.Error!.Kind, probe.Error.Message));
+                continue;
+            }
+            if (probe.Mvid != entry.ModuleVersionId)
+            {
+                skipped.Add(new ManifestImportSkipped(entry.ModuleVersionId, entry.Path,
+                    "mvid_mismatch_with_path",
+                    $"file at '{entry.Path}' has MVID {probe.Mvid:D} but the manifest claims {entry.ModuleVersionId:D}."));
+                continue;
+            }
+
+            if (mode == ManifestImportMode.Tier1)
+            {
+                var load = index.Load(entry.Path);
+                if (!load.IsSuccess)
+                {
+                    skipped.Add(new ManifestImportSkipped(entry.ModuleVersionId, entry.Path,
+                        load.Error!.Kind, load.Error.Message));
+                    continue;
+                }
+                alreadyLoaded.Add(load.Module!.ModuleVersionId);
+                loaded.Add(new ManifestImportLoaded(
+                    load.Module.ModuleVersionId, load.Module.ModuleName, load.Module.MethodCount, "loaded"));
+            }
+            else
+            {
+                index.RegisterPathHint(entry.ModuleVersionId, entry.Path);
+                index.WatchPath(entry.Path);
+                registered.Add(new ManifestImportRegistered(entry.ModuleVersionId, Path.GetFullPath(entry.Path)));
+            }
+        }
+
+        var result = new ManifestImportResult(mode, loaded, registered, skipped);
+        var summary = mode switch
+        {
+            ManifestImportMode.Tier1 =>
+                $"Imported {loaded.Count} module(s) (tier1); {skipped.Count} skipped.",
+            _ =>
+                $"Registered {registered.Count} (mvid→path) hint(s); {loaded.Count} already loaded, {skipped.Count} skipped.",
+        };
+
+        NextActionHint next = skipped.Count > 0
+            ? new NextActionHint(
+                "list_assemblies",
+                $"{skipped.Count} entry(ies) were skipped — inspect their 'reason' field and re-issue corrected entries.")
+            : new NextActionHint(
+                "get_method",
+                "Resolve a MethodIdentity against an imported module — assemblyPathHint is no longer required for lazy-registered MVIDs.");
+
+        return AssemblyResult.Ok(result, summary, next);
+    }
+
+    [McpServerTool(
         Name = "get_method",
         Title = "Resolve a MethodIdentity to a method summary",
         Destructive = false,
@@ -653,18 +778,23 @@ public sealed class AssemblyTools
         {
             if (loaded.ModuleVersionId == mvid) return null;
         }
-        if (string.IsNullOrWhiteSpace(assemblyPathHint))
+        var hint = assemblyPathHint;
+        if (string.IsNullOrWhiteSpace(hint) && index.TryGetPathHint(mvid, out var lazyHint))
+        {
+            hint = lazyHint;
+        }
+        if (string.IsNullOrWhiteSpace(hint))
         {
             return new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {mvid:D}.");
         }
-        var load = index.Load(assemblyPathHint);
+        var load = index.Load(hint);
         if (!load.IsSuccess) return load.Error;
         if (load.Module!.ModuleVersionId != mvid)
         {
             return new AssemblyError(
                 ErrorKinds.MvidMismatch,
-                $"assemblyPathHint '{assemblyPathHint}' has MVID {load.Module.ModuleVersionId:D} but the caller requested {mvid:D}.");
+                $"assemblyPathHint '{hint}' has MVID {load.Module.ModuleVersionId:D} but the caller requested {mvid:D}.");
         }
         return null;
     }

@@ -22,6 +22,38 @@ public interface IMetadataIndex
     IReadOnlyList<ModuleSummary> List();
 
     /// <summary>
+    /// Reads the MVID of the PE at <paramref name="path"/> without registering it. Used by
+    /// <c>import_assembly_manifest</c> to confirm an entry's claimed MVID before loading.
+    /// </summary>
+    ProbeResult Probe(string path);
+
+    /// <summary>
+    /// Registers a lazy <c>(mvid → path)</c> mapping without opening the PE. Consumed by
+    /// <see cref="TryGetPathHint"/> so subsequent <c>get_method</c> calls that supply no
+    /// explicit <c>assemblyPathHint</c> can still resolve the module on demand. Re-registering
+    /// the same MVID with a different path overwrites the previous hint; resolution will
+    /// still cross-check the on-disk MVID at load time.
+    /// </summary>
+    void RegisterPathHint(Guid moduleVersionId, string path);
+
+    /// <summary>Returns the lazily-registered path for an MVID, if any.</summary>
+    bool TryGetPathHint(Guid moduleVersionId, out string? path);
+
+    /// <summary>
+    /// Snapshot of every lazily-registered <c>(mvid → path)</c> mapping. Read-only; mutations
+    /// must go through <see cref="RegisterPathHint"/>.
+    /// </summary>
+    IReadOnlyDictionary<Guid, string> PathHints { get; }
+
+    /// <summary>
+    /// Installs the per-directory <see cref="System.IO.FileSystemWatcher"/> for the path's
+    /// directory without opening the PE. No-op when the index was constructed without
+    /// <c>watchForChanges</c>. Used by <c>import_assembly_manifest</c> in <c>lazy</c> mode
+    /// so registered paths participate in watcher events the moment they exist on disk.
+    /// </summary>
+    void WatchPath(string path);
+
+    /// <summary>
     /// Resolves a method identity to a <see cref="MethodSummary"/>. Implements the resolution
     /// algorithm from <c>docs/handoff-contract.md §3</c>.
     /// </summary>
@@ -95,4 +127,12 @@ public readonly record struct ResolveResult(MethodSummary? Method, AssemblyError
     public bool IsSuccess => Method is not null;
     public static ResolveResult Ok(MethodSummary m) => new(m, null);
     public static ResolveResult Fail(AssemblyError e) => new(null, e);
+}
+
+/// <summary>Result of <see cref="IMetadataIndex.Probe"/>.</summary>
+public readonly record struct ProbeResult(Guid Mvid, AssemblyError? Error)
+{
+    public bool IsSuccess => Error is null;
+    public static ProbeResult Ok(Guid mvid) => new(mvid, null);
+    public static ProbeResult Fail(AssemblyError e) => new(Guid.Empty, e);
 }
