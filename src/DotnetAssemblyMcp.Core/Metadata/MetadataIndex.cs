@@ -447,6 +447,11 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private static XrefData BuildXref(Module module)
     {
         var data = new XrefData(new Dictionary<int, List<int>>(), new List<OutboundCallRef>());
+        // Per-method dedup sets reset between methods: a single method may emit the same call
+        // multiple times non-consecutively (e.g. call Foo; call Bar; call Foo), and we want each
+        // pair (caller, target) recorded only once on either side.
+        var intraSeen = new HashSet<long>();
+        var outboundSeen = new HashSet<OutboundCallRef>();
         foreach (var methodHandle in module.MD.MethodDefinitions)
         {
             var def = module.MD.GetMethodDefinition(methodHandle);
@@ -461,12 +466,15 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             catch (BadImageFormatException) { continue; }
 
             var callerToken = MetadataTokens.GetToken(methodHandle);
-            ScanCallsFromIl(module, ilBytes, callerToken, data);
+            intraSeen.Clear();
+            outboundSeen.Clear();
+            ScanCallsFromIl(module, ilBytes, callerToken, data, intraSeen, outboundSeen);
         }
         return data;
     }
 
-    private static void ScanCallsFromIl(Module module, byte[] il, int callerToken, XrefData data)
+    private static void ScanCallsFromIl(Module module, byte[] il, int callerToken, XrefData data,
+        HashSet<long> intraSeen, HashSet<OutboundCallRef> outboundSeen)
     {
         var span = il.AsSpan();
         int pos = 0;
@@ -489,22 +497,26 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             {
                 if (pos + 4 > span.Length) break;
                 var n = BitConverter.ToInt32(span.Slice(pos, 4));
-                pos += 4 + Math.Max(0, n) * 4;
+                // Validate without overflow: n quads must fit in the remaining IL.
+                if (n < 0 || n > (span.Length - pos - 4) / 4) break;
+                pos += 4 + n * 4;
                 continue;
             }
 
-            if (size == 4 && pos + 4 <= span.Length &&
-                (op == IlOpcodeTable.Op.InlineMethod || op == IlOpcodeTable.Op.InlineTok))
+            // Only treat real call-edge opcodes as callers. InlineTok is `ldtoken`, which
+            // takes a method handle but does not invoke it.
+            if (size == 4 && pos + 4 <= span.Length && op == IlOpcodeTable.Op.InlineMethod)
             {
                 var token = BitConverter.ToInt32(span.Slice(pos, 4));
-                ClassifyCallToken(module, token, callerToken, data);
+                ClassifyCallToken(module, token, callerToken, data, intraSeen, outboundSeen);
             }
 
             pos += Math.Max(0, size);
         }
     }
 
-    private static void ClassifyCallToken(Module module, int token, int callerToken, XrefData data)
+    private static void ClassifyCallToken(Module module, int token, int callerToken, XrefData data,
+        HashSet<long> intraSeen, HashSet<OutboundCallRef> outboundSeen)
     {
         EntityHandle h;
         try { h = (EntityHandle)MetadataTokens.Handle(token); }
@@ -514,10 +526,11 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         switch (h.Kind)
         {
             case HandleKind.MethodDefinition:
-                AddIntra(data.Intra, token, callerToken);
+                AddIntra(data.Intra, token, callerToken, intraSeen);
                 break;
             case HandleKind.MemberReference:
-                TryAddOutbound(module, (MemberReferenceHandle)h, callerToken, data.Outbound);
+                ClassifyMemberRef(module, (MemberReferenceHandle)h, callerToken, data,
+                    intraSeen, outboundSeen);
                 break;
             case HandleKind.MethodSpecification:
                 try
@@ -527,11 +540,11 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                     {
                         case HandleKind.MethodDefinition:
                             AddIntra(data.Intra,
-                                MetadataTokens.GetToken(spec.Method), callerToken);
+                                MetadataTokens.GetToken(spec.Method), callerToken, intraSeen);
                             break;
                         case HandleKind.MemberReference:
-                            TryAddOutbound(module,
-                                (MemberReferenceHandle)spec.Method, callerToken, data.Outbound);
+                            ClassifyMemberRef(module, (MemberReferenceHandle)spec.Method,
+                                callerToken, data, intraSeen, outboundSeen);
                             break;
                     }
                 }
@@ -540,25 +553,55 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private static void AddIntra(Dictionary<int, List<int>> intra, int calleeToken, int callerToken)
+    private static void ClassifyMemberRef(Module module, MemberReferenceHandle mrh,
+        int callerToken, XrefData data,
+        HashSet<long> intraSeen, HashSet<OutboundCallRef> outboundSeen)
     {
+        MemberReference mr;
+        try { mr = module.MD.GetMemberReference(mrh); }
+        catch (BadImageFormatException) { return; }
+        if (mr.GetKind() != MemberReferenceKind.Method) return;
+
+        // Try same-module first: many same-module call sites are emitted as MemberRef
+        // (interface calls, generic-type instantiations, etc.). If we resolve to a local
+        // MethodDef, record it as Intra. Otherwise fall back to the cross-module path.
+        var localType = ResolveLocalParentType(module, mr.Parent);
+        if (localType is { } typeDefHandle)
+        {
+            var local = TryFindLocalMethod(module, typeDefHandle, mr);
+            if (local is { } methodToken)
+            {
+                AddIntra(data.Intra, methodToken, callerToken, intraSeen);
+                return;
+            }
+        }
+
+        TryAddOutbound(module, mr, callerToken, data.Outbound, outboundSeen);
+    }
+
+    private static void AddIntra(Dictionary<int, List<int>> intra, int calleeToken, int callerToken,
+        HashSet<long> seen)
+    {
+        // Pack (callee, caller) into a 64-bit key for the per-method seen-set.
+        var key = ((long)calleeToken << 32) | (uint)callerToken;
+        if (!seen.Add(key)) return;
         if (!intra.TryGetValue(calleeToken, out var list))
         {
             list = new List<int>();
             intra[calleeToken] = list;
         }
+        // The per-method seen-set guarantees no duplicate within one method, but the list may
+        // already contain `callerToken` from a previous method (impossible — different callers)
+        // or from an earlier scan; keep the legacy adjacent-dup guard as belt-and-braces.
         if (list.Count == 0 || list[^1] != callerToken)
             list.Add(callerToken);
     }
 
-    private static void TryAddOutbound(Module module, MemberReferenceHandle mrh,
-        int callerToken, List<OutboundCallRef> outbound)
+    private static void TryAddOutbound(Module module, MemberReference mr,
+        int callerToken, List<OutboundCallRef> outbound, HashSet<OutboundCallRef> seen)
     {
         try
         {
-            var mr = module.MD.GetMemberReference(mrh);
-            if (mr.GetKind() != MemberReferenceKind.Method) return;
-
             var typeName = ResolveOutboundTypeName(module, mr.Parent, out var assemblyName);
             if (typeName is null || assemblyName is null) return;
 
@@ -572,10 +615,110 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             var entry = new OutboundCallRef(callerToken, assemblyName,
                 typeName, methodName, sig.ParameterTypes.Length,
                 sig.GenericParameterCount, paramSig);
-            if (outbound.Count == 0 || !outbound[^1].Equals(entry))
+            if (seen.Add(entry))
                 outbound.Add(entry);
         }
         catch (BadImageFormatException) { /* skip */ }
+    }
+
+    /// <summary>
+    /// Resolves a MemberRef Parent to a TypeDefinitionHandle in the current module, if any.
+    /// Returns null when the parent points outside this assembly (handled as outbound) or
+    /// cannot be resolved.
+    /// </summary>
+    private static TypeDefinitionHandle? ResolveLocalParentType(Module module, EntityHandle parent)
+    {
+        try
+        {
+            switch (parent.Kind)
+            {
+                case HandleKind.TypeDefinition:
+                    return (TypeDefinitionHandle)parent;
+                case HandleKind.TypeReference:
+                    var tr = module.MD.GetTypeReference((TypeReferenceHandle)parent);
+                    return tr.ResolutionScope.Kind == HandleKind.ModuleDefinition
+                        ? FindTypeDefByName(module, tr)
+                        : null;
+                case HandleKind.TypeSpecification:
+                    {
+                        var ts = module.MD.GetTypeSpecification((TypeSpecificationHandle)parent);
+                        var sigReader = module.MD.GetBlobReader(ts.Signature);
+                        while (sigReader.RemainingBytes > 0)
+                        {
+                            var b = sigReader.ReadByte();
+                            if (b == 0x12 /* CLASS */ || b == 0x11 /* VALUETYPE */)
+                            {
+                                var encoded = sigReader.ReadCompressedInteger();
+                                if ((encoded & 0x3) == 0)
+                                    return MetadataTokens.TypeDefinitionHandle(encoded >> 2);
+                                return null;
+                            }
+                            // 0x15 GENERICINST is a 1-byte wrapper; the next byte is CLASS/VALUETYPE.
+                            // Other prefixes (CMOD_OPT/REQD = 0x20/0x1F etc.) are not expected here
+                            // but the loop tolerates them.
+                        }
+                        return null;
+                    }
+                default:
+                    return null;
+            }
+        }
+        catch (BadImageFormatException) { return null; }
+    }
+
+    private static TypeDefinitionHandle? FindTypeDefByName(Module module, TypeReference tr)
+    {
+        // Only handles the AssemblyReference/ModuleDefinition shape — nested TypeRef chains
+        // for same-module references are vanishingly rare and skipped intentionally.
+        var name = tr.Name;
+        var ns = tr.Namespace;
+        foreach (var tdh in module.MD.TypeDefinitions)
+        {
+            var td = module.MD.GetTypeDefinition(tdh);
+            if (module.MD.StringComparer.Equals(td.Name, module.MD.GetString(name))
+                && (ns.IsNil
+                    ? td.Namespace.IsNil
+                    : module.MD.StringComparer.Equals(td.Namespace, module.MD.GetString(ns))))
+                return tdh;
+        }
+        return null;
+    }
+
+    private static int? TryFindLocalMethod(Module module, TypeDefinitionHandle parentType,
+        MemberReference mr)
+    {
+        var methodName = module.MD.GetString(mr.Name);
+        MethodSignature<string> mrSig;
+        try
+        {
+            var decoder = new SignatureDecoder<string, object?>(
+                new StringSignatureProvider(module.MD), module.MD, genericContext: null);
+            var blob = module.MD.GetBlobReader(mr.Signature);
+            mrSig = decoder.DecodeMethodSignature(ref blob);
+        }
+        catch (BadImageFormatException) { return null; }
+        var mrParamSig = string.Join(",", mrSig.ParameterTypes);
+
+        var td = module.MD.GetTypeDefinition(parentType);
+        foreach (var mh in td.GetMethods())
+        {
+            var def = module.MD.GetMethodDefinition(mh);
+            if (!module.MD.StringComparer.Equals(def.Name, methodName)) continue;
+            if (def.GetGenericParameters().Count != mrSig.GenericParameterCount) continue;
+            MethodSignature<string> defSig;
+            try
+            {
+                var dec = new SignatureDecoder<string, object?>(
+                    new StringSignatureProvider(module.MD), module.MD, genericContext: null);
+                var defBlob = module.MD.GetBlobReader(def.Signature);
+                defSig = dec.DecodeMethodSignature(ref defBlob);
+            }
+            catch (BadImageFormatException) { continue; }
+            if (defSig.ParameterTypes.Length != mrSig.ParameterTypes.Length) continue;
+            if (string.Join(",", defSig.ParameterTypes) != mrParamSig) continue;
+            return MetadataTokens.GetToken(mh);
+        }
+        return null;
     }
 
     private static string? ResolveOutboundTypeName(Module module, EntityHandle parent,
@@ -916,9 +1059,15 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     private static string TypeName(Module m, TypeDefinition t)
     {
+        var name = m.MD.GetString(t.Name);
+        var declaring = t.GetDeclaringType();
+        if (!declaring.IsNil)
+        {
+            var outer = TypeName(m, m.MD.GetTypeDefinition(declaring));
+            return $"{outer}+{name}";
+        }
         var ns = m.MD.GetString(t.Namespace);
-        var n = m.MD.GetString(t.Name);
-        return string.IsNullOrEmpty(ns) ? n : $"{ns}.{n}";
+        return string.IsNullOrEmpty(ns) ? name : $"{ns}.{name}";
     }
 
     private static string? TryReadUserString(Module m, int token)

@@ -66,6 +66,45 @@ public sealed class CrossModuleXrefTests
     }
 
     [Fact]
+    public void FindCallers_resolves_callee_on_nested_type()
+    {
+        using var index = new MetadataIndex();
+        index.Load(SampleLibPath);
+        index.Load(SampleConsumerPath);
+
+        var ping = MethodOf(typeof(SampleLib.NestingHost.Inner), "Ping", typeof(int));
+        var caller = MethodOf(typeof(SampleConsumer.NestedCaller), "CallInnerPingTwice", typeof(int));
+
+        var result = index.FindCallers(IdentityOf(ping));
+
+        result.IsSuccess.Should().BeTrue();
+        result.Result!.Callers.Should().Contain(c =>
+            c.ModuleVersionId == caller.Module.ModuleVersionId &&
+            c.MetadataToken == caller.MetadataToken);
+    }
+
+    [Fact]
+    public void FindCallers_does_not_duplicate_non_adjacent_repeated_calls()
+    {
+        using var index = new MetadataIndex();
+        index.Load(SampleLibPath);
+        index.Load(SampleConsumerPath);
+
+        var ping = MethodOf(typeof(SampleLib.NestingHost.Inner), "Ping", typeof(int));
+        var caller = MethodOf(typeof(SampleConsumer.NestedCaller), "CallInnerPingTwice", typeof(int));
+
+        var result = index.FindCallers(IdentityOf(ping));
+        result.IsSuccess.Should().BeTrue();
+
+        // CallInnerPingTwice calls Ping twice with a ToString() between them. Without the
+        // per-method dedup fix, the same (mvid, token) caller would be reported twice.
+        result.Result!.Callers
+            .Count(c => c.ModuleVersionId == caller.Module.ModuleVersionId &&
+                        c.MetadataToken == caller.MetadataToken)
+            .Should().Be(1);
+    }
+
+    [Fact]
     public void FindCallers_without_consumer_loaded_finds_no_cross_module_caller()
     {
         using var index = new MetadataIndex();

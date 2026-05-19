@@ -55,3 +55,12 @@ public interface ILogger
 {
     void Log(string message);
 }
+
+/// <summary>Hosts a nested type used by xref tests to exercise the Outer+Inner naming path.</summary>
+public class NestingHost
+{
+    public class Inner
+    {
+        public int Ping(int x) => x + 1;
+    }
+}

@@ -81,6 +81,24 @@ public sealed class XrefIndexTests
     }
 
     [Fact]
+    public void FindCallers_finds_same_module_interface_caller_via_memberref()
+    {
+        // OrderService.Process(int) calls _logger.Log(string), an interface MemberRef whose
+        // parent type lives in the same module. The xref index must resolve the MemberRef
+        // back to a local MethodDef so this caller is discovered without loading any consumer.
+        using var index = new MetadataIndex();
+        index.Load(SampleLibPath);
+
+        var log = MethodOf(typeof(SampleLib.ILogger), "Log", typeof(string));
+        var processInt = MethodOf(typeof(SampleLib.OrderService), "Process", typeof(int));
+
+        var result = index.FindCallers(IdentityOf(log));
+
+        result.IsSuccess.Should().BeTrue();
+        result.Result!.Callers.Should().Contain(c => c.MetadataToken == processInt.MetadataToken);
+    }
+
+    [Fact]
     public void FindCallers_unknown_mvid_returns_module_not_found()
     {
         using var index = new MetadataIndex();

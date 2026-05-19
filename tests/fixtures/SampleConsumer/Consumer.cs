@@ -27,3 +27,21 @@ public sealed class NullLogger : ILogger
 {
     public void Log(string message) { /* discard */ }
 }
+
+/// <summary>
+/// Exercises two cross-module xref edge cases:
+/// 1) Calling a method on a nested type (LibNS.NestingHost+Inner.Ping).
+/// 2) Calling the same target twice from one caller with a non-call statement in between,
+///    so the per-method outbound dedup must not collapse only adjacent emissions.
+/// </summary>
+public sealed class NestedCaller
+{
+    public int CallInnerPingTwice(int x)
+    {
+        var inner = new NestingHost.Inner();
+        var first = inner.Ping(x);
+        var label = first.ToString(System.Globalization.CultureInfo.InvariantCulture); // breaks adjacency
+        var second = inner.Ping(first);  // duplicate target, non-adjacent emission
+        return second + label.Length;
+    }
+}
