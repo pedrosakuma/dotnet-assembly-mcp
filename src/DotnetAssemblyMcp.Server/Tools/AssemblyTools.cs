@@ -38,7 +38,7 @@ public sealed class AssemblyTools
             return AssemblyResult.Fail<ModuleSummary>(
                 $"Failed to load '{path}': {result.Error!.Message}",
                 result.Error,
-                new NextActionHint("list_assemblies", "List currently loaded modules to confirm what is already available."));
+                ErrorRecoveryHint(result.Error));
         }
 
         var m = result.Module!;
@@ -106,28 +106,27 @@ public sealed class AssemblyTools
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
         {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{moduleVersionId}' as a GUID.");
             return AssemblyResult.Fail<MethodSummary>(
                 "moduleVersionId is not a valid GUID.",
-                new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{moduleVersionId}' as a GUID."),
-                new NextActionHint("list_assemblies", "Inspect loaded MVIDs in the expected format."));
+                err,
+                ErrorRecoveryHint(err));
         }
 
         if (!TryParseToken(metadataToken, out var token))
         {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{metadataToken}' as a 32-bit metadata token.");
             return AssemblyResult.Fail<MethodSummary>(
                 "metadataToken is not a valid integer.",
-                new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{metadataToken}' as a 32-bit metadata token."),
-                new NextActionHint("get_method", "Pass the token as decimal (100663297) or hex (0x06000001)."));
+                err,
+                ErrorRecoveryHint(err));
         }
 
         var identity = new MethodIdentity(mvid, token, TypeFullName: typeFullName, MethodName: methodName, GenericArity: genericArity);
         var result = index.Resolve(identity);
         if (!result.IsSuccess)
         {
-            var hint = result.Error!.Kind == ErrorKinds.ModuleNotFound
-                ? new NextActionHint("load_assembly", "Load the assembly whose MVID matches the diagnostic payload.")
-                : new NextActionHint("list_assemblies", "Confirm the loaded modules and tokens by listing the metadata index.");
-            return AssemblyResult.Fail<MethodSummary>(result.Error.Message, result.Error, hint);
+            return AssemblyResult.Fail<MethodSummary>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
         }
 
         var m = result.Method!;
@@ -161,27 +160,26 @@ public sealed class AssemblyTools
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
         {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{moduleVersionId}' as a GUID.");
             return AssemblyResult.Fail<DecompiledMethod>(
                 "moduleVersionId is not a valid GUID.",
-                new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{moduleVersionId}' as a GUID."),
-                new NextActionHint("list_assemblies", "Inspect loaded MVIDs in the expected format."));
+                err,
+                ErrorRecoveryHint(err));
         }
         if (!TryParseToken(metadataToken, out var token))
         {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{metadataToken}' as a 32-bit metadata token.");
             return AssemblyResult.Fail<DecompiledMethod>(
                 "metadataToken is not a valid integer.",
-                new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{metadataToken}' as a 32-bit metadata token."),
-                new NextActionHint("decompile_method", "Pass the token as decimal (100663297) or hex (0x06000001)."));
+                err,
+                ErrorRecoveryHint(err));
         }
 
         var identity = new MethodIdentity(mvid, token);
         var result = decompiler.Decompile(identity, maxChars);
         if (!result.IsSuccess)
         {
-            var hint = result.Error!.Kind == ErrorKinds.ModuleNotFound
-                ? new NextActionHint("load_assembly", "Load the assembly whose MVID matches the requested method.")
-                : new NextActionHint("get_method", "Confirm the identity resolves with get_method before retrying.");
-            return AssemblyResult.Fail<DecompiledMethod>(result.Error.Message, result.Error, hint);
+            return AssemblyResult.Fail<DecompiledMethod>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
         }
 
         var d = result.Source!;
@@ -213,7 +211,7 @@ public sealed class AssemblyTools
         [Description("Optional cap on raw IL bytes encoded in the response. Pass 0 for the server default (4 KiB).")] int maxBytes = 0)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
-            return AssemblyResult.Fail<IlMethodBody>(err!.Message, err, new NextActionHint("list_assemblies", "Inspect loaded modules."));
+            return AssemblyResult.Fail<IlMethodBody>(err!.Message, err, ErrorRecoveryHint(err));
 
         var result = index.GetIlBody(identity, maxBytes);
         if (!result.IsSuccess)
@@ -250,7 +248,7 @@ public sealed class AssemblyTools
         [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
-            return AssemblyResult.Fail<IlScanResult>(err!.Message, err, new NextActionHint("list_assemblies", "Inspect loaded modules."));
+            return AssemblyResult.Fail<IlScanResult>(err!.Message, err, ErrorRecoveryHint(err));
 
         var result = index.ScanIl(identity);
         if (!result.IsSuccess)
@@ -292,8 +290,7 @@ public sealed class AssemblyTools
         [Description("Max types per page (default 50, capped at 500).")] int pageSize = ListTypesQuery.DefaultPageSize)
     {
         if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var loadErr))
-            return AssemblyResult.Fail<ListTypesPage>(loadErr!.Message, loadErr,
-                new NextActionHint("load_assembly", "Pass a valid absolute path to a managed PE file or the MVID of a loaded module."));
+            return AssemblyResult.Fail<ListTypesPage>(loadErr!.Message, loadErr, ErrorRecoveryHint(loadErr));
 
         TypeKind? kindFilter = null;
         if (!string.IsNullOrWhiteSpace(kind))
@@ -376,8 +373,12 @@ public sealed class AssemblyTools
         if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
             out var mvid, out var typeToken, out var resolveErr))
         {
-            return AssemblyResult.Fail<ListMethodsPage>(resolveErr!.Message, resolveErr,
-                new NextActionHint("list_types", "Use list_types first to discover a valid type handle."));
+            // typeFullName misses surface as IdentityMalformed; both share the same recovery
+            // (use list_types to discover a real handle) so we still prefer the centralized helper.
+            var hint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
+                ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
+                : ErrorRecoveryHint(resolveErr);
+            return AssemblyResult.Fail<ListMethodsPage>(resolveErr.Message, resolveErr, hint);
         }
 
         var query = new ListMethodsQuery(
@@ -448,8 +449,7 @@ public sealed class AssemblyTools
         [Description("Max matches per page (default 20, capped at 200).")] int pageSize = FindMethodQuery.DefaultPageSize)
     {
         if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var resolveErr))
-            return AssemblyResult.Fail<FindMethodPage>(resolveErr!.Message, resolveErr,
-                new NextActionHint("list_assemblies", "Inspect which modules are loaded."));
+            return AssemblyResult.Fail<FindMethodPage>(resolveErr!.Message, resolveErr, ErrorRecoveryHint(resolveErr));
 
         var query = new FindMethodQuery(namePattern, signatureContains, cursor, pageSize);
         var result = index.FindMethod(mvid, query);
@@ -516,8 +516,7 @@ public sealed class AssemblyTools
         [Description("Callee MethodDef metadata token (table 0x06). Accepts decimal or hex.")] string metadataToken)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
-            return AssemblyResult.Fail<FindCallersResult>(err!.Message, err,
-                new NextActionHint("list_assemblies", "Inspect loaded modules."));
+            return AssemblyResult.Fail<FindCallersResult>(err!.Message, err, ErrorRecoveryHint(err));
 
         var result = index.FindCallers(identity);
         if (!result.IsSuccess)
@@ -559,10 +558,39 @@ public sealed class AssemblyTools
         return true;
     }
 
-    private static NextActionHint ErrorRecoveryHint(AssemblyError error) =>
-        error.Kind == ErrorKinds.ModuleNotFound
-            ? new NextActionHint("load_assembly", "Load the assembly whose MVID matches the requested method.")
-            : new NextActionHint("get_method", "Confirm the identity resolves with get_method before retrying.");
+    private static NextActionHint ErrorRecoveryHint(AssemblyError error) => error.Kind switch
+    {
+        ErrorKinds.ModuleNotFound => new NextActionHint(
+            "load_assembly",
+            "Load the assembly whose MVID matches the request, then retry."),
+        ErrorKinds.ModuleLoadFailed => new NextActionHint(
+            "list_assemblies",
+            "Verify the path / file is a valid managed PE and confirm what is already loaded."),
+        ErrorKinds.MvidMismatch => new NextActionHint(
+            "list_assemblies",
+            "Inspect loaded MVIDs and reload the build that matches the diagnostic payload."),
+        ErrorKinds.TokenWrongTable => new NextActionHint(
+            "find_method",
+            "The token does not point at a MethodDef. Search by name to locate the right token."),
+        ErrorKinds.TokenOutOfRange => new NextActionHint(
+            "find_method",
+            "The MethodDef row id exceeds the table. Re-discover the token via find_method or list_methods."),
+        ErrorKinds.TokenTrimmed => new NextActionHint(
+            "get_method",
+            "The method has no IL body (trimmed / NativeAOT). Use get_method for the signature-only view."),
+        ErrorKinds.IdentityMalformed => new NextActionHint(
+            "get_method",
+            "Re-issue the call with both moduleVersionId (GUID) and metadataToken populated."),
+        ErrorKinds.PathNotAllowed => new NextActionHint(
+            "list_assemblies",
+            "The path is outside the configured search roots. Inspect loaded modules and use their MVID instead."),
+        ErrorKinds.InvalidArgument => new NextActionHint(
+            "list_assemblies",
+            "Validate the argument shape against the tool description and retry."),
+        _ => new NextActionHint(
+            "list_assemblies",
+            "Inspect loaded modules and retry the call."),
+    };
 
     private static bool TryResolveModuleId(IMetadataIndex index, string mvidOrPath,
         out Guid mvid, out AssemblyError? error)
