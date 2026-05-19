@@ -126,6 +126,18 @@ Scope-disjoint from [`pedrosakuma/dotnet-diagnostics-mcp`](https://github.com/pe
 
 The handoff contract — `MethodIdentity = (moduleVersionId, metadataToken)` plus optional `genericTypeArguments` (§3.5) — lives in [`docs/handoff-contract.md`](./docs/handoff-contract.md) and is also served at `assembly://contract/method-identity` as an MCP resource.
 
+### MCP resources
+
+In addition to the tool surface, the server publishes a small set of read-only **resources** that MCP clients can subscribe to or fetch directly. None of them require a tool call:
+
+| URI                                 | Content |
+|-------------------------------------|---------|
+| `assembly://contract/method-identity` | Full text of [`docs/handoff-contract.md`](./docs/handoff-contract.md) — the producer/consumer wire contract for `MethodIdentity`. |
+| `assembly://manifest/loaded`        | JSON array of every currently-loaded module (`mvid`, `path`, `methodCount`). Mirrors `list_assemblies` without consuming a tool slot. |
+| `assembly://manifest/loaded/{mvid}` | JSON object for one module by MVID. Returns 404-style empty body when the MVID isn't loaded. |
+
+Clients that support resource subscriptions get a notification whenever the loaded-module set changes (e.g. after `load_assembly` or a file-watcher reload).
+
 ## Where it complements SourceLink
 
 This server **does not** replace SourceLink / TraceLog source resolution. It is what the agent reaches for when:

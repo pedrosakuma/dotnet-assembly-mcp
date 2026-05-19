@@ -107,7 +107,9 @@ internal static class GenericArgResolver
         {
             return new AssemblyError(
                 ErrorKinds.GenericInstantiationUnresolvable,
-                $"type '{fullName}' did not resolve in any loaded module. Import the manifest for the dependency or supply assemblyPathHint, then retry.");
+                $"type '{fullName}' did not resolve as a TypeDef in any loaded module, and is not in the well-known BCL allowlist. " +
+                "Call load_assembly for the assembly that defines this type (or supply assemblyPathHint on the next call), then retry. " +
+                "Note: this consumer-side resolver does not chase TypeRef entries automatically.");
         }
         if (hits.Count > 1)
         {
