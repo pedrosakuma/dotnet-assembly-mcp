@@ -33,7 +33,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private readonly bool _watch;
     private int _disposed;
 
-    private readonly ConcurrentDictionary<Guid, IReadOnlyDictionary<int, List<int>>> _xrefCache = new();
+    private readonly ConcurrentDictionary<Guid, XrefData> _xrefCache = new();
     private readonly string _xrefCacheDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".cache", "dotnet-assembly-mcp");
@@ -370,33 +370,53 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var common = TryResolveMethod(callee);
         if (common.Error is not null) return FindCallersReadResult.Fail(common.Error);
         var module = common.Module!;
+        var methodHandle = common.Handle;
 
         var fromCache = true;
-        var index = _xrefCache.GetOrAdd(module.Mvid, _ =>
+        var xref = _xrefCache.GetOrAdd(module.Mvid, _ =>
         {
             fromCache = false;
             return LoadOrBuildXref(module);
         });
 
-        var callerTokens = index.TryGetValue(callee.MetadataToken, out var list)
-            ? list
-            : (IReadOnlyList<int>)Array.Empty<int>();
+        var callers = new List<CallerRef>();
 
-        var callers = new List<CallerRef>(callerTokens.Count);
-        foreach (var token in callerTokens)
+        // Same-module callers.
+        if (xref.Intra.TryGetValue(callee.MetadataToken, out var localCallers))
         {
-            var handle = (MethodDefinitionHandle)MetadataTokens.Handle(token);
-            callers.Add(new CallerRef(
-                module.Mvid,
-                token,
-                HandleFormat.Format(module.Mvid, token),
-                RenderMethodDef(module, handle)));
+            foreach (var token in localCallers)
+            {
+                var h = (MethodDefinitionHandle)MetadataTokens.Handle(token);
+                callers.Add(new CallerRef(
+                    module.Mvid, token, HandleFormat.Format(module.Mvid, token),
+                    RenderMethodDef(module, h)));
+            }
+        }
+
+        // Cross-module: compute the callee's signature key once and probe every other loaded module.
+        var calleeKey = BuildCalleeKey(module, methodHandle);
+        var modulesSearched = 1;
+        foreach (var other in _modules.Values)
+        {
+            if (other.Mvid == module.Mvid) continue;
+            modulesSearched++;
+
+            var otherXref = _xrefCache.GetOrAdd(other.Mvid, _ => LoadOrBuildXref(other));
+            foreach (var outbound in otherXref.Outbound)
+            {
+                if (!outbound.Matches(calleeKey)) continue;
+                var h = (MethodDefinitionHandle)MetadataTokens.Handle(outbound.CallerToken);
+                callers.Add(new CallerRef(
+                    other.Mvid, outbound.CallerToken,
+                    HandleFormat.Format(other.Mvid, outbound.CallerToken),
+                    RenderMethodDef(other, h)));
+            }
         }
 
         var calleeHandleStr = HandleFormat.Format(module.Mvid, callee.MetadataToken);
         return FindCallersReadResult.Ok(new FindCallersResult(
             module.Mvid, callee.MetadataToken, calleeHandleStr,
-            callers, ModulesSearched: 1, FromCache: fromCache));
+            callers, modulesSearched, FromCache: fromCache));
     }
 
     private void InvalidateXref(Guid mvid)
@@ -413,7 +433,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     private string XrefCachePath(Guid mvid) => Path.Combine(_xrefCacheDir, $"{mvid:N}.xref");
 
-    private IReadOnlyDictionary<int, List<int>> LoadOrBuildXref(Module module)
+    private XrefData LoadOrBuildXref(Module module)
     {
         var cachePath = XrefCachePath(module.Mvid);
         if (TryReadXrefCache(cachePath, module, out var cached))
@@ -424,9 +444,9 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return built;
     }
 
-    private static Dictionary<int, List<int>> BuildXref(Module module)
+    private static XrefData BuildXref(Module module)
     {
-        var map = new Dictionary<int, List<int>>();
+        var data = new XrefData(new Dictionary<int, List<int>>(), new List<OutboundCallRef>());
         foreach (var methodHandle in module.MD.MethodDefinitions)
         {
             var def = module.MD.GetMethodDefinition(methodHandle);
@@ -441,13 +461,12 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             catch (BadImageFormatException) { continue; }
 
             var callerToken = MetadataTokens.GetToken(methodHandle);
-            ScanCallsFromIl(module, ilBytes, callerToken, map);
+            ScanCallsFromIl(module, ilBytes, callerToken, data);
         }
-        return map;
+        return data;
     }
 
-    private static void ScanCallsFromIl(Module module, byte[] il, int callerToken,
-        Dictionary<int, List<int>> map)
+    private static void ScanCallsFromIl(Module module, byte[] il, int callerToken, XrefData data)
     {
         var span = il.AsSpan();
         int pos = 0;
@@ -478,55 +497,199 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 (op == IlOpcodeTable.Op.InlineMethod || op == IlOpcodeTable.Op.InlineTok))
             {
                 var token = BitConverter.ToInt32(span.Slice(pos, 4));
-                var calleeToken = ResolveSameModuleMethodDefToken(module, token);
-                if (calleeToken != 0)
-                {
-                    if (!map.TryGetValue(calleeToken, out var list))
-                    {
-                        list = new List<int>();
-                        map[calleeToken] = list;
-                    }
-                    if (list.Count == 0 || list[^1] != callerToken)
-                        list.Add(callerToken);
-                }
+                ClassifyCallToken(module, token, callerToken, data);
             }
 
             pos += Math.Max(0, size);
         }
     }
 
-    private static int ResolveSameModuleMethodDefToken(Module module, int token)
+    private static void ClassifyCallToken(Module module, int token, int callerToken, XrefData data)
     {
         EntityHandle h;
         try { h = (EntityHandle)MetadataTokens.Handle(token); }
-        catch (ArgumentOutOfRangeException) { return 0; }
-        catch (BadImageFormatException) { return 0; }
+        catch (ArgumentOutOfRangeException) { return; }
+        catch (BadImageFormatException) { return; }
 
         switch (h.Kind)
         {
             case HandleKind.MethodDefinition:
-                return token;
+                AddIntra(data.Intra, token, callerToken);
+                break;
+            case HandleKind.MemberReference:
+                TryAddOutbound(module, (MemberReferenceHandle)h, callerToken, data.Outbound);
+                break;
             case HandleKind.MethodSpecification:
                 try
                 {
                     var spec = module.MD.GetMethodSpecification((MethodSpecificationHandle)h);
-                    return spec.Method.Kind == HandleKind.MethodDefinition
-                        ? MetadataTokens.GetToken(spec.Method)
-                        : 0;
+                    switch (spec.Method.Kind)
+                    {
+                        case HandleKind.MethodDefinition:
+                            AddIntra(data.Intra,
+                                MetadataTokens.GetToken(spec.Method), callerToken);
+                            break;
+                        case HandleKind.MemberReference:
+                            TryAddOutbound(module,
+                                (MemberReferenceHandle)spec.Method, callerToken, data.Outbound);
+                            break;
+                    }
                 }
-                catch (BadImageFormatException) { return 0; }
-            default:
-                return 0;
+                catch (BadImageFormatException) { /* skip */ }
+                break;
         }
     }
 
-    private const uint XrefMagic = 0x52584D41; // 'AMXR'
-    private const int XrefFormatVersion = 1;
-
-    private static bool TryReadXrefCache(string path, Module module,
-        out IReadOnlyDictionary<int, List<int>> map)
+    private static void AddIntra(Dictionary<int, List<int>> intra, int calleeToken, int callerToken)
     {
-        map = null!;
+        if (!intra.TryGetValue(calleeToken, out var list))
+        {
+            list = new List<int>();
+            intra[calleeToken] = list;
+        }
+        if (list.Count == 0 || list[^1] != callerToken)
+            list.Add(callerToken);
+    }
+
+    private static void TryAddOutbound(Module module, MemberReferenceHandle mrh,
+        int callerToken, List<OutboundCallRef> outbound)
+    {
+        try
+        {
+            var mr = module.MD.GetMemberReference(mrh);
+            if (mr.GetKind() != MemberReferenceKind.Method) return;
+
+            var typeName = ResolveOutboundTypeName(module, mr.Parent, out var assemblyName);
+            if (typeName is null || assemblyName is null) return;
+
+            var methodName = module.MD.GetString(mr.Name);
+            var decoder = new SignatureDecoder<string, object?>(
+                new StringSignatureProvider(module.MD), module.MD, genericContext: null);
+            var blob = module.MD.GetBlobReader(mr.Signature);
+            var sig = decoder.DecodeMethodSignature(ref blob);
+            var paramSig = string.Join(",", sig.ParameterTypes);
+
+            var entry = new OutboundCallRef(callerToken, assemblyName,
+                typeName, methodName, sig.ParameterTypes.Length,
+                sig.GenericParameterCount, paramSig);
+            if (outbound.Count == 0 || !outbound[^1].Equals(entry))
+                outbound.Add(entry);
+        }
+        catch (BadImageFormatException) { /* skip */ }
+    }
+
+    private static string? ResolveOutboundTypeName(Module module, EntityHandle parent,
+        out string? assemblyName)
+    {
+        assemblyName = null;
+        switch (parent.Kind)
+        {
+            case HandleKind.TypeReference:
+                return ResolveTypeRefName(module, (TypeReferenceHandle)parent, out assemblyName);
+            case HandleKind.TypeSpecification:
+                // Generic instantiation (e.g. List<int>.Add): walk into the type-spec signature
+                // to find the underlying TypeRef. Approximate: scan for the first TypeRef token.
+                try
+                {
+                    var ts = module.MD.GetTypeSpecification((TypeSpecificationHandle)parent);
+                    var sigReader = module.MD.GetBlobReader(ts.Signature);
+                    while (sigReader.RemainingBytes > 0)
+                    {
+                        var b = sigReader.ReadByte();
+                        if (b == 0x12 /* CLASS */ || b == 0x11 /* VALUETYPE */)
+                        {
+                            var encoded = sigReader.ReadCompressedInteger();
+                            var handle = EntityHandle(encoded);
+                            if (handle.Kind == HandleKind.TypeReference)
+                                return ResolveTypeRefName(module,
+                                    (TypeReferenceHandle)handle, out assemblyName);
+                            return null;
+                        }
+                    }
+                    return null;
+                }
+                catch (BadImageFormatException) { return null; }
+            default:
+                return null;
+        }
+    }
+
+    private static EntityHandle EntityHandle(int codedToken)
+    {
+        // Decode TypeDefOrRef-or-Spec compressed coded index into an EntityHandle.
+        var rowId = codedToken >> 2;
+        return (codedToken & 0x3) switch
+        {
+            0 => MetadataTokens.TypeDefinitionHandle(rowId),
+            1 => MetadataTokens.TypeReferenceHandle(rowId),
+            2 => MetadataTokens.TypeSpecificationHandle(rowId),
+            _ => default,
+        };
+    }
+
+    private static string? ResolveTypeRefName(Module module, TypeReferenceHandle trh,
+        out string? assemblyName)
+    {
+        assemblyName = null;
+        try
+        {
+            var tr = module.MD.GetTypeReference(trh);
+            var name = module.MD.GetString(tr.Name);
+            var ns = tr.Namespace.IsNil ? string.Empty : module.MD.GetString(tr.Namespace);
+            var fullName = ns.Length == 0 ? name : ns + "." + name;
+
+            switch (tr.ResolutionScope.Kind)
+            {
+                case HandleKind.AssemblyReference:
+                    var ar = module.MD.GetAssemblyReference(
+                        (AssemblyReferenceHandle)tr.ResolutionScope);
+                    assemblyName = module.MD.GetString(ar.Name);
+                    return fullName;
+                case HandleKind.TypeReference:
+                    var outer = ResolveTypeRefName(module,
+                        (TypeReferenceHandle)tr.ResolutionScope, out assemblyName);
+                    return outer is null ? null : outer + "+" + name;
+                case HandleKind.ModuleDefinition:
+                    // Reference within the same module: not cross-module — skip.
+                    return null;
+                default:
+                    return null;
+            }
+        }
+        catch (BadImageFormatException) { return null; }
+    }
+
+    private static CalleeKey BuildCalleeKey(Module module, MethodDefinitionHandle handle)
+    {
+        var asmName = module.MD.GetString(module.MD.GetAssemblyDefinition().Name);
+        var def = module.MD.GetMethodDefinition(handle);
+        var methodName = module.MD.GetString(def.Name);
+        var declaringType = def.GetDeclaringType();
+        var typeFullName = TypeName(module, module.MD.GetTypeDefinition(declaringType));
+
+        int paramCount = 0;
+        int genericArity = def.GetGenericParameters().Count;
+        var paramSig = string.Empty;
+        try
+        {
+            var decoder = new SignatureDecoder<string, object?>(
+                new StringSignatureProvider(module.MD), module.MD, genericContext: null);
+            var blob = module.MD.GetBlobReader(def.Signature);
+            var sig = decoder.DecodeMethodSignature(ref blob);
+            paramCount = sig.ParameterTypes.Length;
+            paramSig = string.Join(",", sig.ParameterTypes);
+        }
+        catch (BadImageFormatException) { /* leave defaults */ }
+
+        return new CalleeKey(asmName, typeFullName, methodName, paramCount, genericArity, paramSig);
+    }
+
+    private const uint XrefMagic = 0x52584D41; // 'AMXR'
+    private const int XrefFormatVersion = 2;
+
+    private static bool TryReadXrefCache(string path, Module module, out XrefData data)
+    {
+        data = null!;
         if (!File.Exists(path)) return false;
 
         FileInfo info;
@@ -545,26 +708,41 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             if (br.ReadInt64() != info.LastWriteTimeUtc.Ticks) return false;
             if (br.ReadInt64() != info.Length) return false;
 
-            var count = br.ReadInt32();
-            if (count < 0) return false;
-            var result = new Dictionary<int, List<int>>(count);
-            for (int i = 0; i < count; i++)
+            var intraCount = br.ReadInt32();
+            if (intraCount < 0) return false;
+            var intra = new Dictionary<int, List<int>>(intraCount);
+            for (int i = 0; i < intraCount; i++)
             {
                 var callee = br.ReadInt32();
                 var n = br.ReadInt32();
                 if (n < 0 || n > 1_000_000) return false;
                 var list = new List<int>(n);
                 for (int j = 0; j < n; j++) list.Add(br.ReadInt32());
-                result[callee] = list;
+                intra[callee] = list;
             }
-            map = result;
+
+            var outboundCount = br.ReadInt32();
+            if (outboundCount < 0 || outboundCount > 10_000_000) return false;
+            var outbound = new List<OutboundCallRef>(outboundCount);
+            for (int i = 0; i < outboundCount; i++)
+            {
+                var caller = br.ReadInt32();
+                var asm = br.ReadString();
+                var type = br.ReadString();
+                var method = br.ReadString();
+                var pc = br.ReadInt32();
+                var ga = br.ReadInt32();
+                var psig = br.ReadString();
+                outbound.Add(new OutboundCallRef(caller, asm, type, method, pc, ga, psig));
+            }
+
+            data = new XrefData(intra, outbound);
             return true;
         }
         catch (IOException) { return false; }
     }
 
-    private void TryWriteXrefCache(string path, Module module,
-        Dictionary<int, List<int>> map)
+    private void TryWriteXrefCache(string path, Module module, XrefData data)
     {
         try
         {
@@ -583,12 +761,23 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 bw.Write(module.Mvid.ToByteArray());
                 bw.Write(info.LastWriteTimeUtc.Ticks);
                 bw.Write(info.Length);
-                bw.Write(map.Count);
-                foreach (var (callee, callers) in map)
+                bw.Write(data.Intra.Count);
+                foreach (var (callee, callers) in data.Intra)
                 {
                     bw.Write(callee);
                     bw.Write(callers.Count);
                     foreach (var c in callers) bw.Write(c);
+                }
+                bw.Write(data.Outbound.Count);
+                foreach (var o in data.Outbound)
+                {
+                    bw.Write(o.CallerToken);
+                    bw.Write(o.TargetAssemblyName);
+                    bw.Write(o.TargetTypeFullName);
+                    bw.Write(o.TargetMethodName);
+                    bw.Write(o.ParameterCount);
+                    bw.Write(o.GenericArity);
+                    bw.Write(o.ParameterSignature);
                 }
             }
             File.Move(tmp, path, overwrite: true);

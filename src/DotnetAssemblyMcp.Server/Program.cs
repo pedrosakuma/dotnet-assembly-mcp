@@ -60,9 +60,10 @@ builder.Services
               6. `scan_method_il` — symbolic outbound references parsed from the IL: called
                  methods, accessed fields, used types and string literals. The cheapest way
                  to build a "what does this call?" graph without decompiling.
-              7. `find_callers` — Tier-4 reverse index: lists every method in the callee's
-                 own module that emits a direct call to it. Lazily built and cached at
-                 ~/.cache/dotnet-assembly-mcp/<mvid>.xref.
+              7. `find_callers` — Tier-4 reverse index: lists every method that emits a
+                 direct call to the callee, both intra-module (MethodDef) and cross-module
+                 (MemberRef with matching assembly/type/method/signature). Lazily built and
+                 cached at ~/.cache/dotnet-assembly-mcp/<mvid>.xref.
 
             Resolution is exact: the moduleVersionId must match a loaded module byte-for-byte.
             If it doesn't, call `load_assembly` with the correct file first — names are not

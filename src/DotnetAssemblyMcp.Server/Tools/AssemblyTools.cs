@@ -270,16 +270,18 @@ public sealed class AssemblyTools
 
     [McpServerTool(
         Name = "find_callers",
-        Title = "Find callers of a method (same module)",
+        Title = "Find callers of a method (same- and cross-module)",
         Destructive = false,
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(
-        "Returns every method in the callee's own module whose IL emits a direct call to it " +
-        "(call / callvirt / newobj / ldftn / ldvirtftn / generic MethodSpec). The reverse index " +
-        "is built lazily per module and cached at ~/.cache/dotnet-assembly-mcp/<mvid>.xref so " +
-        "subsequent queries are O(callers). Cross-module callers are out of scope for now.")]
+        "Returns every method whose IL emits a direct call to the requested callee — within " +
+        "the callee's own module via MethodDef tokens, and across any other loaded module via " +
+        "MemberRef signature matching (assembly name + type fullname + method name + " +
+        "parameter signature + generic arity). The reverse index is built lazily per module " +
+        "and cached at ~/.cache/dotnet-assembly-mcp/<mvid>.xref so subsequent queries are " +
+        "O(callers).")]
     public static AssemblyResult<FindCallersResult> FindCallers(
         IMetadataIndex index,
         [Description("ModuleVersionId GUID of the callee, as a string ('D' format).")] string moduleVersionId,
