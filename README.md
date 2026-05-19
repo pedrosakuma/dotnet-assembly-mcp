@@ -1,6 +1,6 @@
 # dotnet-assembly-mcp
 
-> **Status:** 7/10 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool` and Docker image. Tracking issue: [#1](https://github.com/pedrosakuma/dotnet-assembly-mcp/issues/1).
+> **Status:** 15 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool` and Docker image. Latest release: [`v0.4.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases/tag/v0.4.0) — closed generic instantiations on the handoff (§3.5).
 
 An **MCP server** for *static* navigation of compiled .NET assemblies — types, methods, attributes, signatures, IL, cross-references, and on-demand decompilation — designed as a **token-efficient alternative to feeding source code into an LLM context**.
 
@@ -17,7 +17,10 @@ get_method_il(mvid, token)           →  raw IL hex, instruction count    (~80 
 scan_method_il(mvid, token)          →  outbound calls / fields / types  (~150 tokens)
 decompile_method(mvid, token)        →  C# body, hard-capped             (~200–500 tokens)
 find_callers(mvid, token)            →  reverse call graph (intra+cross) (~100 tokens)
+get_method_source(mvid, token)       →  PDB file/lines + SourceLink URL  (~40 tokens)
 ```
+
+Closed generic instantiations are first-class: `get_method` / `find_callers` accept `genericTypeArguments` so the agent gets `int Echo(int)` instead of `T Echo(T)` and `find_callers` narrows to callers whose `MethodSpec` matches the requested instantiation. See [`docs/handoff-contract.md §3.5`](./docs/handoff-contract.md#35-generic-instantiations).
 
 The agent pays only for what it actually needs to see.
 
@@ -35,13 +38,14 @@ Requires the .NET 10 runtime. Logs go to STDERR so STDOUT stays a clean JSON-RPC
 ### As a Docker image (HTTP — sidecar / multi-client)
 
 ```bash
-docker build -t dotnet-assembly-mcp:dev -f deploy/Dockerfile .
 docker run --rm -p 8788:8080 \
   -v /path/to/assemblies:/assemblies:ro \
-  dotnet-assembly-mcp:dev
+  ghcr.io/pedrosakuma/dotnet-assembly-mcp:latest
 # MCP endpoint: http://localhost:8788/mcp
 # Health:       http://localhost:8788/health
 ```
+
+Or build locally: `docker build -t dotnet-assembly-mcp:dev -f deploy/Dockerfile .`.
 
 ## Client configuration
 
@@ -76,15 +80,32 @@ If the tool isn't on `PATH`, point `command` at the absolute path (e.g. `~/.dotn
 
 ## Tools
 
+### Discovery & loading
 | Tool | Purpose |
 |---|---|
 | `load_assembly` | Load a `.dll`/`.exe` from disk (idempotent by MVID) |
 | `list_assemblies` | List currently loaded modules |
-| `get_method` | Resolve a `(moduleVersionId, metadataToken)` to a method summary |
+| `import_assembly_manifest` | Bulk-import a list of paths under configured roots |
+| `list_types` | Paginated TypeDef listing |
+| `list_methods` | Paginated MethodDef listing (filterable by declaring type) |
+| `find_method` | Search MethodDefs by regex on name / type / signature |
+
+### Single-method resolution
+| Tool | Purpose |
+|---|---|
+| `get_method` | Resolve `(mvid, token)` to a method summary; accepts `genericTypeArguments` / `genericMethodArguments` for a closed signature view |
 | `get_method_il` | Raw IL bytes (hex), max-stack, instruction count |
 | `scan_method_il` | Outbound references parsed from IL (calls, fields, types, strings) |
 | `decompile_method` | C# body via ICSharpCode.Decompiler (hard-capped, LRU-cached) |
-| `find_callers` | Reverse call graph: intra-module (MethodDef) + cross-module (MemberRef matching) |
+| `find_callers` | Reverse call graph (intra-module MethodDef + cross-module MemberRef matching); narrows by instantiation when `genericMethodArguments` is supplied |
+| `get_method_source` | PDB-resolved file/lines plus SourceLink URL (embedded PDB or sibling `.pdb`) |
+
+### Batch variants
+| Tool | Purpose |
+|---|---|
+| `get_methods` | Batch `get_method` — up to 100 identities per call |
+| `scan_methods_il` | Batch `scan_method_il` |
+| `find_callers_batch` | Batch `find_callers` |
 
 Every tool returns the same envelope (`summary`, `data`, `hints`, `error`); `hints` advertise the suggested next tool so an agent can chain without rediscovering the API.
 
@@ -103,7 +124,7 @@ Scope-disjoint from [`pedrosakuma/dotnet-diagnostics-mcp`](https://github.com/pe
                         (MethodIdentity)
 ```
 
-The handoff contract — `MethodIdentity = (moduleVersionId, metadataToken)` — lives in [`docs/handoff-contract.md`](./docs/handoff-contract.md) and is also served at `assembly://contract/method-identity` as an MCP resource.
+The handoff contract — `MethodIdentity = (moduleVersionId, metadataToken)` plus optional `genericTypeArguments` (§3.5) — lives in [`docs/handoff-contract.md`](./docs/handoff-contract.md) and is also served at `assembly://contract/method-identity` as an MCP resource.
 
 ## Where it complements SourceLink
 
@@ -113,6 +134,8 @@ This server **does not** replace SourceLink / TraceLog source resolution. It is 
 - the target is a third-party NuGet dependency,
 - the runtime is NativeAOT-trimmed and metadata at runtime is sparse,
 - or the agent just wants a structural overview without pulling 8 KB of source.
+
+`get_method_source` is the second-chance source resolver: it reads the on-disk PDB (embedded portable PDB first, then sibling `.pdb`) so the agent doesn't need a separate SourceLink fetch when one is available locally.
 
 ## Building blocks
 
