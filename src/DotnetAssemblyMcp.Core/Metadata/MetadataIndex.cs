@@ -564,69 +564,26 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         if (identity.MethodSpec is { } specRef)
         {
-            var (specMvid, specToken) = (specRef.ModuleVersionId, specRef.MetadataToken);
-            if (!_modules.TryGetValue(specMvid, out var callerMod))
-            {
-                return ResolveResult.Fail(new AssemblyError(
-                    ErrorKinds.ModuleNotFound,
-                    $"methodSpec module {specMvid:D} is not loaded; load it first or omit methodSpec."));
-            }
+            // §3.5 fallback: if explicit args were supplied AND the methodSpec module is not loaded,
+            // skip the fast-path and let the explicit-args branch handle validation/substitution.
+            bool hasExplicitArgs = identity.TypeGenericArguments is { Count: > 0 }
+                                   || identity.MethodGenericArguments is { Count: > 0 };
+            var specDecoded = TryDecodeMethodSpec(specRef, allowMissingModule: hasExplicitArgs);
+            if (specDecoded.Error is not null) return ResolveResult.Fail(specDecoded.Error);
 
-            EntityHandle specHandle;
-            try { specHandle = (EntityHandle)MetadataTokens.Handle(specToken); }
-            catch (ArgumentException)
+            if (specDecoded.SpecModule is not null && specDecoded.SpecRow is { } specRow)
             {
-                return ResolveResult.Fail(new AssemblyError(
-                    ErrorKinds.InvalidArgument,
-                    $"methodSpec token 0x{specToken:X8} is not a valid metadata token."));
-            }
-            if (specHandle.Kind != HandleKind.MethodSpecification)
-            {
-                return ResolveResult.Fail(new AssemblyError(
-                    ErrorKinds.TokenWrongTable,
-                    $"methodSpec token 0x{specToken:X8} is a {specHandle.Kind}, expected MethodSpecification (table 0x2B)."));
-            }
-
-            MethodSpecification specRow;
-            try { specRow = callerMod.MD.GetMethodSpecification((MethodSpecificationHandle)specHandle); }
-            catch (BadImageFormatException)
-            {
-                return ResolveResult.Fail(new AssemblyError(
-                    ErrorKinds.InvalidArgument,
-                    $"methodSpec token 0x{specToken:X8} could not be decoded."));
-            }
-
-            var wireProvider = new WireFormatSignatureProvider();
-            try
-            {
-                methodRendered = specRow.DecodeSignature(wireProvider, genericContext: (object?)null);
-            }
-            catch (BadImageFormatException)
-            {
-                return ResolveResult.Fail(new AssemblyError(
-                    ErrorKinds.InvalidArgument,
-                    "methodSpec Instantiation blob could not be decoded."));
-            }
-
-            // Type-level args ride on spec.Method.Parent when it's a TypeSpec.
-            if (specRow.Method.Kind == HandleKind.MemberReference)
-            {
-                try
+                // §3.5 target validation: the MethodSpec.Method must resolve to the requested MethodDef.
+                if (!MethodSpecTargetsMethodDef(
+                        specDecoded.SpecModule, specRow,
+                        identity.ModuleVersionId, identity.MetadataToken,
+                        out var targetErr))
                 {
-                    var mr = callerMod.MD.GetMemberReference((MemberReferenceHandle)specRow.Method);
-                    if (mr.Parent.Kind == HandleKind.TypeSpecification)
-                    {
-                        var ts = callerMod.MD.GetTypeSpecification((TypeSpecificationHandle)mr.Parent);
-                        var typeDecoded = ts.DecodeSignature(wireProvider, genericContext: (object?)null);
-                        if (GenericTypeName.TryParse(typeDecoded, out var node, out _, out _)
-                            && node is GenericTypeName.Named named
-                            && !named.TypeArguments.IsDefaultOrEmpty)
-                        {
-                            typeRendered = named.TypeArguments.Select(a => a.Format()).ToArray();
-                        }
-                    }
+                    return ResolveResult.Fail(targetErr!);
                 }
-                catch (BadImageFormatException) { /* leave typeRendered null */ }
+
+                typeRendered = specDecoded.TypeRendered;
+                methodRendered = specDecoded.MethodRendered;
             }
         }
 
@@ -705,6 +662,169 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         for (int i = 0; i < a.Count; i++)
             if (!string.Equals(a[i], b[i], StringComparison.Ordinal)) return false;
         return true;
+    }
+
+    /// <summary>
+    /// §3.5 fast-path decoder. Returns the type/method instantiation rendered in wire format
+    /// from a <c>MethodSpec</c> row. When <paramref name="allowMissingModule"/> is true and the
+    /// spec module is not loaded, returns success with all-null payload (caller falls back to
+    /// explicit args). Otherwise an unloaded module yields <see cref="ErrorKinds.ModuleNotFound"/>.
+    /// </summary>
+    private MethodSpecDecodeResult TryDecodeMethodSpec(MethodSpecHandle specRef, bool allowMissingModule)
+    {
+        if (!_modules.TryGetValue(specRef.ModuleVersionId, out var specModule))
+        {
+            if (allowMissingModule) return default;
+            return new MethodSpecDecodeResult(null, null, null, null, new AssemblyError(
+                ErrorKinds.ModuleNotFound,
+                $"methodSpec module {specRef.ModuleVersionId:D} is not loaded; load it first or omit methodSpec."));
+        }
+
+        EntityHandle specHandle;
+        try { specHandle = (EntityHandle)MetadataTokens.Handle(specRef.MetadataToken); }
+        catch (ArgumentException)
+        {
+            return new MethodSpecDecodeResult(null, null, null, null, new AssemblyError(
+                ErrorKinds.InvalidArgument,
+                $"methodSpec token 0x{specRef.MetadataToken:X8} is not a valid metadata token."));
+        }
+        if (specHandle.Kind != HandleKind.MethodSpecification)
+        {
+            return new MethodSpecDecodeResult(null, null, null, null, new AssemblyError(
+                ErrorKinds.TokenWrongTable,
+                $"methodSpec token 0x{specRef.MetadataToken:X8} is a {specHandle.Kind}, expected MethodSpecification (table 0x2B)."));
+        }
+
+        MethodSpecification specRow;
+        try { specRow = specModule.MD.GetMethodSpecification((MethodSpecificationHandle)specHandle); }
+        catch (BadImageFormatException)
+        {
+            return new MethodSpecDecodeResult(null, null, null, null, new AssemblyError(
+                ErrorKinds.InvalidArgument,
+                $"methodSpec token 0x{specRef.MetadataToken:X8} could not be decoded."));
+        }
+
+        var wireProvider = new WireFormatSignatureProvider();
+        IReadOnlyList<string> methodRendered;
+        try
+        {
+            methodRendered = specRow.DecodeSignature(wireProvider, genericContext: (object?)null);
+        }
+        catch (BadImageFormatException)
+        {
+            return new MethodSpecDecodeResult(null, null, null, null, new AssemblyError(
+                ErrorKinds.InvalidArgument,
+                "methodSpec Instantiation blob could not be decoded."));
+        }
+
+        IReadOnlyList<string>? typeRendered = null;
+        if (specRow.Method.Kind == HandleKind.MemberReference)
+        {
+            try
+            {
+                var mr = specModule.MD.GetMemberReference((MemberReferenceHandle)specRow.Method);
+                if (mr.Parent.Kind == HandleKind.TypeSpecification)
+                {
+                    var ts = specModule.MD.GetTypeSpecification((TypeSpecificationHandle)mr.Parent);
+                    var typeDecoded = ts.DecodeSignature(wireProvider, genericContext: (object?)null);
+                    if (GenericTypeName.TryParse(typeDecoded, out var node, out _, out _)
+                        && node is GenericTypeName.Named named
+                        && !named.TypeArguments.IsDefaultOrEmpty)
+                    {
+                        typeRendered = named.TypeArguments.Select(a => a.Format()).ToArray();
+                    }
+                }
+            }
+            catch (BadImageFormatException) { /* leave typeRendered null */ }
+        }
+
+        return new MethodSpecDecodeResult(specModule, specRow, typeRendered, methodRendered, null);
+    }
+
+    private readonly record struct MethodSpecDecodeResult(
+        Module? SpecModule,
+        MethodSpecification? SpecRow,
+        IReadOnlyList<string>? TypeRendered,
+        IReadOnlyList<string>? MethodRendered,
+        AssemblyError? Error);
+
+    /// <summary>
+    /// §3.5 target validation: verifies that <paramref name="specRow"/>.<c>Method</c> resolves
+    /// to the requested <c>(targetMvid, targetMethodDefToken)</c>. Returns false (with a
+    /// <see cref="ErrorKinds.GenericInstantiationMismatch"/> error) when the spec was
+    /// authored against a different MethodDef.
+    /// </summary>
+    private bool MethodSpecTargetsMethodDef(
+        Module specModule, MethodSpecification specRow,
+        Guid targetMvid, int targetMethodDefToken,
+        out AssemblyError? validationError)
+    {
+        validationError = null;
+        switch (specRow.Method.Kind)
+        {
+            case HandleKind.MethodDefinition:
+                if (specModule.Mvid != targetMvid)
+                {
+                    validationError = new AssemblyError(
+                        ErrorKinds.GenericInstantiationMismatch,
+                        $"methodSpec.Method is a MethodDef in module {specModule.Mvid:D} but the target method lives in {targetMvid:D}.");
+                    return false;
+                }
+                var specMethodToken = MetadataTokens.GetToken(specRow.Method);
+                if (specMethodToken != targetMethodDefToken)
+                {
+                    validationError = new AssemblyError(
+                        ErrorKinds.GenericInstantiationMismatch,
+                        $"methodSpec.Method targets MethodDef 0x{specMethodToken:X8} but the requested identity is 0x{targetMethodDefToken:X8}.");
+                    return false;
+                }
+                return true;
+
+            case HandleKind.MemberReference:
+                if (!_modules.TryGetValue(targetMvid, out var targetMod))
+                {
+                    validationError = new AssemblyError(
+                        ErrorKinds.ModuleNotFound,
+                        $"target module {targetMvid:D} is not loaded; cannot cross-check methodSpec target.");
+                    return false;
+                }
+                MethodDefinitionHandle targetHandle;
+                try { targetHandle = (MethodDefinitionHandle)MetadataTokens.Handle(targetMethodDefToken); }
+                catch (ArgumentException)
+                {
+                    validationError = new AssemblyError(
+                        ErrorKinds.InvalidArgument,
+                        $"target token 0x{targetMethodDefToken:X8} is not a valid metadata token.");
+                    return false;
+                }
+                var key = BuildCalleeKey(targetMod, targetHandle);
+                try
+                {
+                    var mr = specModule.MD.GetMemberReference((MemberReferenceHandle)specRow.Method);
+                    if (mr.GetKind() != MemberReferenceKind.Method
+                        || !MemberRefMatchesCalleeKey(specModule, mr, key))
+                    {
+                        validationError = new AssemblyError(
+                            ErrorKinds.GenericInstantiationMismatch,
+                            "methodSpec.Method (MemberRef) does not resolve to the requested MethodDef (assembly/type/name/signature mismatch).");
+                        return false;
+                    }
+                }
+                catch (BadImageFormatException)
+                {
+                    validationError = new AssemblyError(
+                        ErrorKinds.InvalidArgument,
+                        "methodSpec.Method MemberRef row could not be decoded.");
+                    return false;
+                }
+                return true;
+
+            default:
+                validationError = new AssemblyError(
+                    ErrorKinds.InvalidArgument,
+                    $"methodSpec.Method has unsupported kind {specRow.Method.Kind}.");
+                return false;
+        }
     }
 
     private Dictionary<Guid, Func<MetadataReader>> SnapshotReaders()
@@ -912,24 +1032,74 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             }
         }
 
-        // §3.5 Phase Ω(e): if the caller supplied method-level generic args, narrow the candidate
-        // set to callers whose IL contains a MethodSpec call site whose Instantiation blob matches.
-        // This is a best-effort post-pass; the xref index doesn't persist per-edge instantiation
-        // info (would require a format bump). Type-level-only filtering (typeArgs without
-        // methodArgs) is not yet implemented; the unfiltered set is returned in that case.
+        // §3.5 Phase Ω(e): if the caller supplied closed instantiation info (either as explicit
+        // string args, or as a methodSpec fast-path, or both), decode + cross-check it, then
+        // narrow the candidate set by post-walking each candidate's IL for a call-site whose
+        // instantiation matches element-wise. The xref index doesn't persist per-edge
+        // instantiation info, so this is a per-request post-pass.
+        IReadOnlyList<string>? expectedTypeArgs = null;
+        IReadOnlyList<string>? expectedMethodArgs = null;
+
+        if (callee.MethodSpec is { } specRef)
+        {
+            bool hasExplicitArgs = callee.TypeGenericArguments is { Count: > 0 }
+                                   || callee.MethodGenericArguments is { Count: > 0 };
+            var specDecoded = TryDecodeMethodSpec(specRef, allowMissingModule: hasExplicitArgs);
+            if (specDecoded.Error is not null) return FindCallersReadResult.Fail(specDecoded.Error);
+
+            if (specDecoded.SpecModule is not null && specDecoded.SpecRow is { } specRow)
+            {
+                if (!MethodSpecTargetsMethodDef(
+                        specDecoded.SpecModule, specRow,
+                        callee.ModuleVersionId, callee.MetadataToken,
+                        out var targetErr))
+                {
+                    return FindCallersReadResult.Fail(targetErr!);
+                }
+                expectedTypeArgs = specDecoded.TypeRendered;
+                expectedMethodArgs = specDecoded.MethodRendered;
+            }
+        }
+
         if (callee.MethodGenericArguments is { Count: > 0 } methodArgsAst)
         {
             var readers = SnapshotReaders();
             var (rendered, renderErr) = GenericArgResolver.RenderAndValidate(
                 methodArgsAst, callee.ModuleVersionId, readers);
             if (renderErr is not null) return FindCallersReadResult.Fail(renderErr);
-            var expected = rendered!;
+            if (expectedMethodArgs is not null && !RenderedSequenceEqual(expectedMethodArgs, rendered!))
+            {
+                return FindCallersReadResult.Fail(new AssemblyError(
+                    ErrorKinds.GenericInstantiationMismatch,
+                    $"methodSpec encodes method-args [{string.Join(",", expectedMethodArgs)}] but genericMethodArguments has [{string.Join(",", rendered!)}]."));
+            }
+            expectedMethodArgs = rendered!;
+        }
+
+        if (callee.TypeGenericArguments is { Count: > 0 } typeArgsAst)
+        {
+            var readers = SnapshotReaders();
+            var (rendered, renderErr) = GenericArgResolver.RenderAndValidate(
+                typeArgsAst, callee.ModuleVersionId, readers);
+            if (renderErr is not null) return FindCallersReadResult.Fail(renderErr);
+            if (expectedTypeArgs is not null && !RenderedSequenceEqual(expectedTypeArgs, rendered!))
+            {
+                return FindCallersReadResult.Fail(new AssemblyError(
+                    ErrorKinds.GenericInstantiationMismatch,
+                    $"methodSpec encodes type-args [{string.Join(",", expectedTypeArgs)}] but genericTypeArguments has [{string.Join(",", rendered!)}]."));
+            }
+            expectedTypeArgs = rendered!;
+        }
+
+        if ((expectedTypeArgs is { Count: > 0 }) || (expectedMethodArgs is { Count: > 0 }))
+        {
             var filtered = new List<CallerRef>(callers.Count);
             foreach (var c in callers)
             {
                 if (!_modules.TryGetValue(c.ModuleVersionId, out var callerMod)) continue;
                 if (CallerHasMatchingInstantiation(
-                        callerMod, c.MetadataToken, module, methodHandle, calleeKey, expected))
+                        callerMod, c.MetadataToken, module, methodHandle, calleeKey,
+                        expectedTypeArgs, expectedMethodArgs))
                 {
                     filtered.Add(c);
                 }
@@ -944,15 +1114,20 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     /// <summary>
-    /// Walks the caller's IL looking for any <c>MethodSpec</c> call site whose <c>Method</c>
-    /// resolves to the callee (intra MethodDef or cross-module MemberRef matching
-    /// <paramref name="calleeKey"/>) and whose <c>Instantiation</c> blob, decoded in wire
-    /// format, matches <paramref name="expectedMethodArgs"/> element-wise.
+    /// Walks the caller's IL looking for any call site whose closed instantiation matches the
+    /// requested <paramref name="expectedTypeArgs"/> and/or <paramref name="expectedMethodArgs"/>.
+    /// Matches three shapes: (a) <c>MethodSpec</c> rows (method-level generics, optionally on a
+    /// TypeSpec parent for type-level generics); (b) <c>MemberRef</c> rows with a TypeSpec
+    /// parent (closed type-level instantiation, non-generic method); (c) intra-module
+    /// <c>MethodDef</c> tokens — these never carry instantiation info, so they're skipped when
+    /// either expected arg list is non-empty.
     /// </summary>
     private static bool CallerHasMatchingInstantiation(
         Module callerModule, int callerToken,
         Module calleeModule, MethodDefinitionHandle calleeHandle,
-        CalleeKey calleeKey, IReadOnlyList<string> expectedMethodArgs)
+        CalleeKey calleeKey,
+        IReadOnlyList<string>? expectedTypeArgs,
+        IReadOnlyList<string>? expectedMethodArgs)
     {
         MethodDefinitionHandle callerHandle;
         try { callerHandle = (MethodDefinitionHandle)MetadataTokens.Handle(callerToken); }
@@ -974,6 +1149,8 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         var calleeIsSameModule = callerModule.Mvid == calleeModule.Mvid;
         var calleeIntraToken = MetadataTokens.GetToken(calleeHandle);
+        bool wantMethodArgs = expectedMethodArgs is { Count: > 0 };
+        bool wantTypeArgs = expectedTypeArgs is { Count: > 0 };
 
         var span = ilBytes.AsSpan();
         int pos = 0;
@@ -1003,9 +1180,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             if (size == 4 && pos + 4 <= span.Length && op == IlOpcodeTable.Op.InlineMethod)
             {
                 var token = BitConverter.ToInt32(span.Slice(pos, 4));
-                if (TryMatchMethodSpecCall(
+                if (TryMatchInstantiatedCall(
                         callerModule, token, calleeIsSameModule, calleeIntraToken, calleeKey,
-                        expectedMethodArgs, provider))
+                        expectedTypeArgs, expectedMethodArgs, wantTypeArgs, wantMethodArgs,
+                        provider))
                 {
                     return true;
                 }
@@ -1015,18 +1193,55 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return false;
     }
 
-    private static bool TryMatchMethodSpecCall(
+    private static bool TryMatchInstantiatedCall(
         Module callerModule, int token,
         bool calleeIsSameModule, int calleeIntraToken, CalleeKey calleeKey,
-        IReadOnlyList<string> expectedMethodArgs, WireFormatSignatureProvider provider)
+        IReadOnlyList<string>? expectedTypeArgs,
+        IReadOnlyList<string>? expectedMethodArgs,
+        bool wantTypeArgs, bool wantMethodArgs,
+        WireFormatSignatureProvider provider)
     {
         EntityHandle h;
         try { h = (EntityHandle)MetadataTokens.Handle(token); }
-        catch (ArgumentOutOfRangeException) { return false; }
-        if (h.Kind != HandleKind.MethodSpecification) return false;
+        catch (ArgumentException) { return false; }
 
+        switch (h.Kind)
+        {
+            case HandleKind.MethodSpecification:
+                return TryMatchMethodSpecCall(
+                    callerModule, (MethodSpecificationHandle)h,
+                    calleeIsSameModule, calleeIntraToken, calleeKey,
+                    expectedTypeArgs, expectedMethodArgs, wantTypeArgs, wantMethodArgs, provider);
+
+            case HandleKind.MemberReference:
+                // MemberRef-only path: matches when the caller wants only type-level generics
+                // (no method-level instantiation) and the call site uses a TypeSpec parent.
+                if (wantMethodArgs) return false;
+                if (!wantTypeArgs) return false;
+                return TryMatchMemberRefCall(
+                    callerModule, (MemberReferenceHandle)h,
+                    calleeKey, expectedTypeArgs!, provider);
+
+            case HandleKind.MethodDefinition:
+                // Intra-module MethodDef tokens carry no instantiation; skipped when either
+                // expected arg list is non-empty.
+                return false;
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryMatchMethodSpecCall(
+        Module callerModule, MethodSpecificationHandle handle,
+        bool calleeIsSameModule, int calleeIntraToken, CalleeKey calleeKey,
+        IReadOnlyList<string>? expectedTypeArgs,
+        IReadOnlyList<string>? expectedMethodArgs,
+        bool wantTypeArgs, bool wantMethodArgs,
+        WireFormatSignatureProvider provider)
+    {
         MethodSpecification spec;
-        try { spec = callerModule.MD.GetMethodSpecification((MethodSpecificationHandle)h); }
+        try { spec = callerModule.MD.GetMethodSpecification(handle); }
         catch (BadImageFormatException) { return false; }
 
         // Does spec.Method resolve to the callee?
@@ -1035,6 +1250,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             case HandleKind.MethodDefinition:
                 if (!calleeIsSameModule) return false;
                 if (MetadataTokens.GetToken(spec.Method) != calleeIntraToken) return false;
+                if (wantTypeArgs) return false; // MethodDef parent has no closed type args
                 break;
             case HandleKind.MemberReference:
                 MemberReference mr;
@@ -1042,24 +1258,71 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 catch (BadImageFormatException) { return false; }
                 if (mr.GetKind() != MemberReferenceKind.Method) return false;
                 if (!MemberRefMatchesCalleeKey(callerModule, mr, calleeKey)) return false;
+                if (wantTypeArgs)
+                {
+                    if (mr.Parent.Kind != HandleKind.TypeSpecification) return false;
+                    if (!TypeSpecMatchesTypeArgs(
+                            callerModule, (TypeSpecificationHandle)mr.Parent,
+                            expectedTypeArgs!, provider))
+                        return false;
+                }
                 break;
             default:
                 return false;
         }
 
-        // Decode Instantiation blob in wire format and compare element-wise.
-        ImmutableArray<string> decoded;
+        if (wantMethodArgs)
+        {
+            ImmutableArray<string> decoded;
+            try { decoded = spec.DecodeSignature(provider, genericContext: (object?)null); }
+            catch (BadImageFormatException) { return false; }
+            if (decoded.Length != expectedMethodArgs!.Count) return false;
+            for (int i = 0; i < decoded.Length; i++)
+                if (!string.Equals(decoded[i], expectedMethodArgs[i], StringComparison.Ordinal))
+                    return false;
+        }
+
+        return true;
+    }
+
+    private static bool TryMatchMemberRefCall(
+        Module callerModule, MemberReferenceHandle handle,
+        CalleeKey calleeKey,
+        IReadOnlyList<string> expectedTypeArgs,
+        WireFormatSignatureProvider provider)
+    {
+        MemberReference mr;
+        try { mr = callerModule.MD.GetMemberReference(handle); }
+        catch (BadImageFormatException) { return false; }
+        if (mr.GetKind() != MemberReferenceKind.Method) return false;
+        if (!MemberRefMatchesCalleeKey(callerModule, mr, calleeKey)) return false;
+        if (mr.Parent.Kind != HandleKind.TypeSpecification) return false;
+        return TypeSpecMatchesTypeArgs(
+            callerModule, (TypeSpecificationHandle)mr.Parent, expectedTypeArgs, provider);
+    }
+
+    private static bool TypeSpecMatchesTypeArgs(
+        Module callerModule, TypeSpecificationHandle handle,
+        IReadOnlyList<string> expectedTypeArgs,
+        WireFormatSignatureProvider provider)
+    {
         try
         {
-            decoded = spec.DecodeSignature(provider, genericContext: (object?)null);
+            var ts = callerModule.MD.GetTypeSpecification(handle);
+            var decoded = ts.DecodeSignature(provider, genericContext: (object?)null);
+            if (!GenericTypeName.TryParse(decoded, out var node, out _, out _)) return false;
+            if (node is not GenericTypeName.Named named) return false;
+            if (named.TypeArguments.IsDefaultOrEmpty) return false;
+            if (named.TypeArguments.Length != expectedTypeArgs.Count) return false;
+            for (int i = 0; i < expectedTypeArgs.Count; i++)
+            {
+                var formatted = named.TypeArguments[i].Format();
+                if (!string.Equals(formatted, expectedTypeArgs[i], StringComparison.Ordinal))
+                    return false;
+            }
+            return true;
         }
         catch (BadImageFormatException) { return false; }
-
-        if (decoded.Length != expectedMethodArgs.Count) return false;
-        for (int i = 0; i < decoded.Length; i++)
-            if (!string.Equals(decoded[i], expectedMethodArgs[i], StringComparison.Ordinal))
-                return false;
-        return true;
     }
 
     private static bool MemberRefMatchesCalleeKey(Module callerModule, MemberReference mr, CalleeKey key)

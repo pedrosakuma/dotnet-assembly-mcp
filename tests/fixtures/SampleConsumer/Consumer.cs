@@ -22,6 +22,12 @@ public sealed class ConsumerService
         return box.Value;
     }
 
+    public string RunBoxString(string value)
+    {
+        var box = new Box<string>(value);
+        return box.Value;
+    }
+
     public int CallEchoOfInt(int v) => _orders.Echo(v);
 
     public string CallEchoOfString(string v) => _orders.Echo(v);
