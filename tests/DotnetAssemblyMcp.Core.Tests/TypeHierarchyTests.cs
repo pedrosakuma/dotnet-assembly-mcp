@@ -153,4 +153,57 @@ public sealed class TypeHierarchyTests
         page.Types.Should().BeEmpty();
         page.Truncated.Should().BeFalse();
     }
+
+    [Fact]
+    public void ListDerivedTypes_direct_finds_cross_module_subclass()
+    {
+        using var index = new MetadataIndex();
+        var mvid = LoadSampleLib(index);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+
+        var baseToken = FindTypeToken(index, mvid, "SampleLib.AnimalBase");
+        var page = index.ListDerivedTypes(mvid, baseToken, new ListDerivedTypesQuery(DirectOnly: true, PageSize: 50)).Page!;
+
+        var names = page.Types.Select(t => t.FullName).ToHashSet();
+        names.Should().Contain("SampleLib.Dog");
+        names.Should().Contain("SampleConsumer.Wolf");
+    }
+
+    [Fact]
+    public void ListDerivedTypes_transitive_walks_through_cross_module_descendants()
+    {
+        using var index = new MetadataIndex();
+        var mvid = LoadSampleLib(index);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+
+        var baseToken = FindTypeToken(index, mvid, "SampleLib.AnimalBase");
+        var page = index.ListDerivedTypes(mvid, baseToken, new ListDerivedTypesQuery(DirectOnly: false, PageSize: 100)).Page!;
+
+        var names = page.Types.Select(t => t.FullName).ToHashSet();
+        names.Should().Contain("SampleLib.Dog");
+        names.Should().Contain("SampleLib.Puppy");
+        names.Should().Contain("SampleConsumer.Wolf");
+        names.Should().Contain("SampleConsumer.Cub"); // Cub -> Wolf -> AnimalBase via TypeRef chain
+    }
+
+    [Fact]
+    public void ListDerivedTypes_returns_interface_implementers_across_modules()
+    {
+        using var index = new MetadataIndex();
+        var mvid = LoadSampleLib(index);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+
+        var iface = FindTypeToken(index, mvid, "SampleLib.IAnimal");
+        var direct = index.ListDerivedTypes(mvid, iface, new ListDerivedTypesQuery(DirectOnly: true, PageSize: 100)).Page!;
+        var trans = index.ListDerivedTypes(mvid, iface, new ListDerivedTypesQuery(DirectOnly: false, PageSize: 100)).Page!;
+
+        var directNames = direct.Types.Select(t => t.FullName).ToHashSet();
+        directNames.Should().Contain("SampleLib.AnimalBase"); // declares ': IAnimal'
+        directNames.Should().Contain("SampleConsumer.Hamster"); // cross-module direct implementer
+
+        var transNames = trans.Types.Select(t => t.FullName).ToHashSet();
+        transNames.Should().Contain("SampleLib.Dog");
+        transNames.Should().Contain("SampleConsumer.Wolf");
+        transNames.Should().Contain("SampleConsumer.Cub");
+    }
 }

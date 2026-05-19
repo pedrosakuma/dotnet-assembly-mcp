@@ -3807,45 +3807,169 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 $"TypeDef token 0x{baseTypeMetadataToken:X8} is not present in this module."));
         }
         var baseFullName = TypeName(module, baseTd);
+        var baseAsmName = module.MD.GetString(module.MD.GetAssemblyDefinition().Name);
+        var baseKey = (Asm: baseAsmName, Full: baseFullName);
 
         var pageSize = query.PageSize <= 0 ? ListDerivedTypesQuery.DefaultPageSize
             : Math.Min(query.PageSize, ListDerivedTypesQuery.MaxPageSize);
-        var startRow = query.Cursor is { } c && c > 0 ? c : 1;
-        var totalRows = module.MD.TypeDefinitions.Count;
+        var startOffset = query.Cursor is { } c && c > 0 ? c : 0;
 
-        // Transitive mode: collect every TypeDef whose ancestor chain inside this module
-        // includes the target, then page over that set in metadata order. Pre-computed once
-        // per call (no cache yet — fine for typical hierarchies that are not huge).
-        HashSet<int>? transitiveDescendants = null;
-        if (!query.DirectOnly)
+        // Build the parent relation across every loaded module:
+        //  - localParents: (childMvid, childToken) -> (parentMvid, parentToken)   (same module via TypeDef)
+        //  - crossParents: (childMvid, childToken) -> set of (parentAsm, parentFull) (TypeRef)
+        // We capture BaseType and every InterfaceImplementation as a parent so the same walk
+        // covers both class derivation and interface implementation. TypeSpec parents (generic
+        // instantiations such as `class Dog : AnimalBase<int>`) are intentionally skipped — the
+        // intra-module original behaved the same and the spec decoder isn't wired here yet.
+        var localParents = new Dictionary<(Guid, int), List<(Guid, int)>>();
+        var crossParents = new Dictionary<(Guid, int), List<(string, string)>>();
+
+        foreach (var kv in _modules)
         {
-            transitiveDescendants = ComputeTransitiveDescendants(module, baseTypeMetadataToken, totalRows);
+            var childMvid = kv.Key;
+            var m = kv.Value;
+            var md = m.MD;
+            int n;
+            try { n = md.TypeDefinitions.Count; }
+            catch (BadImageFormatException) { continue; }
+
+            for (int row = 1; row <= n; row++)
+            {
+                TypeDefinition td;
+                try { td = md.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(row)); }
+                catch (BadImageFormatException) { continue; }
+
+                int childToken = MetadataTokens.GetToken(MetadataTokens.TypeDefinitionHandle(row));
+                var childKey = (childMvid, childToken);
+
+                AddParentEdge(m, childMvid, childKey, td.BaseType, localParents, crossParents);
+
+                InterfaceImplementationHandleCollection iis;
+                try { iis = td.GetInterfaceImplementations(); }
+                catch (BadImageFormatException) { continue; }
+                foreach (var iih in iis)
+                {
+                    EntityHandle ih;
+                    try { ih = md.GetInterfaceImplementation(iih).Interface; }
+                    catch (BadImageFormatException) { continue; }
+                    AddParentEdge(m, childMvid, childKey, ih, localParents, crossParents);
+                }
+            }
         }
+
+        // Edge test: does (childMvid, childToken) have `baseKey` as one of its direct parents?
+        bool IsDirectChild((Guid mvid, int token) child)
+        {
+            if (child.mvid == moduleVersionId
+                && localParents.TryGetValue(child, out var lps))
+            {
+                foreach (var p in lps)
+                    if (p.Item1 == moduleVersionId && p.Item2 == baseTypeMetadataToken) return true;
+            }
+            if (crossParents.TryGetValue(child, out var cps))
+            {
+                foreach (var p in cps)
+                    if (p.Item1 == baseKey.Asm && p.Item2 == baseKey.Full) return true;
+            }
+            return false;
+        }
+
+        // Direct children of the root, used both as the answer in DirectOnly mode and as the
+        // BFS seed in transitive mode.
+        var direct = new HashSet<(Guid, int)>();
+        foreach (var child in localParents.Keys)
+            if (IsDirectChild(child)) direct.Add(child);
+        foreach (var child in crossParents.Keys)
+            if (IsDirectChild(child)) direct.Add(child);
+
+        HashSet<(Guid, int)> hits;
+        if (query.DirectOnly)
+        {
+            hits = direct;
+        }
+        else
+        {
+            // Reverse parent edges so we can BFS downwards. Local edges produce
+            // (parentMvid, parentToken) -> child; cross edges produce (asm, full) -> child.
+            var childrenByLocal = new Dictionary<(Guid, int), List<(Guid, int)>>();
+            var childrenByCross = new Dictionary<(string, string), List<(Guid, int)>>();
+            foreach (var kv in localParents)
+                foreach (var p in kv.Value)
+                {
+                    if (!childrenByLocal.TryGetValue(p, out var list))
+                        childrenByLocal[p] = list = new List<(Guid, int)>();
+                    list.Add(kv.Key);
+                }
+            foreach (var kv in crossParents)
+                foreach (var p in kv.Value)
+                {
+                    if (!childrenByCross.TryGetValue(p, out var list))
+                        childrenByCross[p] = list = new List<(Guid, int)>();
+                    list.Add(kv.Key);
+                }
+
+            hits = new HashSet<(Guid, int)>();
+            var queue = new Queue<(Guid, int)>();
+            foreach (var d in direct) { hits.Add(d); queue.Enqueue(d); }
+
+            // Cross-module edges that match the root by (asm, full).
+            if (childrenByCross.TryGetValue(baseKey, out var rootCross))
+                foreach (var crossChild in rootCross)
+                    if (hits.Add(crossChild)) queue.Enqueue(crossChild);
+
+            while (queue.Count > 0)
+            {
+                var node = queue.Dequeue();
+                // Each descendant's own (asm, full) lets other modules' TypeRefs reach it.
+                if (!_modules.TryGetValue(node.Item1, out var nodeModule)) continue;
+                string nodeAsm;
+                string nodeFull;
+                try
+                {
+                    var td = nodeModule.MD.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(
+                        MetadataTokens.GetRowNumber((EntityHandle)MetadataTokens.Handle(node.Item2))));
+                    nodeFull = TypeName(nodeModule, td);
+                    nodeAsm = nodeModule.MD.GetString(nodeModule.MD.GetAssemblyDefinition().Name);
+                }
+                catch (Exception ex) when (ex is BadImageFormatException or ArgumentException) { continue; }
+
+                if (childrenByLocal.TryGetValue(node, out var localKids))
+                    foreach (var k in localKids)
+                        if (hits.Add(k)) queue.Enqueue(k);
+                if (childrenByCross.TryGetValue((nodeAsm, nodeFull), out var crossKids))
+                    foreach (var k in crossKids)
+                        if (hits.Add(k)) queue.Enqueue(k);
+            }
+        }
+
+        // Stable order: by module path, then by token within the module.
+        var ordered = hits
+            .Select(h => (Hit: h, Path: _modules.TryGetValue(h.Item1, out var mm) ? mm.Path : string.Empty))
+            .OrderBy(t => t.Path, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(t => t.Hit.Item2)
+            .Select(t => t.Hit)
+            .ToList();
 
         var results = new List<TypeSummary>(Math.Min(pageSize, 16));
         int? nextCursor = null;
         bool truncated = false;
 
-        for (int row = startRow; row <= totalRows; row++)
+        for (int i = startOffset; i < ordered.Count; i++)
         {
-            int rowToken = MetadataTokens.GetToken(MetadataTokens.TypeDefinitionHandle(row));
-            if (query.DirectOnly)
-            {
-                if (!TypeDefHasBase(module, row, baseTypeMetadataToken)) continue;
-            }
-            else if (!transitiveDescendants!.Contains(rowToken))
-            {
-                continue;
-            }
+            var (hitMvid, hitToken) = ordered[i];
+            if (!_modules.TryGetValue(hitMvid, out var hitModule)) continue;
+            int hitRow;
+            try { hitRow = MetadataTokens.GetRowNumber((EntityHandle)MetadataTokens.Handle(hitToken)); }
+            catch (ArgumentException) { continue; }
 
             TypeSummary? summary;
-            try { summary = TrySummarizeType(module, row); }
+            try { summary = TrySummarizeType(hitModule, hitRow); }
             catch (BadImageFormatException) { continue; }
             if (summary is null) continue;
 
             if (results.Count == pageSize)
             {
-                nextCursor = row;
+                nextCursor = i;
                 truncated = true;
                 break;
             }
@@ -3856,46 +3980,31 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             moduleVersionId, baseTypeMetadataToken, baseFullName, results, nextCursor, truncated));
     }
 
-    private static bool TypeDefHasBase(Module module, int derivedRow, int baseToken)
+    private static void AddParentEdge(
+        Module childModule,
+        Guid childMvid,
+        (Guid, int) childKey,
+        EntityHandle parentHandle,
+        Dictionary<(Guid, int), List<(Guid, int)>> localParents,
+        Dictionary<(Guid, int), List<(string, string)>> crossParents)
     {
-        try
+        if (parentHandle.IsNil) return;
+        switch (parentHandle.Kind)
         {
-            var td = module.MD.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(derivedRow));
-            if (td.BaseType.IsNil) return false;
-            if (td.BaseType.Kind != HandleKind.TypeDefinition) return false;
-            return MetadataTokens.GetToken(td.BaseType) == baseToken;
+            case HandleKind.TypeDefinition:
+                if (!localParents.TryGetValue(childKey, out var lps))
+                    localParents[childKey] = lps = new List<(Guid, int)>();
+                lps.Add((childMvid, MetadataTokens.GetToken(parentHandle)));
+                break;
+            case HandleKind.TypeReference:
+                var full = ResolveTypeRefName(childModule, (TypeReferenceHandle)parentHandle, out var asm);
+                if (full is null || asm is null) return;
+                if (!crossParents.TryGetValue(childKey, out var cps))
+                    crossParents[childKey] = cps = new List<(string, string)>();
+                cps.Add((asm, full));
+                break;
+            // TypeSpec parents (generic instantiations) are skipped — see method docstring.
         }
-        catch (BadImageFormatException) { return false; }
-    }
-
-    private static HashSet<int> ComputeTransitiveDescendants(Module module, int rootToken, int totalRows)
-    {
-        // child -> direct parent map (TypeDef tokens). Cross-module bases (TypeRef) are
-        // ignored — they can't be the root anyway because the root is a TypeDef in this module.
-        var parentByChild = new Dictionary<int, int>(capacity: totalRows);
-        for (int row = 1; row <= totalRows; row++)
-        {
-            try
-            {
-                var td = module.MD.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(row));
-                if (td.BaseType.IsNil || td.BaseType.Kind != HandleKind.TypeDefinition) continue;
-                var childToken = MetadataTokens.GetToken(MetadataTokens.TypeDefinitionHandle(row));
-                parentByChild[childToken] = MetadataTokens.GetToken(td.BaseType);
-            }
-            catch (BadImageFormatException) { /* skip */ }
-        }
-
-        var descendants = new HashSet<int>();
-        foreach (var (child, _) in parentByChild)
-        {
-            var cursor = child;
-            while (parentByChild.TryGetValue(cursor, out var parent))
-            {
-                if (parent == rootToken) { descendants.Add(child); break; }
-                cursor = parent;
-            }
-        }
-        return descendants;
     }
 
     /// <inheritdoc />

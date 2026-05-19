@@ -95,3 +95,23 @@ public static class CrossModuleEventConsumer
         dto.Changed -= handler;
     }
 }
+
+/// <summary>
+/// Cross-module type-hierarchy fixtures used by ListDerivedTypes (issue #61): a class
+/// that subclasses SampleLib.AnimalBase and another that implements SampleLib.IAnimal
+/// directly. Both reach their parents via TypeRef rows in SampleConsumer.
+/// </summary>
+public class Wolf : AnimalBase
+{
+    public override string Speak() => "howl";
+}
+
+public sealed class Cub : Wolf
+{
+    public override string Speak() => "yip";
+}
+
+public sealed class Hamster : IAnimal
+{
+    public string Speak() => "squeak";
+}
