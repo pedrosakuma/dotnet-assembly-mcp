@@ -36,4 +36,16 @@ public static class ErrorKinds
 
     /// <summary>A batch call exceeded the server-side cap on items per request.</summary>
     public const string BatchTooLarge = "batch_too_large";
+
+    /// <summary>A type-arg name in <c>genericTypeArguments</c> (§3.5) did not resolve in any loaded module.</summary>
+    public const string GenericInstantiationUnresolvable = "generic_instantiation_unresolvable";
+
+    /// <summary>A type-arg name in <c>genericTypeArguments</c> (§3.5) resolved in 2+ modules with conflicting MVIDs.</summary>
+    public const string GenericInstantiationAmbiguous = "generic_instantiation_ambiguous";
+
+    /// <summary>A type-arg referenced an open type parameter (<c>!N</c> / <c>!!N</c>). Wire instantiations MUST be closed.</summary>
+    public const string GenericInstantiationOpen = "generic_instantiation_open";
+
+    /// <summary>Both <c>methodSpec</c> and <c>genericTypeArguments</c> were supplied and decode to different instantiations.</summary>
+    public const string GenericInstantiationMismatch = "generic_instantiation_mismatch";
 }

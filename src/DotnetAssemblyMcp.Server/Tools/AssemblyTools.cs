@@ -934,6 +934,21 @@ public sealed class AssemblyTools
         ErrorKinds.InvalidArgument => new NextActionHint(
             "list_assemblies",
             "Validate the argument shape against the tool description and retry."),
+        ErrorKinds.BatchTooLarge => new NextActionHint(
+            "get_methods",
+            $"Batch exceeded the per-call cap of {BatchCap}. Split the items into smaller batches and retry."),
+        ErrorKinds.GenericInstantiationUnresolvable => new NextActionHint(
+            "import_assembly_manifest",
+            "A type-argument name did not resolve in any loaded module. Import the manifest for the dependency or supply assemblyPathHint, then retry."),
+        ErrorKinds.GenericInstantiationAmbiguous => new NextActionHint(
+            "list_assemblies",
+            "A type-argument name resolved in 2+ modules with conflicting MVIDs. Inspect loaded modules and narrow the manifest, or qualify on the producer side."),
+        ErrorKinds.GenericInstantiationOpen => new NextActionHint(
+            "get_method",
+            "Wire instantiations must be closed. Re-emit on the producer side with concrete type arguments instead of open type parameters."),
+        ErrorKinds.GenericInstantiationMismatch => new NextActionHint(
+            "get_method",
+            "methodSpec and genericTypeArguments decode to different instantiations. Re-issue the call with only one of them, or fix the producer to keep them consistent."),
         _ => new NextActionHint(
             "list_assemblies",
             "Inspect loaded modules and retry the call."),

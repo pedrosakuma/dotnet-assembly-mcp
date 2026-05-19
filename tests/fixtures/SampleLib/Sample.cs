@@ -43,6 +43,10 @@ public class OrderService
     }
 
     public Func<int, int> MakeAdder(int delta) => x => x + delta + _counter;
+
+    public T Echo<T>(T value) => value;
+
+    public TOut Map<TIn, TOut>(TIn input, Func<TIn, TOut> selector) => selector(input);
 }
 
 public sealed class Box<T>
