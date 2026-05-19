@@ -1169,6 +1169,143 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             callers, modulesSearched, FromCache: fromCache));
     }
 
+    /// <inheritdoc />
+    public FindTypeReferencesReadResult FindTypeReferences(Guid moduleVersionId, int typeMetadataToken, CancellationToken cancellationToken = default)
+    {
+        if (moduleVersionId == Guid.Empty)
+            return FindTypeReferencesReadResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
+        if (!_modules.TryGetValue(moduleVersionId, out var module))
+            return FindTypeReferencesReadResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {moduleVersionId:D}."));
+
+        EntityHandle targetHandle;
+        try { targetHandle = (EntityHandle)MetadataTokens.Handle(typeMetadataToken); }
+        catch (ArgumentException ex)
+        {
+            return FindTypeReferencesReadResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
+                $"could not interpret token 0x{typeMetadataToken:X8} as a metadata handle.", ex.Message));
+        }
+        if (targetHandle.Kind != HandleKind.TypeDefinition)
+            return FindTypeReferencesReadResult.Fail(new AssemblyError(ErrorKinds.TokenWrongTable,
+                $"token 0x{typeMetadataToken:X8} is in table {targetHandle.Kind}, expected TypeDefinition (0x02)."));
+
+        var targetRow = MetadataTokens.GetRowNumber((TypeDefinitionHandle)targetHandle);
+        if (targetRow <= 0 || targetRow > module.MD.TypeDefinitions.Count)
+            return FindTypeReferencesReadResult.Fail(new AssemblyError(ErrorKinds.TokenOutOfRange,
+                $"TypeDef token 0x{typeMetadataToken:X8} is not present in this module."));
+
+        // Resolve target identity for cross-module matching once.
+        var targetDef = module.MD.GetTypeDefinition((TypeDefinitionHandle)targetHandle);
+        var targetFullName = TypeName(module, targetDef);
+        var targetAssemblyName = module.MD.IsAssembly
+            ? module.MD.GetString(module.MD.GetAssemblyDefinition().Name)
+            : null;
+
+        var fromCache = true;
+        var xref = _xrefCache.GetOrAdd(module.Mvid, _ =>
+        {
+            fromCache = false;
+            return LoadOrBuildXref(module, cancellationToken);
+        });
+
+        var references = new List<TypeReferenceRef>();
+
+        // Intra-module sites.
+        if (xref.TypeIntra.TryGetValue(typeMetadataToken, out var localSites))
+        {
+            foreach (var site in localSites)
+                references.Add(RenderTypeReferenceSite(module, site));
+        }
+
+        // Cross-module sites: probe every other loaded module's outbound type-refs.
+        var modulesSearched = 1;
+        if (targetAssemblyName is not null)
+        {
+            foreach (var other in _modules.Values)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (other.Mvid == module.Mvid) continue;
+                modulesSearched++;
+
+                var otherXref = _xrefCache.GetOrAdd(other.Mvid, _ => LoadOrBuildXref(other, cancellationToken));
+                foreach (var entry in otherXref.TypeOutbound)
+                {
+                    if (!string.Equals(entry.TargetAssemblyName, targetAssemblyName, StringComparison.Ordinal)) continue;
+                    if (!string.Equals(entry.TargetTypeFullName, targetFullName, StringComparison.Ordinal)) continue;
+                    references.Add(RenderTypeReferenceSite(other,
+                        new TypeReferenceSite(entry.SiteToken, entry.SiteKind, entry.ReferenceKind)));
+                }
+            }
+        }
+
+        var targetHandleStr = HandleFormat.FormatType(module.Mvid, typeMetadataToken);
+        return FindTypeReferencesReadResult.Ok(new FindTypeReferencesResult(
+            module.Mvid, typeMetadataToken, targetHandleStr,
+            references, modulesSearched, FromCache: fromCache));
+    }
+
+    private static TypeReferenceRef RenderTypeReferenceSite(Module module, TypeReferenceSite site)
+    {
+        string handle;
+        string display;
+        switch (site.SiteKind)
+        {
+            case MemberKind.Method:
+            {
+                var mh = (MethodDefinitionHandle)MetadataTokens.Handle(site.SiteToken);
+                handle = HandleFormat.Format(module.Mvid, site.SiteToken);
+                display = RenderMethodDef(module, mh);
+                break;
+            }
+            case MemberKind.Field:
+            {
+                handle = $"f:{module.Mvid:D}:0x{site.SiteToken:X8}";
+                display = RenderFieldDef(module, (FieldDefinitionHandle)MetadataTokens.Handle(site.SiteToken));
+                break;
+            }
+            case MemberKind.Property:
+            {
+                handle = $"p:{module.Mvid:D}:0x{site.SiteToken:X8}";
+                display = RenderPropertyDef(module, (PropertyDefinitionHandle)MetadataTokens.Handle(site.SiteToken));
+                break;
+            }
+            case MemberKind.Event:
+            {
+                handle = $"e:{module.Mvid:D}:0x{site.SiteToken:X8}";
+                display = RenderEventDef(module, (EventDefinitionHandle)MetadataTokens.Handle(site.SiteToken));
+                break;
+            }
+            default:
+                handle = $"?:{module.Mvid:D}:0x{site.SiteToken:X8}";
+                display = $"<unknown site kind {site.SiteKind}>";
+                break;
+        }
+        return new TypeReferenceRef(module.Mvid, site.SiteToken, site.SiteKind, site.ReferenceKind, handle, display);
+    }
+
+    private static string RenderPropertyDef(Module module, PropertyDefinitionHandle h)
+    {
+        try
+        {
+            var p = module.MD.GetPropertyDefinition(h);
+            // Properties have no declaring-type back-edge; walk every TypeDef once would be O(n).
+            // For Tier-4 display, just return the property name — the caller can drill in via
+            // list_members / get_method on its accessors.
+            return module.MD.GetString(p.Name);
+        }
+        catch (BadImageFormatException) { return $"<property 0x{MetadataTokens.GetToken(h):X8}>"; }
+    }
+
+    private static string RenderEventDef(Module module, EventDefinitionHandle h)
+    {
+        try
+        {
+            var e = module.MD.GetEventDefinition(h);
+            return module.MD.GetString(e.Name);
+        }
+        catch (BadImageFormatException) { return $"<event 0x{MetadataTokens.GetToken(h):X8}>"; }
+    }
+
     /// <summary>
     /// Walks the caller's IL looking for any call site whose closed instantiation matches the
     /// requested <paramref name="expectedTypeArgs"/> and/or <paramref name="expectedMethodArgs"/>.
@@ -1631,34 +1768,273 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     private static XrefData BuildXref(Module module, CancellationToken cancellationToken = default)
     {
-        var data = new XrefData(new Dictionary<int, List<int>>(), new List<OutboundCallRef>());
+        var data = new XrefData(
+            new Dictionary<int, List<int>>(),
+            new List<OutboundCallRef>(),
+            new Dictionary<int, List<TypeReferenceSite>>(),
+            new List<OutboundTypeRef>());
         // Per-method dedup sets reset between methods: a single method may emit the same call
         // multiple times non-consecutively (e.g. call Foo; call Bar; call Foo), and we want each
         // pair (caller, target) recorded only once on either side.
         var intraSeen = new HashSet<long>();
         var outboundSeen = new HashSet<OutboundCallRef>();
+        // Per-method (typeToken, refKind) dedup for type-xref so the same type isn't recorded
+        // twice for the same site through different IL opcodes / signature positions.
+        var typeIntraSeen = new HashSet<long>();
+        var typeOutboundSeen = new HashSet<OutboundTypeRef>();
+        var typeCollector = new TypeTokenCollectorProvider(module.MD);
         var i = 0;
         foreach (var methodHandle in module.MD.MethodDefinitions)
         {
             if ((++i & 0xFF) == 0) cancellationToken.ThrowIfCancellationRequested();
             var def = module.MD.GetMethodDefinition(methodHandle);
-            if (def.RelativeVirtualAddress == 0) continue;
 
-            byte[] ilBytes;
+            var callerToken = MetadataTokens.GetToken(methodHandle);
+            typeIntraSeen.Clear();
+
+            // 1) Method signature: parameters + return type.
             try
             {
-                var body = module.PE.GetMethodBody(def.RelativeVirtualAddress);
+                typeCollector.Reset();
+                def.DecodeSignature(typeCollector, genericContext: null);
+                EmitCollectedTypes(module, typeCollector, callerToken, MemberKind.Method,
+                    TypeReferenceKind.MethodParameter, data, typeIntraSeen, typeOutboundSeen);
+            }
+            catch (BadImageFormatException) { /* skip malformed signature */ }
+
+            if (def.RelativeVirtualAddress == 0)
+            {
+                continue;
+            }
+
+            byte[] ilBytes;
+            MethodBodyBlock body;
+            try
+            {
+                body = module.PE.GetMethodBody(def.RelativeVirtualAddress);
                 ilBytes = body.GetILBytes() ?? Array.Empty<byte>();
             }
             catch (BadImageFormatException) { continue; }
 
-            var callerToken = MetadataTokens.GetToken(methodHandle);
             intraSeen.Clear();
             outboundSeen.Clear();
             ScanCallsFromIl(module, ilBytes, callerToken, data, intraSeen, outboundSeen);
+
+            // 2) Local variables (StandAloneSig).
+            if (!body.LocalSignature.IsNil)
+            {
+                try
+                {
+                    var localSig = module.MD.GetStandaloneSignature(body.LocalSignature);
+                    typeCollector.Reset();
+                    localSig.DecodeLocalSignature(typeCollector, genericContext: null);
+                    EmitCollectedTypes(module, typeCollector, callerToken, MemberKind.Method,
+                        TypeReferenceKind.MethodLocal, data, typeIntraSeen, typeOutboundSeen);
+                }
+                catch (BadImageFormatException) { /* skip malformed local sig */ }
+            }
+
+            // 3) Type-bearing IL opcodes.
+            ScanTypesFromIl(module, ilBytes, callerToken, data, typeIntraSeen, typeOutboundSeen);
         }
+
+        // 4) Field / Property / Event declarations: record their declared type.
+        foreach (var fh in module.MD.FieldDefinitions)
+        {
+            try
+            {
+                var fd = module.MD.GetFieldDefinition(fh);
+                typeCollector.Reset();
+                fd.DecodeSignature(typeCollector, genericContext: null);
+                var siteToken = MetadataTokens.GetToken(fh);
+                EmitCollectedTypes(module, typeCollector, siteToken, MemberKind.Field,
+                    TypeReferenceKind.FieldType, data, perSiteSeen: null, typeOutboundSeen);
+            }
+            catch (BadImageFormatException) { /* skip */ }
+        }
+        foreach (var ph in module.MD.PropertyDefinitions)
+        {
+            try
+            {
+                var pd = module.MD.GetPropertyDefinition(ph);
+                typeCollector.Reset();
+                pd.DecodeSignature(typeCollector, genericContext: null);
+                var siteToken = MetadataTokens.GetToken(ph);
+                EmitCollectedTypes(module, typeCollector, siteToken, MemberKind.Property,
+                    TypeReferenceKind.PropertyType, data, perSiteSeen: null, typeOutboundSeen);
+            }
+            catch (BadImageFormatException) { /* skip */ }
+        }
+        foreach (var eh in module.MD.EventDefinitions)
+        {
+            try
+            {
+                var ed = module.MD.GetEventDefinition(eh);
+                var siteToken = MetadataTokens.GetToken(eh);
+                ClassifyTypeReferenceHandle(module, ed.Type, siteToken, MemberKind.Event,
+                    TypeReferenceKind.EventType, data, perSiteSeen: null, typeOutboundSeen);
+            }
+            catch (BadImageFormatException) { /* skip */ }
+        }
+
         return data;
     }
+
+    private static void EmitCollectedTypes(Module module, TypeTokenCollectorProvider collector,
+        int siteToken, MemberKind siteKind, TypeReferenceKind refKind,
+        XrefData data, HashSet<long>? perSiteSeen, HashSet<OutboundTypeRef> outboundSeen)
+    {
+        foreach (var handle in collector.Drain())
+        {
+            ClassifyTypeReferenceHandle(module, handle, siteToken, siteKind, refKind, data, perSiteSeen, outboundSeen);
+        }
+    }
+
+    private static void ClassifyTypeReferenceHandle(Module module, EntityHandle handle,
+        int siteToken, MemberKind siteKind, TypeReferenceKind refKind,
+        XrefData data, HashSet<long>? perSiteSeen, HashSet<OutboundTypeRef> outboundSeen)
+    {
+        if (handle.IsNil) return;
+        switch (handle.Kind)
+        {
+            case HandleKind.TypeDefinition:
+            {
+                var typeToken = MetadataTokens.GetToken(handle);
+                AddTypeIntra(data.TypeIntra, typeToken,
+                    new TypeReferenceSite(siteToken, siteKind, refKind), perSiteSeen);
+                break;
+            }
+            case HandleKind.TypeReference:
+            {
+                try
+                {
+                    var tr = module.MD.GetTypeReference((TypeReferenceHandle)handle);
+                    // Same-module TypeRef → record as intra if we can resolve to a local TypeDef.
+                    if (tr.ResolutionScope.Kind == HandleKind.ModuleDefinition)
+                    {
+                        var local = FindTypeDefByName(module, tr);
+                        if (local is { } tdh)
+                        {
+                            AddTypeIntra(data.TypeIntra, MetadataTokens.GetToken(tdh),
+                                new TypeReferenceSite(siteToken, siteKind, refKind), perSiteSeen);
+                            return;
+                        }
+                    }
+                    // Cross-module: resolve to (assembly, typeFullName).
+                    var typeName = ResolveOutboundTypeName(module, handle, out var assemblyName);
+                    if (typeName is not null && assemblyName is not null)
+                    {
+                        var entry = new OutboundTypeRef(siteToken, siteKind, refKind, assemblyName, typeName);
+                        if (outboundSeen.Add(entry))
+                            data.TypeOutbound.Add(entry);
+                    }
+                }
+                catch (BadImageFormatException) { /* skip */ }
+                break;
+            }
+            case HandleKind.TypeSpecification:
+            {
+                // The TypeTokenCollectorProvider already recursed into the spec via
+                // GetTypeFromSpecification, so the generic args (and outer type) are surfaced
+                // separately. Nothing extra to do here.
+                break;
+            }
+        }
+    }
+
+    private static void AddTypeIntra(Dictionary<int, List<TypeReferenceSite>> intra,
+        int typeToken, TypeReferenceSite site, HashSet<long>? perSiteSeen)
+    {
+        if (perSiteSeen is not null)
+        {
+            // Pack (typeToken, refKind) — site is constant within a single method/member.
+            var key = ((long)typeToken << 32) | (uint)(int)site.ReferenceKind;
+            if (!perSiteSeen.Add(key)) return;
+        }
+        if (!intra.TryGetValue(typeToken, out var list))
+        {
+            list = new List<TypeReferenceSite>();
+            intra[typeToken] = list;
+        }
+        list.Add(site);
+    }
+
+    private static void ScanTypesFromIl(Module module, byte[] il, int methodToken,
+        XrefData data, HashSet<long> intraSeen, HashSet<OutboundTypeRef> outboundSeen)
+    {
+        var span = il.AsSpan();
+        int pos = 0;
+        while (pos < span.Length)
+        {
+            var b1 = span[pos++];
+            IlOpcodeTable.Op op;
+            if (b1 == 0xFE)
+            {
+                if (pos >= span.Length) break;
+                op = IlOpcodeTable.TwoByteOp(span[pos++]);
+            }
+            else
+            {
+                op = IlOpcodeTable.OneByteOp(b1);
+            }
+
+            var size = IlOpcodeTable.OperandSize(op);
+            if (size == -1)
+            {
+                if (pos + 4 > span.Length) break;
+                var n = BitConverter.ToInt32(span.Slice(pos, 4));
+                if (n < 0 || n > (span.Length - pos - 4) / 4) break;
+                pos += 4 + n * 4;
+                continue;
+            }
+
+            if (size == 4 && pos + 4 <= span.Length
+                && (op == IlOpcodeTable.Op.InlineType || op == IlOpcodeTable.Op.InlineTok))
+            {
+                var token = BitConverter.ToInt32(span.Slice(pos, 4));
+                ClassifyTypeBearingToken(module, token, methodToken, data, intraSeen, outboundSeen);
+            }
+
+            pos += Math.Max(0, size);
+        }
+    }
+
+    private static void ClassifyTypeBearingToken(Module module, int token, int methodToken,
+        XrefData data, HashSet<long> intraSeen, HashSet<OutboundTypeRef> outboundSeen)
+    {
+        EntityHandle h;
+        try { h = (EntityHandle)MetadataTokens.Handle(token); }
+        catch (ArgumentOutOfRangeException) { return; }
+        catch (BadImageFormatException) { return; }
+
+        // For InlineTok, accept only type-bearing handles (skip method / field tokens).
+        if (h.Kind != HandleKind.TypeDefinition
+            && h.Kind != HandleKind.TypeReference
+            && h.Kind != HandleKind.TypeSpecification)
+        {
+            return;
+        }
+
+        if (h.Kind == HandleKind.TypeSpecification)
+        {
+            // Decode the TypeSpec signature to surface its underlying types (generic args + outer).
+            try
+            {
+                var spec = module.MD.GetTypeSpecification((TypeSpecificationHandle)h);
+                var collector = new TypeTokenCollectorProvider(module.MD);
+                spec.DecodeSignature(collector, genericContext: null);
+                EmitCollectedTypes(module, collector, methodToken, MemberKind.Method,
+                    TypeReferenceKind.IlOpcode, data, intraSeen, outboundSeen);
+            }
+            catch (BadImageFormatException) { /* skip */ }
+            return;
+        }
+
+        ClassifyTypeReferenceHandle(module, h, methodToken, MemberKind.Method,
+            TypeReferenceKind.IlOpcode, data, intraSeen, outboundSeen);
+    }
+
+    /// <inheritdoc />
 
     private static void ScanCallsFromIl(Module module, byte[] il, int callerToken, XrefData data,
         HashSet<long> intraSeen, HashSet<OutboundCallRef> outboundSeen)
@@ -2026,7 +2402,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private const uint XrefMagic = 0x52584D41; // 'AMXR'
-    private const int XrefFormatVersion = 3; // v3 adds CallingConvention byte + uses RequiredParameterCount.
+    private const int XrefFormatVersion = 4; // v4 adds type-reference intra + outbound tables.
 
     private const int MaxIntraCount = 10_000_000;
     private const int MaxOutboundCount = 10_000_000;
@@ -2082,7 +2458,38 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 outbound.Add(new OutboundCallRef(caller, asm, type, method, pc, ga, psig, cc));
             }
 
-            data = new XrefData(intra, outbound);
+            data = new XrefData(intra, outbound, new Dictionary<int, List<TypeReferenceSite>>(), new List<OutboundTypeRef>());
+
+            var typeIntraCount = br.ReadInt32();
+            if (typeIntraCount < 0 || typeIntraCount > MaxIntraCount) return false;
+            for (int i = 0; i < typeIntraCount; i++)
+            {
+                var target = br.ReadInt32();
+                var n = br.ReadInt32();
+                if (n < 0 || n > MaxIntraCallersPerCallee) return false;
+                var list = new List<TypeReferenceSite>(n);
+                for (int j = 0; j < n; j++)
+                {
+                    var siteToken = br.ReadInt32();
+                    var siteKind = (MemberKind)br.ReadByte();
+                    var refKind = (TypeReferenceKind)br.ReadByte();
+                    list.Add(new TypeReferenceSite(siteToken, siteKind, refKind));
+                }
+                data.TypeIntra[target] = list;
+            }
+
+            var typeOutboundCount = br.ReadInt32();
+            if (typeOutboundCount < 0 || typeOutboundCount > MaxOutboundCount) return false;
+            for (int i = 0; i < typeOutboundCount; i++)
+            {
+                var siteToken = br.ReadInt32();
+                var siteKind = (MemberKind)br.ReadByte();
+                var refKind = (TypeReferenceKind)br.ReadByte();
+                var asm = br.ReadString();
+                var typeFn = br.ReadString();
+                data.TypeOutbound.Add(new OutboundTypeRef(siteToken, siteKind, refKind, asm, typeFn));
+            }
+
             return true;
         }
         // Treat any corruption shape as "cache invalid — rebuild". The expensive part of a
@@ -2131,6 +2538,27 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                     bw.Write(o.GenericArity);
                     bw.Write(o.ParameterSignature);
                     bw.Write(o.CallingConvention);
+                }
+                bw.Write(data.TypeIntra.Count);
+                foreach (var (target, sites) in data.TypeIntra)
+                {
+                    bw.Write(target);
+                    bw.Write(sites.Count);
+                    foreach (var s in sites)
+                    {
+                        bw.Write(s.SiteToken);
+                        bw.Write((byte)s.SiteKind);
+                        bw.Write((byte)s.ReferenceKind);
+                    }
+                }
+                bw.Write(data.TypeOutbound.Count);
+                foreach (var o in data.TypeOutbound)
+                {
+                    bw.Write(o.SiteToken);
+                    bw.Write((byte)o.SiteKind);
+                    bw.Write((byte)o.ReferenceKind);
+                    bw.Write(o.TargetAssemblyName);
+                    bw.Write(o.TargetTypeFullName);
                 }
             }
             File.Move(tmp, path, overwrite: true);
@@ -3177,4 +3605,61 @@ internal sealed class StringSignatureProvider : ISignatureTypeProvider<string, o
 
     public string GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind) =>
         reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext);
+}
+
+/// <summary>
+/// Signature provider used by <see cref="MetadataIndex.BuildXref"/> to collect every TypeDef /
+/// TypeRef handle reachable from a signature (method, field, property, local). The provider's
+/// return type is a dummy unit value; the side-effect is accumulation into an internal sink
+/// that the caller drains with <see cref="Drain"/> between uses. <see cref="Reset"/> clears
+/// the sink so a single instance can be reused across many signatures.
+/// </summary>
+internal sealed class TypeTokenCollectorProvider : ISignatureTypeProvider<TypeTokenCollectorProvider.Unit, object?>
+{
+    public readonly record struct Unit;
+
+
+    private readonly MetadataReader _md;
+    private readonly HashSet<EntityHandle> _seen = new();
+    private readonly List<EntityHandle> _ordered = new();
+
+    public TypeTokenCollectorProvider(MetadataReader md) => _md = md;
+
+    public void Reset() { _seen.Clear(); _ordered.Clear(); }
+
+    public IReadOnlyList<EntityHandle> Drain()
+    {
+        // Caller must consume the snapshot before resetting; we return the live list because
+        // the typical caller iterates synchronously and discards the provider afterwards.
+        return _ordered;
+    }
+
+    private Unit Add(EntityHandle h)
+    {
+        if (_seen.Add(h)) _ordered.Add(h);
+        return default;
+    }
+
+    public Unit GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind) => Add(handle);
+    public Unit GetTypeFromReference(MetadataReader reader, TypeReferenceHandle handle, byte rawTypeKind) => Add(handle);
+    public Unit GetTypeFromSpecification(MetadataReader reader, object? genericContext, TypeSpecificationHandle handle, byte rawTypeKind)
+    {
+        // Recurse into the spec so generic args + outer type both surface, but don't record
+        // the TypeSpec handle itself — only the leaf TypeDef/TypeRef handles are useful.
+        try { reader.GetTypeSpecification(handle).DecodeSignature(this, genericContext); }
+        catch (BadImageFormatException) { /* skip */ }
+        return default;
+    }
+
+    public Unit GetPrimitiveType(PrimitiveTypeCode typeCode) => default;
+    public Unit GetSZArrayType(Unit elementType) => default;
+    public Unit GetArrayType(Unit elementType, ArrayShape shape) => default;
+    public Unit GetByReferenceType(Unit elementType) => default;
+    public Unit GetPointerType(Unit elementType) => default;
+    public Unit GetPinnedType(Unit elementType) => default;
+    public Unit GetGenericInstantiation(Unit genericType, ImmutableArray<Unit> typeArguments) => default;
+    public Unit GetGenericMethodParameter(object? genericContext, int index) => default;
+    public Unit GetGenericTypeParameter(object? genericContext, int index) => default;
+    public Unit GetModifiedType(Unit modifier, Unit unmodifiedType, bool isRequired) => default;
+    public Unit GetFunctionPointerType(MethodSignature<Unit> signature) => default;
 }

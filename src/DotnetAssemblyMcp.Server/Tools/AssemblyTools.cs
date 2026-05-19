@@ -732,7 +732,65 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
-        Name = "get_methods",
+        Name = "find_type_references",
+        Title = "Find references to a type (same- and cross-module)",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(
+        "Returns every site that references the requested TypeDef: field/property/event " +
+        "types, method parameters / return types / locals, and IL opcodes that bake in a " +
+        "type token (newobj, castclass, isinst, box, unbox, ldtoken, generic args, ...). " +
+        "Same-module hits come from TypeDef tokens; cross-module hits come from TypeRef " +
+        "matching (assembly simple name + type full name). Uses the same lazily-built per-" +
+        "module xref cache as find_callers; the cache file format version was bumped so the " +
+        "first call after upgrade rebuilds.")]
+    public static AssemblyResult<FindTypeReferencesResult> FindTypeReferences(
+        IMetadataIndex index,
+        [Description("Type handle 't:<mvid>:0x<typeToken>' as returned by list_types or get_type.")] string? typeHandle = null,
+        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
+        [Description("Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null,
+        [Description("Optional absolute path the producer observed for this assembly (used to load the module if it's not yet known).")] string? assemblyPathHint = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
+            out var mvid, out var typeToken, out var resolveErr))
+        {
+            var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
+                ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
+                : ErrorRecoveryHint(resolveErr);
+            return AssemblyResult.Fail<FindTypeReferencesResult>(resolveErr.Message, resolveErr, resolveHint);
+        }
+
+        if (TryEnsureModuleLoaded(index, mvid, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<FindTypeReferencesResult>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+
+        var result = index.FindTypeReferences(mvid, typeToken, cancellationToken);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<FindTypeReferencesResult>(result.Error!.Message, result.Error,
+                ErrorRecoveryHint(result.Error));
+
+        var r = result.Result!;
+        var cacheTag = r.FromCache ? " (cached)" : " (built)";
+        if (r.References.Count > 0)
+        {
+            return AssemblyResult.Ok(
+                r,
+                $"{r.References.Count} reference(s) in {r.ModulesSearched} module{cacheTag}.",
+                new NextActionHint("get_method", "Drill into the first reference site.",
+                    new Dictionary<string, object?>
+                    {
+                        ["moduleVersionId"] = r.References[0].ModuleVersionId.ToString("D"),
+                        ["metadataToken"] = $"0x{r.References[0].MetadataToken:X8}",
+                    }));
+        }
+        return AssemblyResult.Ok(
+            r,
+            $"{r.References.Count} reference(s) in {r.ModulesSearched} module{cacheTag}.");
+    }
+
+    [McpServerTool(
         Title = "Batch: resolve many MethodIdentities in one call",
         Destructive = false,
         ReadOnly = true,

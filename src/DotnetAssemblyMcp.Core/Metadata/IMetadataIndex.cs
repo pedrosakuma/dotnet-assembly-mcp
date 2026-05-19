@@ -157,6 +157,17 @@ public interface IMetadataIndex
     /// excluded — they have their own <see cref="ListMethods"/> surface.
     /// </summary>
     ListMembersResult ListMembers(Guid moduleVersionId, int typeMetadataToken, ListMembersQuery query);
+
+    /// <summary>
+    /// Reverse-resolves "who uses this type?" — returns every site in any loaded module that
+    /// references the target TypeDef through a field type, property type, event type, method
+    /// parameter / return type, method body local, or type-bearing IL opcode (newobj,
+    /// castclass, isinst, box, unbox, ldtoken, newarr, etc.). Cross-module sites match the
+    /// target by (assembly simple name, type full name) so consumers don't need to pre-resolve
+    /// TypeRef identities. Reuses the per-module xref cache that <see cref="FindCallers"/>
+    /// already builds.
+    /// </summary>
+    FindTypeReferencesReadResult FindTypeReferences(Guid moduleVersionId, int typeMetadataToken, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>
