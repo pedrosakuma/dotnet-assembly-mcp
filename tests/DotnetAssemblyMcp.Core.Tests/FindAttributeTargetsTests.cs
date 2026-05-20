@@ -133,7 +133,13 @@ public sealed class FindAttributeTargetsTests
         typeHit.Display.Should().Contain("AnnotatedService");
 
         var paramHit = result.Result.Hits.First(h => h.Kind == AttributeTargetKind.Parameter);
-        paramHit.Handle.Should().StartWith("m:").And.Contain("#param=");
+        // Issue #80: parameter handles now use the 'pa:<mvid>:0x<methodToken>:<sequence>' wire
+        // format that the server's TryParseAttributeTarget already understood. The old
+        // 'm:<mvid>:0x<methodToken>#param=<sequence>' emitter was a latent bug — no parser
+        // ever accepted it.
+        paramHit.Handle.Should().StartWith("pa:")
+            .And.Contain(SampleLibMvid.ToString("D"))
+            .And.EndWith($":{paramHit.ParameterSequence}");
         paramHit.ParameterSequence.Should().BeGreaterThan(0);
 
         var fieldHit = result.Result.Hits.First(h => h.Kind == AttributeTargetKind.Field);

@@ -3,13 +3,14 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 using DotnetAssemblyMcp.Core;
 
 /// <summary>
-/// One AssemblyRef row of a module. <see cref="Handle"/> is the prefix-tagged assembly
-/// handle (<c>a:&lt;mvid&gt;:0x&lt;token&gt;</c>) where <c>mvid</c> is the *containing* module
-/// (not the referenced assembly) — consumers pivot via <see cref="Name"/> + version to load
-/// the referenced assembly from disk via <c>load_assembly</c>.
+/// One AssemblyRef row of a module. <see cref="Handle"/> is the canonical assembly handle
+/// (<c>a:&lt;containingMvid&gt;</c>) of the *containing* module — consumers pivot via
+/// <see cref="Name"/> + <see cref="Version"/> to load the referenced assembly from disk via
+/// <c>load_assembly</c>. The <see cref="MetadataToken"/> field carries the AssemblyRef row
+/// id for ordering / re-fetching within the containing module.
 /// </summary>
 /// <param name="MetadataToken">AssemblyRef metadata token (table 0x23).</param>
-/// <param name="Handle">Prefix-tagged handle <c>a:&lt;containingMvid&gt;:0x&lt;token&gt;</c>.</param>
+/// <param name="Handle">Canonical handle of the containing module (<c>a:&lt;containingMvid&gt;</c>).</param>
 /// <param name="Name">Simple name of the referenced assembly (e.g. <c>System.Text.Json</c>).</param>
 /// <param name="Version">Four-part version string (<c>major.minor.build.revision</c>).</param>
 /// <param name="Culture">Culture name, or <c>null</c> when the row carries the neutral culture.</param>

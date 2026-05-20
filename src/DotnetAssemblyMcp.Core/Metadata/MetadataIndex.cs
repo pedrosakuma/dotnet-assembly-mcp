@@ -5,7 +5,9 @@ using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
 using DotnetAssemblyMcp.Core.Errors;
+using DotnetAssemblyMcp.Core.Handles;
 using DotnetAssemblyMcp.Core.Identity;
+using HandleKind = System.Reflection.Metadata.HandleKind;
 
 namespace DotnetAssemblyMcp.Core.Metadata;
 
@@ -316,7 +318,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var isPublic = vis == TypeAttributes.Public || vis == TypeAttributes.NestedPublic;
         var baseType = TryRenderTypeReferenceSummary(module, td.BaseType);
         var interfaces = ReadInterfaceImplementations(module, td);
-        return new TypeSummary(module.Mvid, token, HandleFormat.FormatType(module.Mvid, token),
+        return new TypeSummary(module.Mvid, token, HandleSyntax.FormatType(module.Mvid, token),
             fullName, kind, methodCount, isPublic, baseType, interfaces);
     }
 
@@ -720,7 +722,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         if (def.RelativeVirtualAddress == 0)
         {
             // Abstract / extern / trimmed body — emit an empty body rather than failing.
-            var handleStr = HandleFormat.Format(module.Mvid, identity.MetadataToken);
+            var handleStr = HandleSyntax.FormatMethod(module.Mvid, identity.MetadataToken);
             return IlBodyResult.Ok(new IlMethodBody(
                 module.Mvid, identity.MetadataToken, handleStr,
                 IlSize: 0, MaxStack: 0, ExceptionRegionCount: 0, InstructionCount: 0,
@@ -739,7 +741,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
             return IlBodyResult.Ok(new IlMethodBody(
                 module.Mvid, identity.MetadataToken,
-                HandleFormat.Format(module.Mvid, identity.MetadataToken),
+                HandleSyntax.FormatMethod(module.Mvid, identity.MetadataToken),
                 IlSize: ilBytes.Length,
                 MaxStack: body.MaxStack,
                 ExceptionRegionCount: body.ExceptionRegions.Length,
@@ -762,7 +764,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var (module, methodHandle) = (common.Module!, common.Handle);
 
         var def = module.MD.GetMethodDefinition(methodHandle);
-        var handleStr = HandleFormat.Format(module.Mvid, identity.MetadataToken);
+        var handleStr = HandleSyntax.FormatMethod(module.Mvid, identity.MetadataToken);
 
         if (def.RelativeVirtualAddress == 0)
         {
@@ -882,7 +884,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             {
                 var h = (MethodDefinitionHandle)MetadataTokens.Handle(token);
                 callers.Add(new CallerRef(
-                    module.Mvid, token, HandleFormat.Format(module.Mvid, token),
+                    module.Mvid, token, HandleSyntax.FormatMethod(module.Mvid, token),
                     RenderMethodDef(module, h)));
             }
         }
@@ -903,7 +905,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 var h = (MethodDefinitionHandle)MetadataTokens.Handle(outbound.CallerToken);
                 callers.Add(new CallerRef(
                     other.Mvid, outbound.CallerToken,
-                    HandleFormat.Format(other.Mvid, outbound.CallerToken),
+                    HandleSyntax.FormatMethod(other.Mvid, outbound.CallerToken),
                     RenderMethodDef(other, h)));
             }
         }
@@ -983,7 +985,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             callers = filtered;
         }
 
-        var calleeHandleStr = HandleFormat.Format(module.Mvid, callee.MetadataToken);
+        var calleeHandleStr = HandleSyntax.FormatMethod(module.Mvid, callee.MetadataToken);
         return FindCallersReadResult.Ok(new FindCallersResult(
             module.Mvid, callee.MetadataToken, calleeHandleStr,
             callers, modulesSearched, FromCache: fromCache));
@@ -1126,7 +1128,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             if (output.Count >= maxHits) return false;
             var h = (MethodDefinitionHandle)MetadataTokens.Handle(token);
             output.Add(new StringReferenceRef(
-                module.Mvid, token, HandleFormat.Format(module.Mvid, token),
+                module.Mvid, token, HandleSyntax.FormatMethod(module.Mvid, token),
                 RenderMethodDef(module, h),
                 offset, literal));
         }
@@ -1331,7 +1333,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 var h = (MethodDefinitionHandle)MetadataTokens.Handle(callerToken);
                 hits.Add(new FieldReferenceRef(
                     module.Mvid, callerToken,
-                    HandleFormat.Format(module.Mvid, callerToken),
+                    HandleSyntax.FormatMethod(module.Mvid, callerToken),
                     RenderMethodDef(module, h),
                     ilOffset, kind));
             }
@@ -1358,7 +1360,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                     var h = (MethodDefinitionHandle)MetadataTokens.Handle(outbound.CallerToken);
                     hits.Add(new FieldReferenceRef(
                         other.Mvid, outbound.CallerToken,
-                        HandleFormat.Format(other.Mvid, outbound.CallerToken),
+                        HandleSyntax.FormatMethod(other.Mvid, outbound.CallerToken),
                         RenderMethodDef(other, h),
                         outbound.IlOffset, outbound.AccessKind));
                 }
@@ -1368,7 +1370,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         return FindFieldReferencesReadResult.Ok(new FindFieldReferencesResult(
             module.Mvid, fieldMetadataToken,
-            HandleFormat.FormatField(module.Mvid, fieldMetadataToken),
+            HandleSyntax.FormatField(module.Mvid, fieldMetadataToken),
             hits, modulesSearched, fromCache));
     }
 
@@ -1455,7 +1457,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         return FindPropertyReferencesReadResult.Ok(new FindPropertyReferencesResult(
             module.Mvid, propertyMetadataToken,
-            HandleFormat.FormatProperty(module.Mvid, propertyMetadataToken),
+            HandleSyntax.FormatProperty(module.Mvid, propertyMetadataToken),
             hits, modulesSearchedMax, fromCacheAll));
     }
 
@@ -1542,7 +1544,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         return FindEventReferencesReadResult.Ok(new FindEventReferencesResult(
             module.Mvid, eventMetadataToken,
-            HandleFormat.FormatEvent(module.Mvid, eventMetadataToken),
+            HandleSyntax.FormatEvent(module.Mvid, eventMetadataToken),
             hits, modulesSearchedMax, fromCacheAll));
     }
 
@@ -1793,43 +1795,43 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                     var name = module.MD.IsAssembly
                         ? module.MD.GetString(module.MD.GetAssemblyDefinition().Name)
                         : "<module>";
-                    return (HandleFormat.FormatAssembly(module.Mvid), name);
+                    return (HandleSyntax.FormatAssembly(module.Mvid), name);
                 }
                 case AttributeTargetKind.Type:
                 {
                     var h = (TypeDefinitionHandle)MetadataTokens.Handle(targetToken);
-                    return (HandleFormat.FormatType(module.Mvid, targetToken),
+                    return (HandleSyntax.FormatType(module.Mvid, targetToken),
                             TypeName(module, module.MD.GetTypeDefinition(h)));
                 }
                 case AttributeTargetKind.Method:
                 {
                     var h = (MethodDefinitionHandle)MetadataTokens.Handle(targetToken);
-                    return (HandleFormat.Format(module.Mvid, targetToken),
+                    return (HandleSyntax.FormatMethod(module.Mvid, targetToken),
                             RenderMethodDef(module, h));
                 }
                 case AttributeTargetKind.Parameter:
                 {
                     var h = (MethodDefinitionHandle)MetadataTokens.Handle(targetToken);
                     var methodDisplay = RenderMethodDef(module, h);
-                    return (HandleFormat.FormatParameter(module.Mvid, targetToken, paramSeq),
+                    return (HandleSyntax.FormatParameter(module.Mvid, targetToken, paramSeq),
                             $"{methodDisplay}#param={paramSeq}");
                 }
                 case AttributeTargetKind.Field:
                 {
                     var h = (FieldDefinitionHandle)MetadataTokens.Handle(targetToken);
-                    return (HandleFormat.FormatField(module.Mvid, targetToken),
+                    return (HandleSyntax.FormatField(module.Mvid, targetToken),
                             RenderFieldDef(module, h));
                 }
                 case AttributeTargetKind.Property:
                 {
                     var h = (PropertyDefinitionHandle)MetadataTokens.Handle(targetToken);
-                    return (HandleFormat.FormatProperty(module.Mvid, targetToken),
+                    return (HandleSyntax.FormatProperty(module.Mvid, targetToken),
                             RenderPropertyDef(module, h));
                 }
                 case AttributeTargetKind.Event:
                 {
                     var h = (EventDefinitionHandle)MetadataTokens.Handle(targetToken);
-                    return (HandleFormat.FormatEvent(module.Mvid, targetToken),
+                    return (HandleSyntax.FormatEvent(module.Mvid, targetToken),
                             RenderEventDef(module, h));
                 }
             }
@@ -2012,7 +2014,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             }
         }
 
-        var targetHandleStr = HandleFormat.FormatType(module.Mvid, typeMetadataToken);
+        var targetHandleStr = HandleSyntax.FormatType(module.Mvid, typeMetadataToken);
         return FindTypeReferencesReadResult.Ok(new FindTypeReferencesResult(
             module.Mvid, typeMetadataToken, targetHandleStr,
             references, modulesSearched, FromCache: fromCache));
@@ -2027,31 +2029,31 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             case MemberKind.Method:
             {
                 var mh = (MethodDefinitionHandle)MetadataTokens.Handle(site.SiteToken);
-                handle = HandleFormat.Format(module.Mvid, site.SiteToken);
+                handle = HandleSyntax.FormatMethod(module.Mvid, site.SiteToken);
                 display = RenderMethodDef(module, mh);
                 break;
             }
             case MemberKind.Field:
             {
-                handle = $"f:{module.Mvid:D}:0x{site.SiteToken:X8}";
+                handle = HandleSyntax.FormatField(module.Mvid, site.SiteToken);
                 display = RenderFieldDef(module, (FieldDefinitionHandle)MetadataTokens.Handle(site.SiteToken));
                 break;
             }
             case MemberKind.Property:
             {
-                handle = $"p:{module.Mvid:D}:0x{site.SiteToken:X8}";
+                handle = HandleSyntax.FormatProperty(module.Mvid, site.SiteToken);
                 display = RenderPropertyDef(module, (PropertyDefinitionHandle)MetadataTokens.Handle(site.SiteToken));
                 break;
             }
             case MemberKind.Event:
             {
-                handle = $"e:{module.Mvid:D}:0x{site.SiteToken:X8}";
+                handle = HandleSyntax.FormatEvent(module.Mvid, site.SiteToken);
                 display = RenderEventDef(module, (EventDefinitionHandle)MetadataTokens.Handle(site.SiteToken));
                 break;
             }
             case MemberKind.Type:
             {
-                handle = HandleFormat.FormatType(module.Mvid, site.SiteToken);
+                handle = HandleSyntax.FormatType(module.Mvid, site.SiteToken);
                 try
                 {
                     var tdh = (TypeDefinitionHandle)MetadataTokens.Handle(site.SiteToken);
@@ -2363,7 +2365,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         if (common.Error is not null) return MethodSourceResult.Fail(common.Error);
         var module = common.Module!;
         var methodHandle = common.Handle;
-        var handleStr = HandleFormat.Format(module.Mvid, identity.MetadataToken);
+        var handleStr = HandleSyntax.FormatMethod(module.Mvid, identity.MetadataToken);
 
         var pdb = _sourceCache.GetOrAdd(module.Mvid, _ => TryOpenPdb(module));
         if (pdb is null)
@@ -3441,6 +3443,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         try
         {
             var h = MetadataTokens.Handle(token);
+            // NOTE: MemberReference tokens (table 0x0A) can carry either a method or a field
+            // signature. We bucket them as `calls` for backward compatibility; the underlying
+            // Token field on each IlSymbolRef remains the source of truth for consumers that
+            // need precise classification. Refining this is tracked separately from #80.
             var bucket = h.Kind switch
             {
                 HandleKind.MethodDefinition or HandleKind.MemberReference or HandleKind.MethodSpecification => calls,
@@ -3455,25 +3461,49 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     private static IlSymbolRef BuildSymbolRef(ModuleHandle m, int token)
     {
-        var handleStr = HandleFormat.Format(m.Mvid, token);
+        // Pick the handle prefix that matches the token's metadata table so consumers can feed
+        // the returned handle straight back into the corresponding `find_*_references` /
+        // `get_method` tool without re-parsing. Pre-#80 every entry was 'm:' prefixed
+        // regardless of kind — fields and types could never round-trip.
+        string handleStr;
         string display;
         try
         {
             var h = MetadataTokens.Handle(token);
-            display = h.Kind switch
+            (handleStr, display) = h.Kind switch
             {
-                HandleKind.MethodDefinition => RenderMethodDef(m, (MethodDefinitionHandle)h),
-                HandleKind.MemberReference => RenderMemberRef(m, (MemberReferenceHandle)h),
-                HandleKind.MethodSpecification => RenderMethodSpec(m, (MethodSpecificationHandle)h),
-                HandleKind.FieldDefinition => RenderFieldDef(m, (FieldDefinitionHandle)h),
-                HandleKind.TypeDefinition => RenderTypeDef(m, (TypeDefinitionHandle)h),
-                HandleKind.TypeReference => RenderTypeRef(m, (TypeReferenceHandle)h),
-                HandleKind.TypeSpecification => RenderTypeSpec(m, (TypeSpecificationHandle)h),
-                _ => IlSymbolRef.UnresolvedDisplay,
+                HandleKind.MethodDefinition =>
+                    (HandleSyntax.FormatMethod(m.Mvid, token), RenderMethodDef(m, (MethodDefinitionHandle)h)),
+                HandleKind.MemberReference =>
+                    // MemberRefs (tokens in table 0x0A) have no first-class wire prefix —
+                    // 'm:' formally addresses MethodDef (table 0x06) and 'f:' addresses FieldDef
+                    // (table 0x04). We emit a synthetic 'm:' as a stable token-carrier so
+                    // existing consumers keep working; precise round-trip into find_*_references
+                    // requires the Token field, not the Handle string. See follow-up to #80.
+                    (HandleSyntax.FormatMethod(m.Mvid, token), RenderMemberRef(m, (MemberReferenceHandle)h)),
+                HandleKind.MethodSpecification =>
+                    (HandleSyntax.FormatMethod(m.Mvid, token), RenderMethodSpec(m, (MethodSpecificationHandle)h)),
+                HandleKind.FieldDefinition =>
+                    (HandleSyntax.FormatField(m.Mvid, token), RenderFieldDef(m, (FieldDefinitionHandle)h)),
+                HandleKind.TypeDefinition =>
+                    (HandleSyntax.FormatType(m.Mvid, token), RenderTypeDef(m, (TypeDefinitionHandle)h)),
+                HandleKind.TypeReference =>
+                    (HandleSyntax.FormatType(m.Mvid, token), RenderTypeRef(m, (TypeReferenceHandle)h)),
+                HandleKind.TypeSpecification =>
+                    (HandleSyntax.FormatType(m.Mvid, token), RenderTypeSpec(m, (TypeSpecificationHandle)h)),
+                _ => (HandleSyntax.FormatMethod(m.Mvid, token), IlSymbolRef.UnresolvedDisplay),
             };
         }
-        catch (BadImageFormatException) { display = IlSymbolRef.UnresolvedDisplay; }
-        catch (InvalidCastException) { display = IlSymbolRef.UnresolvedDisplay; }
+        catch (BadImageFormatException)
+        {
+            handleStr = HandleSyntax.FormatMethod(m.Mvid, token);
+            display = IlSymbolRef.UnresolvedDisplay;
+        }
+        catch (InvalidCastException)
+        {
+            handleStr = HandleSyntax.FormatMethod(m.Mvid, token);
+            display = IlSymbolRef.UnresolvedDisplay;
+        }
         return new IlSymbolRef(token, handleStr, display);
     }
 
@@ -3626,7 +3656,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
 
         var attrs = FormatAttributes(def.Attributes);
-        var handle = HandleFormat.Format(m.Mvid, token);
+        var handle = HandleSyntax.FormatMethod(m.Mvid, token);
 
         return new MethodSummary(
             m.Mvid, token, handle, fullType, methodName, signature,
@@ -4085,7 +4115,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 var token = MetadataTokens.GetToken(arh);
                 refs.Add(new AssemblyReferenceSummary(
                     MetadataToken: token,
-                    Handle: $"a:{module.Mvid:D}:0x{token:X8}",
+                    // Issue #80: canonical 'a:<mvid>' handle of the containing module — the
+                    // previous ad-hoc 'a:<mvid>:0x<token>' was not parseable by
+                    // HandleSyntax.TryParseAssembly. The row id stays in MetadataToken.
+                    Handle: HandleSyntax.FormatAssembly(module.Mvid),
                     Name: name,
                     Version: ar.Version.ToString(),
                     Culture: culture,
@@ -4182,7 +4215,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 var token = MetadataTokens.GetToken(fh);
                 var attrs = FormatFieldAttributes(f.Attributes);
                 sink.Add(new MemberSummary(
-                    module.Mvid, token, $"f:{module.Mvid:D}:0x{token:X8}",
+                    module.Mvid, token, HandleSyntax.FormatField(module.Mvid, token),
                     MemberKind.Field, name, $"{fieldType} {name}", attrs));
             }
             catch (BadImageFormatException) { /* skip malformed row */ }
@@ -4216,7 +4249,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 if ((p.Attributes & PropertyAttributes.SpecialName) != 0) attrs.Add("specialname");
                 if ((p.Attributes & PropertyAttributes.RTSpecialName) != 0) attrs.Add("rtspecialname");
                 sink.Add(new MemberSummary(
-                    module.Mvid, token, $"p:{module.Mvid:D}:0x{token:X8}",
+                    module.Mvid, token, HandleSyntax.FormatProperty(module.Mvid, token),
                     MemberKind.Property, name, $"{sig.ReturnType} {name}{paramList} {accessorsRender}", attrs));
             }
             catch (BadImageFormatException) { /* skip malformed row */ }
@@ -4243,7 +4276,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 if ((e.Attributes & EventAttributes.SpecialName) != 0) attrs.Add("specialname");
                 if ((e.Attributes & EventAttributes.RTSpecialName) != 0) attrs.Add("rtspecialname");
                 sink.Add(new MemberSummary(
-                    module.Mvid, token, $"e:{module.Mvid:D}:0x{token:X8}",
+                    module.Mvid, token, HandleSyntax.FormatEvent(module.Mvid, token),
                     MemberKind.Event, name, $"event {typeName} {name}", attrs));
             }
             catch (BadImageFormatException) { /* skip malformed row */ }
@@ -4623,31 +4656,6 @@ public sealed class ModuleReloadedEventArgs : EventArgs
     public Guid? NewMvid { get; }
     /// <summary>Populated when the reload failed (e.g. corrupted intermediate write).</summary>
     public AssemblyError? Error { get; }
-}
-
-/// <summary>Stable string handle format used across all tool responses.</summary>
-public static class HandleFormat
-{
-    public static string Format(Guid mvid, int token) => $"m:{mvid:D}:0x{token:X8}";
-
-    /// <summary>Format for a type-definition handle (table 0x02), distinct from method handles.</summary>
-    public static string FormatType(Guid mvid, int token) => $"t:{mvid:D}:0x{token:X8}";
-
-    /// <summary>Format for a field-definition handle (table 0x04).</summary>
-    public static string FormatField(Guid mvid, int token) => $"f:{mvid:D}:0x{token:X8}";
-
-    /// <summary>Format for a property-definition handle (table 0x17).</summary>
-    public static string FormatProperty(Guid mvid, int token) => $"p:{mvid:D}:0x{token:X8}";
-
-    /// <summary>Format for an event-definition handle (table 0x14).</summary>
-    public static string FormatEvent(Guid mvid, int token) => $"e:{mvid:D}:0x{token:X8}";
-
-    /// <summary>Format for a single parameter (1-based sequence) of a method-definition handle.</summary>
-    public static string FormatParameter(Guid mvid, int methodToken, int parameterSequence)
-        => $"m:{mvid:D}:0x{methodToken:X8}#param={parameterSequence}";
-
-    /// <summary>Format for the assembly-definition row of a module (no token component).</summary>
-    public static string FormatAssembly(Guid mvid) => $"a:{mvid:D}";
 }
 
 /// <summary>
