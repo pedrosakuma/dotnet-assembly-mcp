@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Re-publishes Sample.cs (linked from SampleLib) with ReadyToRun enabled
+    so the R2R test suite (GetNativeBodyRefTests, GetMethodIncludeNativeBodyTests)
+    has a deterministic, user-owned R2R binary to load instead of probing
+    the host's shared-framework System.Private.CoreLib.dll (brittle path
+    discovery, lane-specific skips on Windows CI).
+
+    The published .dll is NOT committed: the SDK pinned in global.json runs
+    crossgen2 deterministically as part of the normal `dotnet build` flow,
+    so the fixture is rebuilt on every machine that builds the solution.
+
+    Tests resolve the publish path via SampleLibR2RFixture in Core.Tests.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <AssemblyName>SampleLibR2R</AssemblyName>
+    <RootNamespace>SampleLibR2R</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <NoWarn>$(NoWarn);CA1822;CA1812;CS1591;CS8321</NoWarn>
+    <IsPackable>false</IsPackable>
+    <!-- Keep the published payload small: no trimming (we want all the metadata
+         the navigation tools enumerate), no single-file (we want a separate .dll). -->
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\SampleLib\Sample.cs" Link="Sample.cs" />
+  </ItemGroup>
+
+  <!-- Publish into a stable, version-agnostic path so tests can locate the
+       binary without poking into bin/<cfg>/net10.0/<rid>/publish/. Runs as
+       part of the normal Build target so `dotnet build` is enough. -->
+  <PropertyGroup>
+    <SampleLibR2RPublishDir>$(MSBuildThisFileDirectory)publish\</SampleLibR2RPublishDir>
+  </PropertyGroup>
+  <Target Name="PublishR2RFixture" AfterTargets="Build" Condition="'$(_IsPublishing)' != 'true'">
+    <MSBuild
+      Projects="$(MSBuildThisFileFullPath)"
+      Targets="Publish"
+      Properties="Configuration=$(Configuration);PublishReadyToRun=true;PublishDir=$(SampleLibR2RPublishDir);_IsPublishing=true;TargetFramework=$(TargetFramework);RuntimeIdentifier=$(RuntimeIdentifier);SelfContained=$(SelfContained)" />
+  </Target>
+
+</Project>

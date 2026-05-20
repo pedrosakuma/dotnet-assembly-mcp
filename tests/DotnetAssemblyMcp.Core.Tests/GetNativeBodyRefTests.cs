@@ -1,5 +1,6 @@
 using DotnetAssemblyMcp.Core.Errors;
 using DotnetAssemblyMcp.Core.Metadata;
+using DotnetAssemblyMcp.Core.Tests.Fixtures;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
@@ -9,17 +10,73 @@ using Xunit;
 namespace DotnetAssemblyMcp.Core.Tests;
 
 /// <summary>
-/// R2R native-body lookup tests for issue #74. Hits the real shared-framework
-/// <c>System.Private.CoreLib.dll</c> as the positive fixture (always R2R-compiled on x64)
-/// and <c>SampleLib</c> as the negative (JIT-only).
+/// R2R native-body lookup tests for issue #74. Drives the deterministic
+/// SampleLibR2R fixture (rebuilt at solution build time) so the suite no longer
+/// depends on archaeology of the host's shared-framework <c>System.Private.CoreLib.dll</c>.
+///
+/// The legacy SPCorLib paths are kept as <em>additional</em> coverage when a shared
+/// framework happens to be reachable — they verify behaviour on a real-world
+/// crossgen2 output that we don't control — but every test that requires R2R now
+/// has a non-skippable counterpart driven by the fixture.
 /// </summary>
 public sealed class GetNativeBodyRefTests
 {
-    // Latest installed shared framework. SDK 10.0.201 ships runtime 10.0.5.
     private static readonly string? SpcPath = FindSharedCoreLib();
+    private static readonly string? R2rFixturePath = SampleLibR2RFixture.Path;
 
     private static string SampleLibPath => typeof(SampleLib.OrderService).Assembly.Location;
     private static Guid SampleLibMvid => typeof(SampleLib.OrderService).Assembly.ManifestModule.ModuleVersionId;
+
+    [Fact]
+    public void Returns_native_body_for_R2R_fixture_method()
+    {
+        R2rFixturePath.Should().NotBeNull("SampleLibR2R fixture must be built by the test csproj");
+
+        using var index = new MetadataIndex();
+        var loaded = index.Load(R2rFixturePath!);
+        loaded.IsSuccess.Should().BeTrue();
+        var mvid = loaded.Module!.ModuleVersionId;
+
+        // Walk the MethodDef table and assert at least one method carries an R2R body.
+        // Empirically ~60/71 SampleLib methods are R2R-compiled on x64.
+        int hit = 0;
+        for (int rid = 1; rid <= loaded.Module.MethodCount; rid++)
+        {
+            var nb = index.GetNativeBodyRef(mvid, 0x06000000 | rid);
+            if (nb.Found) hit++;
+        }
+
+        hit.Should().BeGreaterThan(10,
+            "PublishReadyToRun=true must populate native bodies for the majority of SampleLib methods");
+    }
+
+    [Fact]
+    public void R2R_fixture_body_carries_expected_metadata()
+    {
+        R2rFixturePath.Should().NotBeNull("SampleLibR2R fixture must be built by the test csproj");
+
+        using var index = new MetadataIndex();
+        var loaded = index.Load(R2rFixturePath!);
+        var mvid = loaded.Module!.ModuleVersionId;
+
+        // Find the first R2R-compiled method and assert envelope fields.
+        for (int rid = 1; rid <= loaded.Module.MethodCount; rid++)
+        {
+            var nb = index.GetNativeBodyRef(mvid, 0x06000000 | rid);
+            if (!nb.Found) continue;
+
+            var body = nb.Body!;
+            body.Source.Should().Be(NativeBodySource.R2R);
+            body.PePath.Should().Be(R2rFixturePath);
+            body.Architecture.Should().BeOneOf(NativeArchitecture.X64, NativeArchitecture.Arm64);
+            body.HotRegion.Should().NotBeNull();
+            body.HotRegion.Rva.Should().BeGreaterThan(0);
+            body.HotRegion.Size.Should().BeGreaterThan(0);
+            return;
+        }
+
+        Assert.Fail("expected at least one R2R-compiled method in the SampleLibR2R fixture");
+    }
 
     [SkippableFact]
     public void Returns_native_body_for_R2R_precompiled_method()
