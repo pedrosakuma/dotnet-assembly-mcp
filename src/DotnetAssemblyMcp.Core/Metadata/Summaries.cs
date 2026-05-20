@@ -63,7 +63,8 @@ public sealed record TypeSummary(
     int MethodCount,
     bool IsPublic,
     TypeReferenceSummary? BaseType = null,
-    IReadOnlyList<TypeReferenceSummary>? Interfaces = null);
+    IReadOnlyList<TypeReferenceSummary>? Interfaces = null,
+    IReadOnlyList<string>? Instantiation = null);
 
 /// <summary>
 /// Filter / paging knobs accepted by <see cref="IMetadataIndex.ListTypes"/>. All fields are
@@ -175,7 +176,8 @@ public readonly record struct FindMethodResult(FindMethodPage? Page, AssemblyErr
 public sealed record ListDerivedTypesQuery(
     int? Cursor = null,
     int PageSize = ListDerivedTypesQuery.DefaultPageSize,
-    bool DirectOnly = true)
+    bool DirectOnly = true,
+    IReadOnlyList<GenericTypeName>? MatchInstantiation = null)
 {
     public const int DefaultPageSize = 50;
     public const int MaxPageSize = 500;

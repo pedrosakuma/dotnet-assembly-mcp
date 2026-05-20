@@ -187,3 +187,25 @@ public static class CounterFixture
 
     public static int ReadTwice() => Count + Count;
 }
+
+/// <summary>
+/// Generic-instantiation fixtures for ListDerivedTypes (issue #67). These exercise the
+/// TypeSpec-parent decoding path: a class implementing a closed generic interface or
+/// subclassing a closed generic base produces a TypeSpec row that the matcher must walk.
+/// </summary>
+public interface IRequestHandler<TReq, TResp>
+{
+    TResp Handle(TReq req);
+}
+
+public abstract class Repository<T>
+{
+    public abstract T? GetById(int id);
+}
+
+/// <summary>Same-module TypeSpec → TypeDef edge (CLASS token resolves locally).</summary>
+public sealed class IntRepository : Repository<int>
+{
+    public override int GetById(int id) => id;
+}
+

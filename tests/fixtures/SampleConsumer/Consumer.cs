@@ -115,3 +115,24 @@ public sealed class Hamster : IAnimal
 {
     public string Speak() => "squeak";
 }
+
+/// <summary>
+/// Cross-module TypeSpec fixtures for ListDerivedTypes (issue #67): each parent is a
+/// closed generic instantiation whose open form lives in SampleLib. The child types
+/// emit TypeSpec rows that decode to (SampleLib, IRequestHandler`2 / Repository`1)
+/// plus the closed args, so the matcher can answer both open and closed queries.
+/// </summary>
+public sealed class OrderHandler : IRequestHandler<int, string>
+{
+    public string Handle(int req) => req.ToString(System.Globalization.CultureInfo.InvariantCulture);
+}
+
+public sealed class UserHandler : IRequestHandler<string, int>
+{
+    public int Handle(string req) => req.Length;
+}
+
+public sealed class UserRepo : Repository<string>
+{
+    public override string? GetById(int id) => null;
+}

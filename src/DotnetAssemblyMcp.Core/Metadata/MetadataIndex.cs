@@ -3815,14 +3815,18 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var startOffset = query.Cursor is { } c && c > 0 ? c : 0;
 
         // Build the parent relation across every loaded module:
-        //  - localParents: (childMvid, childToken) -> (parentMvid, parentToken)   (same module via TypeDef)
-        //  - crossParents: (childMvid, childToken) -> set of (parentAsm, parentFull) (TypeRef)
-        // We capture BaseType and every InterfaceImplementation as a parent so the same walk
-        // covers both class derivation and interface implementation. TypeSpec parents (generic
-        // instantiations such as `class Dog : AnimalBase<int>`) are intentionally skipped — the
-        // intra-module original behaved the same and the spec decoder isn't wired here yet.
-        var localParents = new Dictionary<(Guid, int), List<(Guid, int)>>();
-        var crossParents = new Dictionary<(Guid, int), List<(string, string)>>();
+        //  - localParents: (childMvid, childToken) -> [(parentMvid, parentToken, args?)] (same module
+        //    via TypeDef, or via TypeSpec whose CLASS token resolves to a same-module TypeDef).
+        //  - crossParents: (childMvid, childToken) -> [(parentAsm, parentFull, args?)] (TypeRef or
+        //    TypeSpec whose CLASS token resolves to a cross-module TypeRef).
+        // BaseType and every InterfaceImplementation are captured so a single walk covers both
+        // class derivation and interface implementation. TypeSpec parents (e.g.
+        // `class OrderHandler : IRequestHandler<int,string>`) populate `args` with the closed
+        // instantiation in CLR wire format ([ "System.Int32", "System.String" ]); non-spec edges
+        // carry null args. Per issue #67 the `args` payload feeds both the MatchInstantiation
+        // filter and the TypeSummary.Instantiation stamp on the returned page.
+        var localParents = new Dictionary<(Guid, int), List<(Guid mvid, int token, IReadOnlyList<string>? args)>>();
+        var crossParents = new Dictionary<(Guid, int), List<(string asm, string full, IReadOnlyList<string>? args)>>();
 
         foreach (var kv in _modules)
         {
@@ -3857,30 +3861,76 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             }
         }
 
-        // Edge test: does (childMvid, childToken) have `baseKey` as one of its direct parents?
-        bool IsDirectChild((Guid mvid, int token) child)
+        // Pre-render the MatchInstantiation filter into CLR wire-format strings so per-edge
+        // comparison is a flat string equality check. Null/empty => open match.
+        string[]? expectedArgs = null;
+        if (query.MatchInstantiation is { Count: > 0 } mi)
         {
+            expectedArgs = new string[mi.Count];
+            for (int i = 0; i < mi.Count; i++) expectedArgs[i] = mi[i].Format();
+        }
+
+        bool MatchesInstantiationFilter(IReadOnlyList<string>? candidate)
+        {
+            if (expectedArgs is null) return true;
+            if (candidate is null) return false;
+            if (candidate.Count != expectedArgs.Length) return false;
+            for (int i = 0; i < expectedArgs.Length; i++)
+                if (!string.Equals(candidate[i], expectedArgs[i], StringComparison.Ordinal))
+                    return false;
+            return true;
+        }
+
+        // Edge test: does (childMvid, childToken) have `baseKey` as one of its direct parents,
+        // and does the parent edge satisfy the MatchInstantiation filter? On success returns
+        // the matched edge's args (may be null for non-spec edges) so the caller can stamp
+        // them on the resulting TypeSummary.
+        bool IsDirectChild((Guid mvid, int token) child, out IReadOnlyList<string>? matchedArgs)
+        {
+            matchedArgs = null;
             if (child.mvid == moduleVersionId
                 && localParents.TryGetValue(child, out var lps))
             {
                 foreach (var p in lps)
-                    if (p.Item1 == moduleVersionId && p.Item2 == baseTypeMetadataToken) return true;
+                {
+                    if (p.mvid == moduleVersionId && p.token == baseTypeMetadataToken
+                        && MatchesInstantiationFilter(p.args))
+                    {
+                        matchedArgs = p.args;
+                        return true;
+                    }
+                }
             }
             if (crossParents.TryGetValue(child, out var cps))
             {
                 foreach (var p in cps)
-                    if (p.Item1 == baseKey.Asm && p.Item2 == baseKey.Full) return true;
+                {
+                    if (p.asm == baseKey.Asm && p.full == baseKey.Full
+                        && MatchesInstantiationFilter(p.args))
+                    {
+                        matchedArgs = p.args;
+                        return true;
+                    }
+                }
             }
             return false;
         }
 
         // Direct children of the root, used both as the answer in DirectOnly mode and as the
-        // BFS seed in transitive mode.
+        // BFS seed in transitive mode. directInstantiation captures the matched-edge args so
+        // the page can stamp TypeSummary.Instantiation on the closed-generic hits.
         var direct = new HashSet<(Guid, int)>();
+        var directInstantiation = new Dictionary<(Guid, int), IReadOnlyList<string>?>();
         foreach (var child in localParents.Keys)
-            if (IsDirectChild(child)) direct.Add(child);
+        {
+            if (IsDirectChild(child, out var args) && direct.Add(child))
+                directInstantiation[child] = args;
+        }
         foreach (var child in crossParents.Keys)
-            if (IsDirectChild(child)) direct.Add(child);
+        {
+            if (IsDirectChild(child, out var args) && direct.Add(child))
+                directInstantiation[child] = args;
+        }
 
         HashSet<(Guid, int)> hits;
         if (query.DirectOnly)
@@ -3896,15 +3946,17 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             foreach (var kv in localParents)
                 foreach (var p in kv.Value)
                 {
-                    if (!childrenByLocal.TryGetValue(p, out var list))
-                        childrenByLocal[p] = list = new List<(Guid, int)>();
+                    var key = (p.mvid, p.token);
+                    if (!childrenByLocal.TryGetValue(key, out var list))
+                        childrenByLocal[key] = list = new List<(Guid, int)>();
                     list.Add(kv.Key);
                 }
             foreach (var kv in crossParents)
                 foreach (var p in kv.Value)
                 {
-                    if (!childrenByCross.TryGetValue(p, out var list))
-                        childrenByCross[p] = list = new List<(Guid, int)>();
+                    var key = (p.asm, p.full);
+                    if (!childrenByCross.TryGetValue(key, out var list))
+                        childrenByCross[key] = list = new List<(Guid, int)>();
                     list.Add(kv.Key);
                 }
 
@@ -3912,8 +3964,11 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             var queue = new Queue<(Guid, int)>();
             foreach (var d in direct) { hits.Add(d); queue.Enqueue(d); }
 
-            // Cross-module edges that match the root by (asm, full).
-            if (childrenByCross.TryGetValue(baseKey, out var rootCross))
+            // Cross-module edges that match the root by (asm, full). Note: when the user
+            // supplied MatchInstantiation, these transitive root-cross edges are also gated
+            // by the same filter so descendants behind a non-matching closed parent aren't
+            // accidentally pulled in.
+            if (expectedArgs is null && childrenByCross.TryGetValue(baseKey, out var rootCross))
                 foreach (var crossChild in rootCross)
                     if (hits.Add(crossChild)) queue.Enqueue(crossChild);
 
@@ -3967,6 +4022,12 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             catch (BadImageFormatException) { continue; }
             if (summary is null) continue;
 
+            // Stamp the closed instantiation that satisfied the match on direct hits reached
+            // via a TypeSpec parent (issue #67). Transitive descendants and non-spec direct
+            // hits leave Instantiation null.
+            if (directInstantiation.TryGetValue((hitMvid, hitToken), out var stamp) && stamp is not null)
+                summary = summary with { Instantiation = stamp };
+
             if (results.Count == pageSize)
             {
                 nextCursor = i;
@@ -3985,26 +4046,86 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         Guid childMvid,
         (Guid, int) childKey,
         EntityHandle parentHandle,
-        Dictionary<(Guid, int), List<(Guid, int)>> localParents,
-        Dictionary<(Guid, int), List<(string, string)>> crossParents)
+        Dictionary<(Guid, int), List<(Guid mvid, int token, IReadOnlyList<string>? args)>> localParents,
+        Dictionary<(Guid, int), List<(string asm, string full, IReadOnlyList<string>? args)>> crossParents)
     {
         if (parentHandle.IsNil) return;
         switch (parentHandle.Kind)
         {
             case HandleKind.TypeDefinition:
                 if (!localParents.TryGetValue(childKey, out var lps))
-                    localParents[childKey] = lps = new List<(Guid, int)>();
-                lps.Add((childMvid, MetadataTokens.GetToken(parentHandle)));
+                    localParents[childKey] = lps = new List<(Guid, int, IReadOnlyList<string>?)>();
+                lps.Add((childMvid, MetadataTokens.GetToken(parentHandle), null));
                 break;
             case HandleKind.TypeReference:
                 var full = ResolveTypeRefName(childModule, (TypeReferenceHandle)parentHandle, out var asm);
                 if (full is null || asm is null) return;
                 if (!crossParents.TryGetValue(childKey, out var cps))
-                    crossParents[childKey] = cps = new List<(string, string)>();
-                cps.Add((asm, full));
+                    crossParents[childKey] = cps = new List<(string, string, IReadOnlyList<string>?)>();
+                cps.Add((asm, full, null));
                 break;
-            // TypeSpec parents (generic instantiations) are skipped — see method docstring.
+            case HandleKind.TypeSpecification:
+                AddSpecParentEdge(childModule, childMvid, childKey,
+                    (TypeSpecificationHandle)parentHandle, localParents, crossParents);
+                break;
         }
+    }
+
+    /// <summary>
+    /// Decodes a TypeSpec parent edge (issue #67). Generic-instantiation base/interface
+    /// signatures (e.g. <c>: IRequestHandler&lt;int,string&gt;</c>) materialize as a
+    /// <c>0x15 GENERICINST</c> blob: byte stream is
+    /// <c>0x15 (CLASS|VALUETYPE) &lt;coded TypeDefOrRefOrSpec&gt; &lt;argCount&gt; &lt;arg sigs&gt;</c>.
+    /// We peek the underlying TypeDef/TypeRef to identify the OPEN parent (so the matcher
+    /// can answer queries against the open form, e.g. <c>IRequestHandler`2</c>), and decode
+    /// the full spec via <see cref="WireFormatSignatureProvider"/> to capture the closed
+    /// args in CLR wire format. Non-GENERICINST specs (rare for base types) are skipped.
+    /// </summary>
+    private static void AddSpecParentEdge(
+        Module childModule,
+        Guid childMvid,
+        (Guid, int) childKey,
+        TypeSpecificationHandle handle,
+        Dictionary<(Guid, int), List<(Guid mvid, int token, IReadOnlyList<string>? args)>> localParents,
+        Dictionary<(Guid, int), List<(string asm, string full, IReadOnlyList<string>? args)>> crossParents)
+    {
+        try
+        {
+            var ts = childModule.MD.GetTypeSpecification(handle);
+            var sigReader = childModule.MD.GetBlobReader(ts.Signature);
+            if (sigReader.RemainingBytes < 2) return;
+            if (sigReader.ReadByte() != 0x15 /* GENERICINST */) return;
+            var classOrValue = sigReader.ReadByte();
+            if (classOrValue != 0x12 /* CLASS */ && classOrValue != 0x11 /* VALUETYPE */) return;
+            var encoded = sigReader.ReadCompressedInteger();
+            var openHandle = EntityHandle(encoded);
+
+            // Decode the closed args via the typed provider then re-parse to extract each
+            // arg as a canonical wire-format string ("System.Int32", "List`1[System.Int32]", …).
+            var decoded = ts.DecodeSignature(new WireFormatSignatureProvider(), genericContext: (object?)null);
+            if (!GenericTypeName.TryParse(decoded, out var node, out _, out _)) return;
+            if (node is not GenericTypeName.Named named) return;
+            if (named.TypeArguments.IsDefaultOrEmpty) return;
+            var args = new string[named.TypeArguments.Length];
+            for (int i = 0; i < args.Length; i++) args[i] = named.TypeArguments[i].Format();
+
+            switch (openHandle.Kind)
+            {
+                case HandleKind.TypeDefinition:
+                    if (!localParents.TryGetValue(childKey, out var lps))
+                        localParents[childKey] = lps = new List<(Guid, int, IReadOnlyList<string>?)>();
+                    lps.Add((childMvid, MetadataTokens.GetToken(openHandle), args));
+                    break;
+                case HandleKind.TypeReference:
+                    var full = ResolveTypeRefName(childModule, (TypeReferenceHandle)openHandle, out var asm);
+                    if (full is null || asm is null) return;
+                    if (!crossParents.TryGetValue(childKey, out var cps))
+                        crossParents[childKey] = cps = new List<(string, string, IReadOnlyList<string>?)>();
+                    cps.Add((asm, full, args));
+                    break;
+            }
+        }
+        catch (BadImageFormatException) { /* skip malformed spec */ }
     }
 
     /// <inheritdoc />

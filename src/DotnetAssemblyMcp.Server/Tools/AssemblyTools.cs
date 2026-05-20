@@ -1377,9 +1377,13 @@ public sealed class AssemblyTools
         "use TypeDef tokens, cross-module hits match by (assembly simple name, type full " +
         "name) against the child module's TypeRef rows. With directOnly=true (default) only " +
         "immediate subclasses / implementers are returned; with directOnly=false the full " +
-        "transitive set is returned. Identify the base type via 'typeHandle' or via " +
-        "mvidOrPath + typeFullName, exactly like get_type / list_methods. Generic-instantiation " +
-        "parents (TypeSpec) are not matched yet.")]
+        "transitive set is returned. Generic-instantiation parents are also matched: a " +
+        "query against the open base (e.g. `IRequestHandler\u00602`) finds every closed-arg " +
+        "implementer, and the matched closed args are surfaced on `TypeSummary.Instantiation`. " +
+        "Pass `matchInstantiation` to narrow the result to a specific closed shape (e.g. " +
+        "`['System.Int32','System.String']` returns only `OrderHandler : IRequestHandler<int,string>`). " +
+        "Identify the base type via 'typeHandle' or via mvidOrPath + typeFullName, exactly " +
+        "like get_type / list_methods.")]
     public static AssemblyResult<ListDerivedTypesPage> ListDerivedTypes(
         IMetadataIndex index,
         [Description("Type handle 't:<mvid>:0x<typeToken>' of the base type, as returned by list_types or get_type.")] string? typeHandle = null,
@@ -1387,7 +1391,8 @@ public sealed class AssemblyTools
         [Description("Full base-type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null,
         [Description("When true (default) only immediate subclasses are returned; when false, the full transitive descendant set is returned.")] bool directOnly = true,
         [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
-        [Description("Max types per page (default 50, capped at 500).")] int pageSize = ListDerivedTypesQuery.DefaultPageSize)
+        [Description("Max types per page (default 50, capped at 500).")] int pageSize = ListDerivedTypesQuery.DefaultPageSize,
+        [Description("Optional CLR reflection-style full names for the base type's generic arguments (e.g. ['System.Int32','System.String']) per docs/handoff-contract.md \u00A73.5. When supplied, only TypeSpec parent edges whose closed args match element-wise are returned; non-generic parents are excluded. Omit for open match (default).")] string[]? matchInstantiation = null)
     {
         if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
             out var mvid, out var typeToken, out var resolveErr))
@@ -1398,10 +1403,14 @@ public sealed class AssemblyTools
             return AssemblyResult.Fail<ListDerivedTypesPage>(resolveErr.Message, resolveErr, resolveHint);
         }
 
+        if (!TryParseGenericArgs(matchInstantiation, nameof(matchInstantiation), out var matchArgs, out var matchErr))
+            return AssemblyResult.Fail<ListDerivedTypesPage>(matchErr!.Message, matchErr, ErrorRecoveryHint(matchErr));
+
         var query = new ListDerivedTypesQuery(
             DirectOnly: directOnly,
             Cursor: cursor > 0 ? cursor : null,
-            PageSize: pageSize);
+            PageSize: pageSize,
+            MatchInstantiation: matchArgs);
 
         var result = index.ListDerivedTypes(mvid, typeToken, query);
         if (!result.IsSuccess)
@@ -1419,6 +1428,7 @@ public sealed class AssemblyTools
                     ["typeHandle"] = HandleFormat.FormatType(p.ModuleVersionId, p.BaseTypeMetadataToken),
                     ["cursor"] = p.NextCursor,
                     ["directOnly"] = directOnly,
+                    ["matchInstantiation"] = matchInstantiation,
                 })
             : new NextActionHint("list_methods", "Drill into one of the derived types to inspect its methods.");
         return AssemblyResult.Ok(p, summary, hint);
