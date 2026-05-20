@@ -46,6 +46,14 @@ public sealed class ToolReturnTypeSchemaContractTests
 
         foreach (var tool in toolMethods)
         {
+            // Walk the OUTER envelope (AssemblyResult<T>) too — its own nullable positional
+            // params (Data, Hints, Error) must satisfy the same rule. Before v0.12.2 this
+            // class was skipped because the test only validated the inner T payload, which
+            // hid a regression where every error response was rejected by strict MCP clients
+            // (issue #71: `data must have required property "data"`).
+            var envelope = UnwrapTaskWrapper(tool.ReturnType);
+            WalkType(envelope, seen, violations, nullabilityCtx, $"{tool.Name}() envelope");
+
             var payload = UnwrapPayloadType(tool.ReturnType);
             WalkType(payload, seen, violations, nullabilityCtx, $"{tool.Name}() return");
         }
@@ -63,12 +71,18 @@ public sealed class ToolReturnTypeSchemaContractTests
     private static Type UnwrapPayloadType(Type returnType)
     {
         // Tool methods return either `AssemblyResult<T>` or `Task<AssemblyResult<T>>`.
-        var t = returnType;
-        if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(Task<>))
+        var t = UnwrapTaskWrapper(returnType);
+        if (t.IsGenericType && t.GetGenericTypeDefinition().Name.StartsWith("AssemblyResult", StringComparison.Ordinal))
         {
             t = t.GetGenericArguments()[0];
         }
-        if (t.IsGenericType && t.GetGenericTypeDefinition().Name.StartsWith("AssemblyResult", StringComparison.Ordinal))
+        return t;
+    }
+
+    private static Type UnwrapTaskWrapper(Type returnType)
+    {
+        var t = returnType;
+        if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(Task<>))
         {
             t = t.GetGenericArguments()[0];
         }
