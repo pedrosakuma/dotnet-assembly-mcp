@@ -46,9 +46,19 @@ internal sealed class NibbleReader
     {
         uint value = 0;
         uint nibble;
+        int read = 0;
         do
         {
+            // A well-formed encoded u32 fits in 11 nibbles (33 bits, top nibble has 0 in
+            // 'more' position). Cap the loop so a malformed image cannot loop forever, and
+            // reject overlong encodings before our `(value << 3) + ...` step silently wraps
+            // around `uint.MaxValue` — that wrap was the bypass surface flagged in audit #78.
+            if (read++ >= 11)
+                throw new System.BadImageFormatException("R2R NibbleReader: overlong encoded u32.");
             nibble = ReadNibble();
+            // Reject any shift that would overflow `uint`.
+            if ((value & 0xE0000000u) != 0)
+                throw new System.BadImageFormatException("R2R NibbleReader: encoded u32 exceeds 32 bits.");
             value = (value << 3) + (nibble & 0x7);
         }
         while ((nibble & 0x8) != 0);

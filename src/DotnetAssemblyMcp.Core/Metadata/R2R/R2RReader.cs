@@ -315,8 +315,14 @@ internal sealed class R2RReader
         // R2R headers are not produced by any supported SDK. We mirror the modern path.
         NibbleReader reader = new(_reader, offset);
         uint count = reader.ReadUInt();
-        uint bitsForNativeDelta = reader.ReadUInt() + 1;
-        uint bitsForILOffsets = reader.ReadUInt() + 1;
+        uint rawNativeDelta = reader.ReadUInt();
+        uint rawIlOffsets = reader.ReadUInt();
+        // Validate the raw widths BEFORE the `+ 1` adjustment so a payload of 0xFFFFFFFF
+        // cannot wrap to zero and bypass the cap below.
+        if (rawNativeDelta > 31 || rawIlOffsets > 31)
+            throw new BadImageFormatException("R2R DebugInfo: implausible bit width per field.");
+        uint bitsForNativeDelta = rawNativeDelta + 1;
+        uint bitsForILOffsets = rawIlOffsets + 1;
         uint bitsForSourceType = MajorVersion >= 17 ? 3u : 2u;
         uint bitsPerEntry = bitsForNativeDelta + bitsForILOffsets + bitsForSourceType;
         if (bitsPerEntry == 0 || bitsPerEntry > 60) // sanity — fits in our 64-bit accumulator
@@ -358,7 +364,18 @@ internal sealed class R2RReader
                 encoded >>= (int)bitsForSourceType;
 
                 uint nativeDelta = (uint)(encoded & ((1UL << (int)bitsForNativeDelta) - 1));
-                previousNativeOffset += nativeDelta;
+                try
+                {
+                    // Checked: a malformed image must not produce a wrong-but-plausible
+                    // monotonically-decreasing native offset via uint wrap.
+                    previousNativeOffset = checked(previousNativeOffset + nativeDelta);
+                }
+                catch (OverflowException)
+                {
+                    throw new BadImageFormatException("R2R DebugInfo: native offset accumulator overflow.");
+                }
+                if (previousNativeOffset > int.MaxValue)
+                    throw new BadImageFormatException("R2R DebugInfo: native offset exceeds int.MaxValue.");
                 encoded >>= (int)bitsForNativeDelta;
 
                 uint ilEncoded = (uint)encoded;
@@ -368,6 +385,8 @@ internal sealed class R2RReader
                     0xFFFFFFFFu => -1, // NoMapping
                     0xFFFFFFFEu => -2, // Prolog
                     0xFFFFFFFDu => -3, // Epilog
+                    _ when il > (uint)int.MaxValue =>
+                        throw new BadImageFormatException("R2R DebugInfo: IL offset exceeds int.MaxValue."),
                     _ => (int)il,
                 };
 
