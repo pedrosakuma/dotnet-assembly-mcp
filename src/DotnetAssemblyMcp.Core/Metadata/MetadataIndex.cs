@@ -38,6 +38,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private readonly ConcurrentDictionary<Guid, StringIndexData> _stringIndexCache = new();
     private readonly ConcurrentDictionary<Guid, AttributeIndexData> _attributeIndexCache = new();
     private readonly ConcurrentDictionary<Guid, FieldAccessIndexData> _fieldAccessCache = new();
+    private readonly ConcurrentDictionary<Guid, R2R.R2RReader?> _r2rCache = new();
     private readonly string _xrefCacheDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".cache", "dotnet-assembly-mcp");
@@ -1729,6 +1730,58 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             hits, modulesSearchedMax, fromCacheAll));
     }
 
+    /// <inheritdoc />
+    public NativeBodyResult GetNativeBodyRef(Guid moduleVersionId, int methodMetadataToken)
+    {
+        if (moduleVersionId == Guid.Empty)
+            return NativeBodyResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
+        if (!_modules.TryGetValue(moduleVersionId, out var module))
+            return NativeBodyResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound, $"Module {moduleVersionId:D} is not loaded."));
+
+        const int MethodDefTable = 0x06;
+        int tableId = (int)((uint)methodMetadataToken >> 24);
+        int rid = methodMetadataToken & 0x00FFFFFF;
+        if (tableId != MethodDefTable || rid <= 0)
+            return NativeBodyResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
+                $"metadataToken 0x{methodMetadataToken:X8} is not a MethodDef token."));
+
+        R2R.R2RReader? r2r = _r2rCache.GetOrAdd(module.Mvid, _ =>
+        {
+            try
+            {
+                return R2R.R2RReader.TryCreate(module.PE, out var built) ? built : null;
+            }
+            catch (BadImageFormatException)
+            {
+                return null;
+            }
+        });
+
+        if (r2r is null)
+            return NativeBodyResult.NotFound();
+
+        NativeArchitecture arch = r2r.Machine switch
+        {
+            Machine.Amd64 => NativeArchitecture.X64,
+            Machine.Arm64 => NativeArchitecture.Arm64,
+            Machine.I386 => NativeArchitecture.X86,
+            _ => NativeArchitecture.Unknown,
+        };
+
+        // V1 ships X64 only — native-mcp's Iced decoder is x86/x64 today.
+        if (arch != NativeArchitecture.X64)
+            return NativeBodyResult.NotFound();
+
+        if (!r2r.TryGetHotRegion(rid, out var hot) || hot is null)
+            return NativeBodyResult.NotFound();
+
+        return NativeBodyResult.Ok(new NativeBodyRef(
+            Source: NativeBodySource.R2R,
+            PePath: module.Path,
+            Architecture: arch,
+            HotRegion: hot));
+    }
+
     private static MethodIdentity BuildMethodIdentity(Module module, MethodDefinitionHandle h) =>
         new(module.Mvid, MetadataTokens.GetToken(h));
 
@@ -2450,6 +2503,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         _stringIndexCache.TryRemove(mvid, out _);
         _attributeIndexCache.TryRemove(mvid, out _);
         _fieldAccessCache.TryRemove(mvid, out _);
+        _r2rCache.TryRemove(mvid, out _);
         try
         {
             var path = XrefCachePath(mvid);

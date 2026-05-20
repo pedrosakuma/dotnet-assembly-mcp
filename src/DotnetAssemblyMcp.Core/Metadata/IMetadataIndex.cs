@@ -256,6 +256,20 @@ public interface IMetadataIndex
         EventAccessorFilter accessor = EventAccessorFilter.All,
         int maxHits = 0,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Looks up the R2R-precompiled native body for a method in its own managed PE. Returns
+    /// <see cref="NativeBodyResult.NotFound"/> when the module has no <c>ManagedNativeHeader</c>
+    /// (most user assemblies) or the requested method has no entrypoint in the R2R
+    /// <c>METHODDEF_ENTRYPOINTS</c> table (e.g. generic methods that were not pre-instantiated).
+    /// </summary>
+    /// <remarks>
+    /// Pure metadata: this method reads the R2R header + tables and returns RVA / size pointers
+    /// into the PE. It never decodes instructions — disassembly is delegated to
+    /// <c>dotnet-native-mcp.disassemble</c> via the handoff documented in
+    /// <c>docs/handoff-contract.md</c>.
+    /// </remarks>
+    NativeBodyResult GetNativeBodyRef(Guid moduleVersionId, int methodMetadataToken);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

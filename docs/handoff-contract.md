@@ -266,6 +266,59 @@ Tools that accept the §3.5 parameters: `get_method`, `find_callers`, and `list_
 - **Variance / constraints** — irrelevant for resolution; consumer doesn't validate.
 - **Inferring instantiations from `displayName`** — the consumer does NOT parse `List<Int32>` out of a display string. Without `genericTypeArguments` or `methodSpec`, the consumer resolves the **open** def as today.
 
+### 3.6 Native body handoff — `includeNativeBody` and `NativeBodyRef`
+
+Many shared-framework assemblies (and any user assembly built with `<PublishReadyToRun>true`) embed a **precompiled native body** for a subset of their methods. That body lives inside the same managed PE — pointed at by a `ManagedNativeHeader` directory — and is a peer to (not a replacement for) the IL body. Two MCP servers care about it:
+
+- **asm-mcp** owns the metadata lookup: parsing the R2R header, walking `METHODDEF_ENTRYPOINTS`, and resolving a `MethodDef` token to a `(RVA, size)` slice of the PE file. **No disassembly happens here** — Iced and any instruction-level analysis live in `dotnet-native-mcp`.
+- **dotnet-native-mcp** owns the actual decode: given `(imagePath, rva, size)` it produces instructions, cross-refs, source mappings, etc.
+
+The handoff is a single optional flag on the existing `get_method` tool — no new tool, no new resource:
+
+```jsonc
+// Request
+{
+  "moduleVersionId": "e8c78f6b-682f-46b5-9b01-b6df65585a7b",
+  "metadataToken":   "0x060008E2",
+  "includeNativeBody": true            // <— new in v0.13.0
+}
+
+// Response.Data (MethodSummary) — NativeBody is null when omitted, absent, or arch unsupported
+{
+  "moduleVersionId": "…",
+  "metadataToken":   100665570,
+  "typeFullName":    "System.String",
+  "methodName":      "get_Length",
+  "signature":       "int get_Length()",
+  "ilSize":          14,
+  "attributes":      "Public, HideBySig, SpecialName, …",
+  "nativeBody": {
+    "source":       "R2R",
+    "pePath":       "/.../System.Private.CoreLib.dll",
+    "architecture": "X64",
+    "hotRegion":  { "rva": 1404576, "size": 12 },
+    "coldRegion": null,                 // hot/cold split — reserved, not yet emitted
+    "ilMap":      null                  // R2R DebugInfo decode — reserved, not yet emitted
+  }
+}
+```
+
+When `nativeBody` is populated, asm-mcp also appends a `NextActionHint` to the response envelope pointing at `dotnet-native-mcp.disassemble` with the three primitives pre-filled:
+
+```jsonc
+{ "nextTool": "dotnet-native-mcp.disassemble",
+  "suggestedArguments": { "imagePath": "/.../System.Private.CoreLib.dll", "rva": 1404576, "size": 12, "architecture": "X64" } }
+```
+
+When the flag is set but no precompiled body exists (JIT-only module, generic-open method, or an unsupported architecture — V1 ships X64 only) the response stays valid (`nativeBody: null`) and a fallback hint suggests `dotnet-diagnostics-mcp.capture_method_disasm` for live process attach.
+
+**Out of scope for asm-mcp (V1):**
+
+- **NativeAOT bodies.** Those binaries don't carry ECMA-335 metadata at all; routing them through a managed-metadata server is the wrong handoff key. Use `dotnet-native-mcp.load_native_binary` + `list_native_symbols` instead.
+- **R2R hot/cold split.** Reserved as `coldRegion` for a future iteration.
+- **R2R `DebugInfo` section** (native↔IL line maps). Reserved as `ilMap`.
+- **Arm64 / Arm32.** Returned as `notFound` until `dotnet-native-mcp` ships a non-x86 Iced decoder.
+
 ---
 
 ## 4. Error shape
