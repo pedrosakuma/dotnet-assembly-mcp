@@ -49,10 +49,21 @@ docker run --rm -p 8788:8080 \
 
 Or build locally: `docker build -t dotnet-assembly-mcp:dev -f deploy/Dockerfile .`.
 
-### Joint with `dotnet-diagnostics-mcp` (recommended)
+### Joint with `dotnet-diagnostics-mcp` (recommended, optional)
 
-The diagnostics server emits `MethodIdentity` / `TypeIdentity` handles that only
-become actionable when this server is on the same MCP client. Run both together:
+The diagnostics server emits `MethodIdentity` / `TypeIdentity` handles. As of
+[`dotnet-diagnostics-mcp` #28](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/28),
+the diagnostics server already resolves PDBs locally and stamps `SourceLocation` directly
+onto every CPU-sample hotspot identity — so for dev workflows where the source tree is open
+in your editor, the diagnostics server is sufficient on its own.
+
+Pairing **this** server with diagnostics is recommended when you also want:
+
+- Stripped binaries / NativeAOT (no PDB, no inline source).
+- Third-party assemblies you don't have source for.
+- Decompilation (`decompile_method`), reverse cross-reference (`find_callers`, `find_type_references`, …).
+
+Run both together:
 
 ```bash
 export ASSEMBLIES_DIR=/abs/path/to/your/published/binaries
