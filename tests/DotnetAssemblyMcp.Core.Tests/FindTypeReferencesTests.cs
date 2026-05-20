@@ -139,4 +139,122 @@ public sealed class FindTypeReferencesTests
             second.Result!.FromCache.Should().BeTrue();
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Type-hierarchy sites (issue #69): BaseType + InterfaceImplementation should
+    // surface as references, including TypeSpec closures of a generic target.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Finds_intra_module_BaseType_via_TypeSpec_closure()
+    {
+        // SampleLib.IntRepository : Repository<int> — same-module TypeSpec→TypeDef edge.
+        var (index, mvid) = Load();
+        using (index)
+        {
+            var repositoryOpenToken = typeof(SampleLib.Repository<>).MetadataToken;
+            var result = index.FindTypeReferences(mvid, repositoryOpenToken);
+
+            result.IsSuccess.Should().BeTrue();
+            var intRepoToken = typeof(SampleLib.IntRepository).MetadataToken;
+            result.Result!.References.Should().Contain(r =>
+                r.SiteKind == MemberKind.Type
+                && r.ReferenceKind == TypeReferenceKind.BaseType
+                && r.MetadataToken == intRepoToken);
+        }
+    }
+
+    [Fact]
+    public void Finds_cross_module_BaseType_via_TypeSpec_TypeRef_path()
+    {
+        // SampleConsumer.UserRepo : Repository<string> — cross-module TypeSpec→TypeRef edge.
+        var index = new MetadataIndex();
+        index.Load(SampleLibPath);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+        using (index)
+        {
+            var libMvid = typeof(SampleLib.OrderService).Assembly.ManifestModule.ModuleVersionId;
+            var consumerMvid = typeof(SampleConsumer.ConsumerService).Assembly.ManifestModule.ModuleVersionId;
+            var repositoryOpenToken = typeof(SampleLib.Repository<>).MetadataToken;
+            var result = index.FindTypeReferences(libMvid, repositoryOpenToken);
+
+            result.IsSuccess.Should().BeTrue();
+            var userRepoToken = typeof(SampleConsumer.UserRepo).MetadataToken;
+            result.Result!.References.Should().Contain(r =>
+                r.ModuleVersionId == consumerMvid
+                && r.SiteKind == MemberKind.Type
+                && r.ReferenceKind == TypeReferenceKind.BaseType
+                && r.MetadataToken == userRepoToken);
+        }
+    }
+
+    [Fact]
+    public void Finds_cross_module_InterfaceImplementation_via_TypeSpec()
+    {
+        // SampleConsumer.OrderHandler : IRequestHandler<int,string> — InterfaceImpl edge whose
+        // target is a TypeSpec wrapping a TypeRef to the open generic interface in SampleLib.
+        var index = new MetadataIndex();
+        index.Load(SampleLibPath);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+        using (index)
+        {
+            var libMvid = typeof(SampleLib.OrderService).Assembly.ManifestModule.ModuleVersionId;
+            var consumerMvid = typeof(SampleConsumer.ConsumerService).Assembly.ManifestModule.ModuleVersionId;
+            var ifaceOpenToken = typeof(SampleLib.IRequestHandler<,>).MetadataToken;
+            var result = index.FindTypeReferences(libMvid, ifaceOpenToken);
+
+            result.IsSuccess.Should().BeTrue();
+            var orderHandlerToken = typeof(SampleConsumer.OrderHandler).MetadataToken;
+            var userHandlerToken = typeof(SampleConsumer.UserHandler).MetadataToken;
+            result.Result!.References.Should().Contain(r =>
+                r.ModuleVersionId == consumerMvid
+                && r.SiteKind == MemberKind.Type
+                && r.ReferenceKind == TypeReferenceKind.InterfaceImplementation
+                && r.MetadataToken == orderHandlerToken);
+            result.Result!.References.Should().Contain(r =>
+                r.ModuleVersionId == consumerMvid
+                && r.SiteKind == MemberKind.Type
+                && r.ReferenceKind == TypeReferenceKind.InterfaceImplementation
+                && r.MetadataToken == userHandlerToken);
+        }
+    }
+
+    [Fact]
+    public void Finds_intra_module_BaseType_for_non_generic_target()
+    {
+        // SampleConsumer.Cub : Wolf (non-generic, same module) — confirms the BaseType walk
+        // works for plain TypeDef edges, not just TypeSpec closures.
+        var index = new MetadataIndex();
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+        using (index)
+        {
+            var consumerMvid = typeof(SampleConsumer.ConsumerService).Assembly.ManifestModule.ModuleVersionId;
+            var wolfToken = typeof(SampleConsumer.Wolf).MetadataToken;
+            var result = index.FindTypeReferences(consumerMvid, wolfToken);
+
+            result.IsSuccess.Should().BeTrue();
+            var cubToken = typeof(SampleConsumer.Cub).MetadataToken;
+            result.Result!.References.Should().Contain(r =>
+                r.SiteKind == MemberKind.Type
+                && r.ReferenceKind == TypeReferenceKind.BaseType
+                && r.MetadataToken == cubToken);
+        }
+    }
+
+    [Fact]
+    public void Type_site_render_carries_type_handle_prefix()
+    {
+        var (index, mvid) = Load();
+        using (index)
+        {
+            var repositoryOpenToken = typeof(SampleLib.Repository<>).MetadataToken;
+            var result = index.FindTypeReferences(mvid, repositoryOpenToken);
+            result.IsSuccess.Should().BeTrue();
+
+            var typeSite = result.Result!.References.FirstOrDefault(r => r.SiteKind == MemberKind.Type);
+            typeSite.Should().NotBeNull();
+            typeSite!.Handle.Should().StartWith("t:");
+            typeSite.Display.Should().Contain("Repository"); // either IntRepository's TypeName render
+        }
+    }
 }

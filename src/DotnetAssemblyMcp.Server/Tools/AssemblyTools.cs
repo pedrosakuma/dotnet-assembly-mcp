@@ -1148,12 +1148,15 @@ public sealed class AssemblyTools
         UseStructuredContent = true)]
     [Description(
         "Returns every site that references the requested TypeDef: field/property/event " +
-        "types, method parameters / return types / locals, and IL opcodes that bake in a " +
-        "type token (newobj, castclass, isinst, box, unbox, ldtoken, generic args, ...). " +
-        "Same-module hits come from TypeDef tokens; cross-module hits come from TypeRef " +
-        "matching (assembly simple name + type full name). Uses the same lazily-built per-" +
-        "module xref cache as find_callers; the cache file format version was bumped so the " +
-        "first call after upgrade rebuilds.")]
+        "types, method parameters / return types / locals, IL opcodes that bake in a type " +
+        "token (newobj, castclass, isinst, box, unbox, ldtoken, generic args, ...), and " +
+        "type-hierarchy edges (BaseType + InterfaceImplementation per TypeDef, including " +
+        "TypeSpec closures of the target — e.g. 'class C : IRequestHandler<int,string>' " +
+        "registers as an InterfaceImplementation site of IRequestHandler`2). Same-module " +
+        "hits come from TypeDef tokens; cross-module hits come from TypeRef matching " +
+        "(assembly simple name + type full name). Uses the same lazily-built per-module " +
+        "xref cache as find_callers; the cache file format version was bumped so the first " +
+        "call after upgrade rebuilds.")]
     public static AssemblyResult<FindTypeReferencesResult> FindTypeReferences(
         IMetadataIndex index,
         [Description("Type handle 't:<mvid>:0x<typeToken>' as returned by list_types or get_type.")] string? typeHandle = null,
