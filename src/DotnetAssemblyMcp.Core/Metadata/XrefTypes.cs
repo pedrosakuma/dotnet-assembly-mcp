@@ -379,3 +379,31 @@ internal readonly record struct FieldKey(string AssemblyName, string TypeFullNam
 internal sealed record FieldAccessIndexData(
     Dictionary<int, List<(int CallerToken, int IlOffset, FieldAccessKind Kind)>> Intra,
     List<FieldOutboundRef> Outbound);
+
+/// <summary>Discriminator returned by the collapsed <c>find_member_references</c> tool.</summary>
+public enum MemberHandleKind
+{
+    /// <summary>The handle was an <c>f:</c> field handle; <see cref="FindMemberReferencesResult.Field"/> is populated.</summary>
+    Field,
+    /// <summary>The handle was a <c>p:</c> property handle; <see cref="FindMemberReferencesResult.Property"/> is populated.</summary>
+    Property,
+    /// <summary>The handle was an <c>e:</c> event handle; <see cref="FindMemberReferencesResult.Event"/> is populated.</summary>
+    Event,
+}
+
+/// <summary>
+/// Single-envelope return shape for the collapsed <c>find_member_references</c> tool.
+/// Exactly one of <see cref="Field"/>, <see cref="Property"/>, <see cref="Event"/> is
+/// populated, selected by <see cref="Kind"/> which echoes the parsed handle prefix.
+/// </summary>
+/// <remarks>
+/// Every nullable positional parameter declares a default value so the MCP SDK schema
+/// generator marks the unused payload fields optional — strict clients otherwise reject
+/// the response when System.Text.Json drops the omitted nulls. See
+/// <c>ToolReturnTypeSchemaContractTests</c>.
+/// </remarks>
+public sealed record FindMemberReferencesResult(
+    MemberHandleKind Kind,
+    FindFieldReferencesResult? Field = null,
+    FindPropertyReferencesResult? Property = null,
+    FindEventReferencesResult? Event = null);

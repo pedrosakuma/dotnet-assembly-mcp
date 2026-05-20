@@ -1,3 +1,5 @@
+using DotnetAssemblyMcp.Core.Errors;
+
 namespace DotnetAssemblyMcp.Core;
 
 /// <summary>
@@ -51,3 +53,64 @@ public sealed record AssemblyError(
     string Kind,
     string Message,
     string? Detail = null);
+
+/// <summary>
+/// Maps an <see cref="AssemblyError"/> to a recommended <see cref="NextActionHint"/>. Keeps
+/// the mapping co-located with the envelope contract: tools (and any other consumer of
+/// <c>AssemblyError</c>) get a uniform recovery suggestion without duplicating the switch.
+/// Add a new arm whenever <see cref="ErrorKinds"/> grows a new constant — the default arm
+/// keeps responses safe but uninformative.
+/// </summary>
+public static class AssemblyErrorRecovery
+{
+    /// <summary>Returns the canonical recovery hint for <paramref name="error"/>.</summary>
+    public static NextActionHint For(AssemblyError error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        return error.Kind switch
+        {
+            ErrorKinds.ModuleNotFound => new NextActionHint(
+                "load_assembly",
+                "Load the assembly whose MVID matches the request, then retry."),
+            ErrorKinds.ModuleLoadFailed => new NextActionHint(
+                "list_assemblies",
+                "Verify the path / file is a valid managed PE and confirm what is already loaded."),
+            ErrorKinds.MvidMismatch => new NextActionHint(
+                "list_assemblies",
+                "Inspect loaded MVIDs and reload the build that matches the diagnostic payload."),
+            ErrorKinds.TokenWrongTable => new NextActionHint(
+                "find_method",
+                "The token does not point at a MethodDef. Search by name to locate the right token."),
+            ErrorKinds.TokenOutOfRange => new NextActionHint(
+                "find_method",
+                "The MethodDef row id exceeds the table. Re-discover the token via find_method or list_methods."),
+            ErrorKinds.TokenTrimmed => new NextActionHint(
+                "get_method",
+                "The method has no IL body (trimmed / NativeAOT). Use get_method for the signature-only view."),
+            ErrorKinds.IdentityMalformed => new NextActionHint(
+                "get_method",
+                "Re-issue the call with both moduleVersionId (GUID) and metadataToken populated."),
+            ErrorKinds.PathNotAllowed => new NextActionHint(
+                "list_assemblies",
+                "The path is outside the configured search roots. Inspect loaded modules and use their MVID instead."),
+            ErrorKinds.InvalidArgument => new NextActionHint(
+                "list_assemblies",
+                "Validate the argument shape against the tool description and retry."),
+            ErrorKinds.GenericInstantiationUnresolvable => new NextActionHint(
+                "import_assembly_manifest",
+                "A type-argument name did not resolve in any loaded module. Import the manifest for the dependency or supply assemblyPathHint, then retry."),
+            ErrorKinds.GenericInstantiationAmbiguous => new NextActionHint(
+                "list_assemblies",
+                "A type-argument name resolved in 2+ modules with conflicting MVIDs. Inspect loaded modules and narrow the manifest, or qualify on the producer side."),
+            ErrorKinds.GenericInstantiationOpen => new NextActionHint(
+                "get_method",
+                "Wire instantiations must be closed. Re-emit on the producer side with concrete type arguments instead of open type parameters."),
+            ErrorKinds.GenericInstantiationMismatch => new NextActionHint(
+                "get_method",
+                "methodSpec and genericTypeArguments decode to different instantiations. Re-issue the call with only one of them, or fix the producer to keep them consistent."),
+            _ => new NextActionHint(
+                "list_assemblies",
+                "Inspect loaded modules and retry the call."),
+        };
+    }
+}

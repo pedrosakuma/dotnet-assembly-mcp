@@ -1,4 +1,40 @@
+using DotnetAssemblyMcp.Core.Decompilation;
+
 namespace DotnetAssemblyMcp.Core.Metadata;
+
+/// <summary>
+/// Discriminator for the collapsed <c>get_method_il</c> tool: selects which view of a
+/// method's IL is returned. <see cref="Raw"/> emits hex bytes + body metadata,
+/// <see cref="Text"/> emits an ildasm-style textual dump, <see cref="Scan"/> emits the
+/// structural outbound references (calls / fields / types / strings).
+/// </summary>
+public enum MethodIlFormat
+{
+    /// <summary>Raw IL bytes (hex) plus max-stack / EH-region / instruction count.</summary>
+    Raw,
+    /// <summary>ildasm-style textual disassembly (capped, LRU-cached).</summary>
+    Text,
+    /// <summary>Structural outbound references parsed from the IL.</summary>
+    Scan,
+}
+
+/// <summary>
+/// Single-envelope return shape for the collapsed <c>get_method_il(format=...)</c> tool.
+/// Exactly one of <see cref="Raw"/>, <see cref="Text"/>, <see cref="Scan"/> is populated;
+/// the others are <c>null</c>. <see cref="Format"/> echoes the requested discriminator so
+/// MCP clients can dispatch without inspecting the payload fields.
+/// </summary>
+/// <remarks>
+/// Every nullable positional parameter declares a default value. The
+/// <c>ToolReturnTypeSchemaContractTests</c> contract walks reachable return types and
+/// rejects any nullable record positional that does not — strict MCP clients otherwise
+/// drop omitted fields and reject the response.
+/// </remarks>
+public sealed record MethodIlResult(
+    MethodIlFormat Format,
+    IlMethodBody? Raw = null,
+    MethodIlText? Text = null,
+    IlScanResult? Scan = null);
 
 /// <summary>
 /// Tier-2 payload for <c>get_method_il</c>: the raw IL bytes of a method (hex-encoded,

@@ -86,13 +86,15 @@ public sealed class AssemblyToolsIntegrationTests : IDisposable
         get.Data.TypeFullName.Should().Be("SampleLib.OrderService");
         get.Hints.Should().NotBeNullOrEmpty("get_method always points to follow-up tools");
 
-        // 3. get_method_il_text
-        var il = AssemblyTools.GetMethodIlText(_disassembler, _index, mvid, tokenHex);
+        // 3. get_method_il(format='text')
+        var il = AssemblyTools.GetMethodIl(_disassembler, _index, mvid, tokenHex, format: "text");
         il.IsError.Should().BeFalse();
         il.Data.Should().NotBeNull();
-        il.Data!.MethodName.Should().Be("Process");
-        il.Data.LineCount.Should().BeGreaterThan(0);
-        il.Data.InstructionCount.Should().BeGreaterThan(0);
+        il.Data!.Format.Should().Be(MethodIlFormat.Text);
+        il.Data.Text.Should().NotBeNull();
+        il.Data.Text!.MethodName.Should().Be("Process");
+        il.Data.Text.LineCount.Should().BeGreaterThan(0);
+        il.Data.Text.InstructionCount.Should().BeGreaterThan(0);
         il.Summary.Should().Contain("IL instruction");
     }
 
