@@ -206,4 +206,121 @@ public sealed class TypeHierarchyTests
         transNames.Should().Contain("SampleConsumer.Wolf");
         transNames.Should().Contain("SampleConsumer.Cub");
     }
+
+    // ---------------------------------------------------------------------
+    // Issue #67: TypeSpec parents (generic-instantiation inheritance).
+    // ---------------------------------------------------------------------
+
+    [Fact]
+    public void ListDerivedTypes_open_match_finds_generic_interface_implementers_cross_module()
+    {
+        using var index = new MetadataIndex();
+        var mvid = LoadSampleLib(index);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+
+        var iface = FindTypeToken(index, mvid, "SampleLib.IRequestHandler`2");
+        var page = index.ListDerivedTypes(mvid, iface, new ListDerivedTypesQuery(DirectOnly: true, PageSize: 100)).Page!;
+
+        var names = page.Types.Select(t => t.FullName).ToHashSet();
+        names.Should().Contain("SampleConsumer.OrderHandler");
+        names.Should().Contain("SampleConsumer.UserHandler");
+    }
+
+    [Fact]
+    public void ListDerivedTypes_open_match_stamps_decoded_instantiation_on_hits()
+    {
+        using var index = new MetadataIndex();
+        var mvid = LoadSampleLib(index);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+
+        var iface = FindTypeToken(index, mvid, "SampleLib.IRequestHandler`2");
+        var page = index.ListDerivedTypes(mvid, iface, new ListDerivedTypesQuery(DirectOnly: true, PageSize: 100)).Page!;
+
+        var order = page.Types.Single(t => t.FullName == "SampleConsumer.OrderHandler");
+        order.Instantiation.Should().NotBeNull();
+        order.Instantiation!.Should().Equal("System.Int32", "System.String");
+
+        var user = page.Types.Single(t => t.FullName == "SampleConsumer.UserHandler");
+        user.Instantiation.Should().NotBeNull();
+        user.Instantiation!.Should().Equal("System.String", "System.Int32");
+    }
+
+    private static readonly string[] OrderHandlerOnly = ["SampleConsumer.OrderHandler"];
+    private static readonly string[] IntRepositoryOnly = ["SampleLib.IntRepository"];
+    private static readonly string[] UserRepoOnly = ["SampleConsumer.UserRepo"];
+
+    [Fact]
+    public void ListDerivedTypes_closed_match_filters_by_instantiation()
+    {
+        using var index = new MetadataIndex();
+        var mvid = LoadSampleLib(index);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+
+        var iface = FindTypeToken(index, mvid, "SampleLib.IRequestHandler`2");
+        var closed = new[]
+        {
+            ParseArg("System.Int32"),
+            ParseArg("System.String"),
+        };
+        var page = index.ListDerivedTypes(mvid, iface,
+            new ListDerivedTypesQuery(DirectOnly: true, PageSize: 100, MatchInstantiation: closed)).Page!;
+
+        var names = page.Types.Select(t => t.FullName).ToHashSet();
+        names.Should().BeEquivalentTo(OrderHandlerOnly);
+        page.Types.Single().Instantiation!.Should().Equal("System.Int32", "System.String");
+    }
+
+    [Fact]
+    public void ListDerivedTypes_closed_match_on_generic_base_class_same_and_cross_module()
+    {
+        using var index = new MetadataIndex();
+        var mvid = LoadSampleLib(index);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+
+        var baseToken = FindTypeToken(index, mvid, "SampleLib.Repository`1");
+
+        // Open match → both IntRepository (same-module TypeSpec→TypeDef) and UserRepo (cross-module TypeSpec→TypeRef).
+        var open = index.ListDerivedTypes(mvid, baseToken,
+            new ListDerivedTypesQuery(DirectOnly: true, PageSize: 100)).Page!;
+        var openNames = open.Types.Select(t => t.FullName).ToHashSet();
+        openNames.Should().Contain("SampleLib.IntRepository");
+        openNames.Should().Contain("SampleConsumer.UserRepo");
+
+        // Closed match Repository<int> → only IntRepository.
+        var intOnly = index.ListDerivedTypes(mvid, baseToken,
+            new ListDerivedTypesQuery(DirectOnly: true, PageSize: 100,
+                MatchInstantiation: new[] { ParseArg("System.Int32") })).Page!;
+        intOnly.Types.Select(t => t.FullName).Should()
+            .BeEquivalentTo(IntRepositoryOnly);
+
+        // Closed match Repository<string> → only UserRepo.
+        var stringOnly = index.ListDerivedTypes(mvid, baseToken,
+            new ListDerivedTypesQuery(DirectOnly: true, PageSize: 100,
+                MatchInstantiation: new[] { ParseArg("System.String") })).Page!;
+        stringOnly.Types.Select(t => t.FullName).Should()
+            .BeEquivalentTo(UserRepoOnly);
+    }
+
+    [Fact]
+    public void ListDerivedTypes_closed_match_excludes_non_spec_parents()
+    {
+        // IAnimal is implemented by AnimalBase/Hamster via plain TypeRef (no TypeSpec).
+        // A non-empty matchInstantiation filter must reject every such edge.
+        using var index = new MetadataIndex();
+        var mvid = LoadSampleLib(index);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+
+        var iface = FindTypeToken(index, mvid, "SampleLib.IAnimal");
+        var page = index.ListDerivedTypes(mvid, iface,
+            new ListDerivedTypesQuery(DirectOnly: true, PageSize: 100,
+                MatchInstantiation: new[] { ParseArg("System.Int32") })).Page!;
+        page.Types.Should().BeEmpty();
+    }
+
+    private static GenericTypeName ParseArg(string raw)
+    {
+        GenericTypeName.TryParse(raw, out var node, out var kind, out var msg).Should().BeTrue(
+            $"parse '{raw}' should succeed (kind={kind}, msg={msg})");
+        return node!;
+    }
 }
