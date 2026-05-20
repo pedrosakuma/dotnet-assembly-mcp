@@ -91,6 +91,8 @@ public enum TypeReferenceKind
     MethodReturn,
     MethodLocal,
     IlOpcode,
+    BaseType,
+    InterfaceImplementation,
 }
 
 /// <summary>

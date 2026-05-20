@@ -2164,6 +2164,18 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 display = RenderEventDef(module, (EventDefinitionHandle)MetadataTokens.Handle(site.SiteToken));
                 break;
             }
+            case MemberKind.Type:
+            {
+                handle = HandleFormat.FormatType(module.Mvid, site.SiteToken);
+                try
+                {
+                    var tdh = (TypeDefinitionHandle)MetadataTokens.Handle(site.SiteToken);
+                    var td = module.MD.GetTypeDefinition(tdh);
+                    display = TypeName(module, td);
+                }
+                catch (BadImageFormatException) { display = $"<type 0x{site.SiteToken:X8}>"; }
+                break;
+            }
             default:
                 handle = $"?:{module.Mvid:D}:0x{site.SiteToken:X8}";
                 display = $"<unknown site kind {site.SiteKind}>";
@@ -2769,6 +2781,33 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             catch (BadImageFormatException) { /* skip */ }
         }
 
+        // 5) Type hierarchy: BaseType + InterfaceImplementation per TypeDef. These edges live
+        // on the TypeDef itself (no enclosing method/field/etc.) so the site is the TypeDef
+        // token. Targets may be TypeDef, TypeRef, or TypeSpec — the helper handles all three.
+        foreach (var tdh in module.MD.TypeDefinitions)
+        {
+            try
+            {
+                var td = module.MD.GetTypeDefinition(tdh);
+                var siteToken = MetadataTokens.GetToken(tdh);
+
+                if (!td.BaseType.IsNil)
+                {
+                    ClassifyTypeReferenceHandle(module, td.BaseType, siteToken, MemberKind.Type,
+                        TypeReferenceKind.BaseType, data, perSiteSeen: null, typeOutboundSeen);
+                }
+
+                foreach (var iih in td.GetInterfaceImplementations())
+                {
+                    var ii = module.MD.GetInterfaceImplementation(iih);
+                    if (ii.Interface.IsNil) continue;
+                    ClassifyTypeReferenceHandle(module, ii.Interface, siteToken, MemberKind.Type,
+                        TypeReferenceKind.InterfaceImplementation, data, perSiteSeen: null, typeOutboundSeen);
+                }
+            }
+            catch (BadImageFormatException) { /* skip */ }
+        }
+
         return data;
     }
 
@@ -2826,9 +2865,25 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             }
             case HandleKind.TypeSpecification:
             {
-                // The TypeTokenCollectorProvider already recursed into the spec via
-                // GetTypeFromSpecification, so the generic args (and outer type) are surfaced
-                // separately. Nothing extra to do here.
+                // For sites that route raw entity handles (BaseType, InterfaceImplementation,
+                // Event.Type), a TypeSpec wraps a generic instantiation. Decode it through a
+                // collector and recursively classify each leaf (typically the open generic
+                // TypeDef/TypeRef + the closed args). The IL path and signature-decoded paths
+                // already feed the collector themselves before calling us, so by the time we
+                // see a TypeSpec here we are the only decoder.
+                try
+                {
+                    var spec = module.MD.GetTypeSpecification((TypeSpecificationHandle)handle);
+                    var collector = new TypeTokenCollectorProvider(module.MD);
+                    spec.DecodeSignature(collector, genericContext: null);
+                    foreach (var leaf in collector.Drain())
+                    {
+                        if (leaf.Kind == HandleKind.TypeSpecification) continue; // guard against accidental recursion
+                        ClassifyTypeReferenceHandle(module, leaf, siteToken, siteKind, refKind,
+                            data, perSiteSeen, outboundSeen);
+                    }
+                }
+                catch (BadImageFormatException) { /* skip malformed spec */ }
                 break;
             }
         }
@@ -3294,7 +3349,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private const uint XrefMagic = 0x52584D41; // 'AMXR'
-    private const int XrefFormatVersion = 4; // v4 adds type-reference intra + outbound tables.
+    private const int XrefFormatVersion = 5; // v5 adds BaseType + InterfaceImplementation type-ref sites.
 
     private const int MaxIntraCount = 10_000_000;
     private const int MaxOutboundCount = 10_000_000;

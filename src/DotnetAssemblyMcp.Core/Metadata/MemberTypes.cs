@@ -14,6 +14,7 @@ public enum MemberKind
     Property,
     Event,
     Method,
+    Type,
 }
 
 /// <summary>
