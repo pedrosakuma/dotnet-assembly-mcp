@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using DotnetAssemblyMcp.Core.Handles;
@@ -212,4 +213,59 @@ internal static class MetadataDisplay
 
     public static MethodIdentity BuildMethodIdentity(ModuleHandle module, MethodDefinitionHandle h) =>
         new(module.Mvid, MetadataTokens.GetToken(h));
+
+    public static MethodSummary SummarizeMethod(ModuleHandle m, MethodDefinitionHandle h, int token)
+    {
+        var def = m.MD.GetMethodDefinition(h);
+        var typeDef = m.MD.GetTypeDefinition(def.GetDeclaringType());
+        var fullType = TypeName(m, typeDef);
+        var methodName = m.MD.GetString(def.Name);
+
+        var sig = def.DecodeSignature(new StringSignatureProvider(m.MD), genericContext: null);
+        var paramList = string.Join(", ", sig.ParameterTypes);
+        var signature = $"{sig.ReturnType} {fullType}.{methodName}({paramList})";
+
+        int ilSize = 0;
+        if (def.RelativeVirtualAddress != 0)
+        {
+            try
+            {
+                var body = m.PE.GetMethodBody(def.RelativeVirtualAddress);
+                ilSize = body.GetILBytes()?.Length ?? 0;
+            }
+            catch (BadImageFormatException)
+            {
+                ilSize = 0;
+            }
+        }
+
+        var attrs = FormatAttributes(def.Attributes);
+        var handle = HandleSyntax.FormatMethod(m.Mvid, token);
+
+        return new MethodSummary(
+            m.Mvid, token, handle, fullType, methodName, signature,
+            ilSize, def.GetGenericParameters().Count, attrs);
+    }
+
+    public static List<string> FormatAttributes(MethodAttributes a)
+    {
+        var list = new List<string>(6);
+        switch (a & MethodAttributes.MemberAccessMask)
+        {
+            case MethodAttributes.Public: list.Add("public"); break;
+            case MethodAttributes.Family: list.Add("protected"); break;
+            case MethodAttributes.Assembly: list.Add("internal"); break;
+            case MethodAttributes.FamORAssem: list.Add("protected internal"); break;
+            case MethodAttributes.Private: list.Add("private"); break;
+            case MethodAttributes.PrivateScope: list.Add("compiler-generated"); break;
+            case MethodAttributes.FamANDAssem: list.Add("private protected"); break;
+        }
+        if ((a & MethodAttributes.Static) != 0) list.Add("static");
+        if ((a & MethodAttributes.Abstract) != 0) list.Add("abstract");
+        if ((a & MethodAttributes.Virtual) != 0) list.Add("virtual");
+        if ((a & MethodAttributes.Final) != 0) list.Add("sealed");
+        if ((a & MethodAttributes.SpecialName) != 0) list.Add("specialname");
+        if ((a & MethodAttributes.PinvokeImpl) != 0) list.Add("pinvoke");
+        return list;
+    }
 }
