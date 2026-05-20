@@ -53,12 +53,24 @@ public sealed record NativeBodyRef(
 
 /// <summary>
 /// Single mapping entry from R2R DebugInfo: a native-code offset (inside the hot region)
-/// paired with the IL offset it originated from. Populated only when the R2R DebugInfo
-/// section is present and decoded.
+/// paired with the IL offset it originated from and optional source-type flags. Populated
+/// only when the R2R DebugInfo section (type 105) is present and decoded.
 /// </summary>
+/// <param name="NativeOffset">Byte offset inside <see cref="NativeBodyRef.HotRegion"/>.</param>
+/// <param name="IlOffset">
+/// Non-negative real IL offset, or one of the CoreCLR sentinels:
+/// <c>-1 = NoMapping</c>, <c>-2 = Prolog</c>, <c>-3 = Epilog</c>.
+/// Mirrors <c>DebugInfoBoundsType</c> in <c>cordebuginfo.h</c>.
+/// </param>
+/// <param name="SourceTypes">
+/// Pipe-joined flag set, e.g. <c>"StackEmpty|CallInstruction"</c>. <c>null</c> when no flag
+/// is set. Possible values: <c>SequencePoint</c>, <c>StackEmpty</c>, <c>CallSite</c>,
+/// <c>NativeEndOffsetUnknown</c>, <c>CallInstruction</c>, <c>Async</c>.
+/// </param>
 public sealed record NativeIlMapEntry(
     int NativeOffset,
-    int IlOffset);
+    int IlOffset,
+    string? SourceTypes = null);
 
 /// <summary>Result of <see cref="IMetadataIndex.GetNativeBodyRef"/>.</summary>
 public readonly record struct NativeBodyResult(NativeBodyRef? Body, AssemblyError? Error)

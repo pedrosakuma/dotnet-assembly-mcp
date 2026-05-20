@@ -298,10 +298,23 @@ The handoff is a single optional flag on the existing `get_method` tool — no n
     "architecture": "X64",
     "hotRegion":  { "rva": 1404576, "size": 12 },
     "coldRegion": null,                 // hot/cold split — reserved, not yet emitted
-    "ilMap":      null                  // R2R DebugInfo decode — reserved, not yet emitted
+    "ilMap": [                          // R2R DebugInfo (section 105), since v0.14.0
+      { "nativeOffset": 0,  "ilOffset": -2, "sourceTypes": "StackEmpty" },  // -2 = Prolog
+      { "nativeOffset": 0,  "ilOffset":  0, "sourceTypes": "StackEmpty" },  // body
+      { "nativeOffset": 3,  "ilOffset": -3, "sourceTypes": "StackEmpty" }   // -3 = Epilog
+    ]
   }
 }
 ```
+
+**`ilMap` semantics**
+- `nativeOffset` — byte offset inside `hotRegion` (add `hotRegion.rva` for absolute PE RVA).
+- `ilOffset` — non-negative real IL offset, or one of the CoreCLR sentinels: `-1 = NoMapping`, `-2 = Prolog`, `-3 = Epilog`. Mirrors `cordebuginfo.h::DebugInfoBoundsType`.
+- `sourceTypes` — pipe-joined flag set: `SequencePoint`, `StackEmpty`, `CallSite`, `NativeEndOffsetUnknown`, `CallInstruction`, `Async`. `null` when no flag set.
+- Bounds are sorted by `nativeOffset` ascending; consumers can binary-search.
+- Empty array `[]` is valid (compiler-generated body with no source mapping); `null` means the PE has no DebugInfo section.
+
+The same shape will be reused by `dotnet-diagnostics-mcp.capture_method_bytes` (issue #81) when surfacing JIT-emitted bodies' ICorDebugInfo bounds — keeping a single consumer schema across R2R and live JIT.
 
 When `nativeBody` is populated, asm-mcp also appends a `NextActionHint` to the response envelope pointing at `dotnet-native-mcp.disassemble` with the three primitives pre-filled:
 

@@ -28,11 +28,13 @@ internal sealed class R2RReader
     // ReadyToRunSectionType from readytorun.h.
     private const int SectionType_RuntimeFunctions = 102;
     private const int SectionType_MethodDefEntryPoints = 103;
+    private const int SectionType_DebugInfo = 105;
 
     private readonly NativeReader _reader;
     private readonly ImmutableArray<SectionHeader> _peSections;
     private readonly FrozenDictionary<int, (int Rva, int Size)> _r2rSections;
     private readonly NativeArray? _methodEntryPoints;
+    private readonly NativeArray? _debugInfo;
     private readonly int _runtimeFunctionsFileOffset;
     private readonly int _runtimeFunctionsCount;
     private readonly int _runtimeFunctionEntrySize;
@@ -51,6 +53,7 @@ internal sealed class R2RReader
         ushort minor,
         FrozenDictionary<int, (int Rva, int Size)> r2rSections,
         NativeArray? methodEntryPoints,
+        NativeArray? debugInfo,
         int runtimeFunctionsFileOffset,
         int runtimeFunctionsCount,
         int runtimeFunctionEntrySize)
@@ -62,6 +65,7 @@ internal sealed class R2RReader
         MinorVersion = minor;
         _r2rSections = r2rSections;
         _methodEntryPoints = methodEntryPoints;
+        _debugInfo = debugInfo;
         _runtimeFunctionsFileOffset = runtimeFunctionsFileOffset;
         _runtimeFunctionsCount = runtimeFunctionsCount;
         _runtimeFunctionEntrySize = runtimeFunctionEntrySize;
@@ -140,6 +144,16 @@ internal sealed class R2RReader
             }
         }
 
+        NativeArray? debugInfo = null;
+        if (frozen.TryGetValue(SectionType_DebugInfo, out var diSec))
+        {
+            int diFileOffset = RvaToFileOffset(peSections, diSec.Rva);
+            if (diFileOffset >= 0)
+            {
+                debugInfo = new NativeArray(nr, (uint)diFileOffset);
+            }
+        }
+
         int rfFileOffset = -1;
         int rfCount = 0;
         if (frozen.TryGetValue(SectionType_RuntimeFunctions, out var rfSec))
@@ -150,7 +164,7 @@ internal sealed class R2RReader
 
         reader = new R2RReader(
             nr, peSections, machine, major, minor, frozen,
-            methodEntryPoints, rfFileOffset, rfCount, rfSize);
+            methodEntryPoints, debugInfo, rfFileOffset, rfCount, rfSize);
         return true;
     }
 
@@ -162,8 +176,17 @@ internal sealed class R2RReader
     /// not encode EndAddress in the function table (everything but x64).</param>
     /// <returns><c>true</c> if the method has a precompiled body.</returns>
     public bool TryGetHotRegion(int methodDefRid, out NativeRegion? region)
+        => TryGetHotRegion(methodDefRid, out region, out _);
+
+    /// <summary>
+    /// Same as <see cref="TryGetHotRegion(int, out NativeRegion?)"/> but also surfaces the
+    /// <c>runtimeFunctionIndex</c> the entrypoint blob resolved to (needed by
+    /// <see cref="TryGetIlMap"/>).
+    /// </summary>
+    public bool TryGetHotRegion(int methodDefRid, out NativeRegion? region, out int runtimeFunctionIndex)
     {
         region = null;
+        runtimeFunctionIndex = -1;
         if (methodDefRid <= 0) return false;
         if (_methodEntryPoints is null) return false;
         if (_runtimeFunctionsFileOffset < 0) return false;
@@ -186,7 +209,7 @@ internal sealed class R2RReader
         }
         _ = after; // unused — fixups are not needed for hot-region lookup
 
-        int runtimeFunctionIndex = (int)id;
+        runtimeFunctionIndex = (int)id;
         if (runtimeFunctionIndex < 0 || runtimeFunctionIndex >= _runtimeFunctionsCount)
             return false;
 
@@ -207,6 +230,155 @@ internal sealed class R2RReader
         if (startRva <= 0) return false;
         region = new NativeRegion(startRva, size);
         return true;
+    }
+
+    /// <summary>
+    /// Resolves the R2R DebugInfo bounds table (section type 105) for one runtime function:
+    /// pairs of <c>(NativeOffset, IlOffset, SourceTypes)</c>. Returns <c>false</c> when the
+    /// PE has no DebugInfo section, or when the given runtime function has no entry.
+    /// </summary>
+    /// <param name="runtimeFunctionIndex">Index obtained from <see cref="TryGetHotRegion(int, out NativeRegion?, out int)"/>.</param>
+    /// <param name="map">Decoded bounds list. Empty list is possible (no source-mapped instructions).</param>
+    public bool TryGetIlMap(int runtimeFunctionIndex, out IReadOnlyList<NativeIlMapEntry>? map)
+    {
+        map = null;
+        if (_debugInfo is null) return false;
+        if (runtimeFunctionIndex < 0) return false;
+
+        int rawOffset = 0;
+        if (!_debugInfo.TryGetAt((uint)runtimeFunctionIndex, ref rawOffset))
+            return false;
+
+        // Back-pointer encoding: DecodeUnsigned reads a `lookback` value out of the blob.
+        // If lookback == 0, the actual debug-info bytes start right after the encoded zero;
+        // otherwise the bytes start at (rawOffset - lookback) — multiple runtime functions
+        // commonly share one DebugInfo blob via this scheme.
+        uint lookback = 0;
+        uint debugInfoOffset = _reader.DecodeUnsigned((uint)rawOffset, ref lookback);
+        if (lookback != 0)
+        {
+            if (lookback > (uint)rawOffset) return false;
+            debugInfoOffset = (uint)rawOffset - lookback;
+        }
+
+        NibbleReader hdr = new(_reader, (int)debugInfoOffset);
+        uint boundsByteCountOrIndicator;
+        try
+        {
+            boundsByteCountOrIndicator = hdr.ReadUInt();
+        }
+        catch (BadImageFormatException)
+        {
+            return false;
+        }
+
+        uint boundsByteCount;
+        const int DebugInfoFat = 0;
+        if (MajorVersion >= 17 && boundsByteCountOrIndicator == DebugInfoFat)
+        {
+            boundsByteCount = hdr.ReadUInt();
+            _ = hdr.ReadUInt(); // variablesByteCount
+            _ = hdr.ReadUInt(); // uninstrumented bounds
+            _ = hdr.ReadUInt(); // patchpoint info
+            _ = hdr.ReadUInt(); // rich debug info
+            _ = hdr.ReadUInt(); // async info
+        }
+        else
+        {
+            boundsByteCount = boundsByteCountOrIndicator;
+            _ = hdr.ReadUInt(); // variablesByteCount
+        }
+
+        if (boundsByteCount == 0)
+        {
+            map = Array.Empty<NativeIlMapEntry>();
+            return true;
+        }
+
+        int boundsOffset = hdr.GetNextByteOffset();
+        try
+        {
+            map = ParseBounds(boundsOffset);
+        }
+        catch (BadImageFormatException)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    private const uint DebugInfo_MaxMappingValue = 0xFFFFFFFDu; // Epilog — see DebugInfoTypes.cs
+
+    private List<NativeIlMapEntry> ParseBounds(int offset)
+    {
+        // Only the >=16 bit-packed encoding is currently emitted by crossgen2 — older
+        // R2R headers are not produced by any supported SDK. We mirror the modern path.
+        NibbleReader reader = new(_reader, offset);
+        uint count = reader.ReadUInt();
+        uint bitsForNativeDelta = reader.ReadUInt() + 1;
+        uint bitsForILOffsets = reader.ReadUInt() + 1;
+        uint bitsForSourceType = MajorVersion >= 17 ? 3u : 2u;
+        uint bitsPerEntry = bitsForNativeDelta + bitsForILOffsets + bitsForSourceType;
+        if (bitsPerEntry == 0 || bitsPerEntry > 60) // sanity — fits in our 64-bit accumulator
+            throw new BadImageFormatException("R2R DebugInfo: implausible bitsPerEntry.");
+
+        ulong bitsMeaningfulMask = (1UL << (int)bitsPerEntry) - 1;
+        int bytesOffset = reader.GetNextByteOffset();
+
+        List<NativeIlMapEntry> entries = new((int)count);
+        uint bitsCollected = 0;
+        ulong bitTemp = 0;
+        uint previousNativeOffset = 0;
+        uint processed = 0;
+
+        while (processed < count)
+        {
+            byte b = _reader.ReadByte(ref bytesOffset);
+            bitTemp |= ((ulong)b) << (int)bitsCollected;
+            bitsCollected += 8;
+
+            while (bitsCollected >= bitsPerEntry && processed < count)
+            {
+                ulong encoded = bitsMeaningfulMask & bitTemp;
+                bitTemp >>= (int)bitsPerEntry;
+                bitsCollected -= bitsPerEntry;
+
+                string? sourceTypes = DecodeSourceTypes((uint)(encoded & ((1UL << (int)bitsForSourceType) - 1)));
+                encoded >>= (int)bitsForSourceType;
+
+                uint nativeDelta = (uint)(encoded & ((1UL << (int)bitsForNativeDelta) - 1));
+                previousNativeOffset += nativeDelta;
+                encoded >>= (int)bitsForNativeDelta;
+
+                uint ilEncoded = (uint)encoded;
+                uint il = ilEncoded + DebugInfo_MaxMappingValue;
+                int ilOffset = il switch
+                {
+                    0xFFFFFFFFu => -1, // NoMapping
+                    0xFFFFFFFEu => -2, // Prolog
+                    0xFFFFFFFDu => -3, // Epilog
+                    _ => (int)il,
+                };
+
+                entries.Add(new NativeIlMapEntry((int)previousNativeOffset, ilOffset, sourceTypes));
+                processed++;
+            }
+        }
+
+        return entries;
+    }
+
+    private static string? DecodeSourceTypes(uint bits)
+    {
+        // Layout per upstream DebugInfo.ParseBounds (v17+):
+        //   bit 0 = CallInstruction, bit 1 = StackEmpty, bit 2 = Async.
+        // v16 only has bits 0-1. Higher bits are reserved.
+        if (bits == 0) return null;
+        List<string> flags = new(3);
+        if ((bits & 0x1) != 0) flags.Add("CallInstruction");
+        if ((bits & 0x2) != 0) flags.Add("StackEmpty");
+        if ((bits & 0x4) != 0) flags.Add("Async");
+        return flags.Count == 0 ? null : string.Join('|', flags);
     }
 
     private static int RvaToFileOffset(ImmutableArray<SectionHeader> sections, int rva)
