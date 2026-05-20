@@ -105,7 +105,7 @@ static Microsoft.Extensions.DependencyInjection.IMcpServerBuilder ConfigureMcpSe
             {
                 Name = "dotnet-assembly-mcp",
                 Title = ".NET Assembly Navigator",
-                Version = typeof(Program).Assembly.GetName().Version?.ToString(3) ?? "0.0.0",
+                Version = ServerInfo.Version,
                 Description =
                     "Static navigation over .NET assemblies on disk. Consumes the MethodIdentity " +
                     "handoff (moduleVersionId + metadataToken) emitted by dotnet-diagnostics-mcp " +

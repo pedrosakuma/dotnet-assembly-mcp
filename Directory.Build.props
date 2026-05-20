@@ -17,4 +17,17 @@
     <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
+
+  <PropertyGroup Label="MinVer">
+    <!-- Derive AssemblyVersion / FileVersion / InformationalVersion from the nearest
+         git tag matching 'v*' (e.g. v0.14.0). Commits past the tag get a -alpha.0.N
+         suffix so dev builds are always distinguishable from a released tag.
+         Issue #94. -->
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+    <MinVerDefaultPreReleaseIdentifiers>alpha.0</MinVerDefaultPreReleaseIdentifiers>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MinVer" PrivateAssets="all" />
+  </ItemGroup>
 </Project>

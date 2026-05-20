@@ -11,9 +11,15 @@
 # instead — this image is for HTTP / sidecar deployments.
 
 ARG DOTNET_VERSION=10.0
+# Version stamped onto the published assemblies. Set by the release workflow
+# (`MINVER_VERSION_OVERRIDE=$VERSION`) so `serverInfo.Version` matches the image
+# tag. When unset, MinVer would otherwise fall back to `0.0.0-alpha.0.0` inside
+# the build container because `.dockerignore` excludes `.git` (issue #94).
+ARG MINVER_VERSION_OVERRIDE=
 
 FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
 WORKDIR /src
+ARG MINVER_VERSION_OVERRIDE
 
 # Bring in the files needed to restore first so the layer caches well.
 COPY global.json Directory.Build.props Directory.Packages.props ./
@@ -31,7 +37,8 @@ RUN dotnet publish src/DotnetAssemblyMcp.Server/DotnetAssemblyMcp.Server.csproj 
     -c Release \
     -o /app/publish \
     --no-restore \
-    /p:UseAppHost=false
+    /p:UseAppHost=false \
+    /p:MinVerVersionOverride=${MINVER_VERSION_OVERRIDE}
 
 FROM mcr.microsoft.com/dotnet/aspnet:${DOTNET_VERSION} AS runtime
 WORKDIR /app
