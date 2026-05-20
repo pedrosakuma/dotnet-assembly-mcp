@@ -69,7 +69,7 @@ Current surface (24 tools — keep this table in sync with `AssemblyTools.cs`):
 | `list_methods` | Enumerate methods of a type (paged) | T1 |
 | `list_attributes` | Custom attributes for a method / type / module | T1 |
 | `find_method` | Module-wide method search by regex | T1 |
-| `get_method` | Method summary by `(MVID, token)` | T1 |
+| `get_method` | Method summary by `(MVID, token)`. Optional `includeNativeBody=true` adds R2R native-body handoff (issue #74). | T1 |
 | `get_method_il` | Raw IL bytes for a method | T2 |
 | `get_method_il_text` | Disassembled IL listing for a method | T2 |
 | `scan_method_il` | Structured IL summary (outbound refs) | T2.5 |

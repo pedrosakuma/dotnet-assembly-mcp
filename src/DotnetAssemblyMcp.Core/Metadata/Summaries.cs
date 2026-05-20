@@ -25,7 +25,8 @@ public sealed record MethodSummary(
     string Signature,
     int IlSize,
     int GenericArity,
-    IReadOnlyList<string> Attributes);
+    IReadOnlyList<string> Attributes,
+    NativeBodyRef? NativeBody = null);
 
 /// <summary>
 /// Coarse-grained kind of a type definition. Mirrors the buckets a user-facing client cares

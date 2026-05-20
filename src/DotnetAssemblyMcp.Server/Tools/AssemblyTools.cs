@@ -232,7 +232,8 @@ public sealed class AssemblyTools
         [Description("Optional CLR reflection-style full names for the declaring type's generic arguments (e.g. ['System.Int32']). When supplied alongside genericMethodArguments produces a closed signature view per docs/handoff-contract.md §3.5. No assembly qualification; nested types use '+'.")] string[]? genericTypeArguments = null,
         [Description("Optional CLR reflection-style full names for the method's generic arguments. See genericTypeArguments for the format.")] string[]? genericMethodArguments = null,
         [Description("Optional fast-path (§3.5): ModuleVersionId of a MethodSpec row that natively encodes the closed instantiation. Must be paired with methodSpecMetadataToken.")] string? methodSpecModuleVersionId = null,
-        [Description("Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B) inside methodSpecModuleVersionId. When supplied alongside genericTypeArguments, the two are cross-checked; a mismatch yields generic_instantiation_mismatch.")] string? methodSpecMetadataToken = null)
+        [Description("Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B) inside methodSpecModuleVersionId. When supplied alongside genericTypeArguments, the two are cross-checked; a mismatch yields generic_instantiation_mismatch.")] string? methodSpecMetadataToken = null,
+        [Description("When true, additionally probes the module for a precompiled native body (ReadyToRun) for this method and populates MethodSummary.NativeBody with (PE path, RVA, size) for handoff to dotnet-native-mcp.disassemble. No-op (NativeBody stays null) for JIT-only assemblies. See docs/handoff-contract.md §3.6.")] bool includeNativeBody = false)
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
         {
@@ -278,14 +279,49 @@ public sealed class AssemblyTools
         }
 
         var m = result.Method!;
-        return AssemblyResult.Ok(
-            m,
-            $"{m.TypeFullName}.{m.MethodName} — {m.Signature} (IL size {m.IlSize} bytes).",
-            new NextActionHint("get_method", "Resolve the next frame from the diagnostic payload.",
+        var hints = new List<NextActionHint>
+        {
+            new("get_method", "Resolve the next frame from the diagnostic payload.",
                 new Dictionary<string, object?>
                 {
                     ["moduleVersionId"] = m.ModuleVersionId.ToString("D"),
-                }));
+                }),
+        };
+
+        if (includeNativeBody)
+        {
+            var nbResult = index.GetNativeBodyRef(m.ModuleVersionId, m.MetadataToken);
+            if (nbResult.IsSuccess && nbResult.Body is { } nb)
+            {
+                m = m with { NativeBody = nb };
+                hints.Add(new NextActionHint(
+                    "dotnet-native-mcp.disassemble",
+                    $"Method has a {nb.Source} precompiled body — hand off (imagePath, rva, size) to dotnet-native-mcp.disassemble for the actual Iced decode (see docs/handoff-contract.md §3.6).",
+                    new Dictionary<string, object?>
+                    {
+                        ["imagePath"] = nb.PePath,
+                        ["rva"] = nb.HotRegion.Rva,
+                        ["size"] = nb.HotRegion.Size,
+                        ["architecture"] = nb.Architecture.ToString(),
+                    }));
+            }
+            else if (nbResult.IsSuccess)
+            {
+                hints.Add(new NextActionHint(
+                    "dotnet-diagnostics-mcp.capture_method_disasm",
+                    "No precompiled native body found in the PE (the method is JIT-only, generic-open, or this module is not R2R-compiled). To inspect actual generated code, attach to a running process with dotnet-diagnostics-mcp.",
+                    new Dictionary<string, object?>
+                    {
+                        ["moduleVersionId"] = m.ModuleVersionId.ToString("D"),
+                        ["metadataToken"] = $"0x{m.MetadataToken:X8}",
+                    }));
+            }
+        }
+
+        return AssemblyResult.Ok(
+            m,
+            $"{m.TypeFullName}.{m.MethodName} — {m.Signature} (IL size {m.IlSize} bytes).",
+            [.. hints]);
     }
 
     [McpServerTool(
