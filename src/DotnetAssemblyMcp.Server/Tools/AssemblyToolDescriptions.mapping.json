@@ -1,0 +1,696 @@
+{
+  "LoadAssembly": {
+    "__summary": {
+      "constant": "LoadAssembly_Summary",
+      "value": "Opens a managed PE file (.dll / .exe) via System.Reflection.Metadata and caches a metadata-only handle keyed by its ModuleVersionId. Idempotent: loading the same MVID twice returns the cached handle. Never executes the assembly. Usually the first call.",
+      "kind": "summary",
+      "line": 28
+    },
+    "path": {
+      "constant": "LoadAssembly_Path",
+      "value": "Absolute path to a .NET PE assembly on the local filesystem.",
+      "kind": "parameter",
+      "line": 34
+    }
+  },
+  "ListAssemblies": {
+    "__summary": {
+      "constant": "ListAssemblies_Summary",
+      "value": "Returns the modules currently held by the metadata index (mvid, path, method count). Useful to confirm a target assembly is loaded before calling get_method, or to check whether two builds with the same name have different MVIDs.",
+      "kind": "summary",
+      "line": 66
+    }
+  },
+  "ImportAssemblyManifest": {
+    "__summary": {
+      "constant": "ImportAssemblyManifest_Summary",
+      "value": "Bulk handshake intended for sidecar scenarios: a producer (typically dotnet-diagnostics-mcp) supplies a manifest of (moduleVersionId, path) pairs observed in a running process. In 'lazy' mode (default) each entry is recorded as a (mvid → path) hint without opening the PE — later get_method calls for that MVID use the hint automatically. In 'tier1' mode each entry is opened eagerly and added to the metadata index. Every entry's on-disk MVID is verified before use; an entry whose actual MVID differs from the manifest is rejected with reason 'mvid_mismatch_with_path' (the path is never silently re-mapped). Re-importing the same MVID is idempotent.",
+      "kind": "summary",
+      "line": 95
+    },
+    "entries": {
+      "constant": "ImportAssemblyManifest_Entries",
+      "value": "Manifest entries. Each must carry moduleVersionId (GUID 'D' format) and an absolute path; name is optional.",
+      "kind": "parameter",
+      "line": 107
+    },
+    "mode": {
+      "constant": "ImportAssemblyManifest_Mode",
+      "value": "'lazy' (default) records (mvid → path) hints without opening the PEs; 'tier1' eagerly loads every entry into the metadata index.",
+      "kind": "parameter",
+      "line": 108
+    }
+  },
+  "GetMethod": {
+    "__summary": {
+      "constant": "GetMethod_Summary",
+      "value": "Implements the consumer side of the MethodIdentity handoff contract: given a moduleVersionId + metadataToken (typically copied from a dotnet-diagnostics-mcp response), returns the declaring type, method name, signature, IL size and method attributes. See docs/handoff-contract.md for the full semantics and error kinds.",
+      "kind": "summary",
+      "line": 220
+    },
+    "moduleVersionId": {
+      "constant": "Common_ModuleVersionId",
+      "value": "ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).",
+      "kind": "parameter",
+      "line": 227
+    },
+    "metadataToken": {
+      "constant": "Common_MetadataToken",
+      "value": "Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).",
+      "kind": "parameter",
+      "line": 228
+    },
+    "typeFullName": {
+      "constant": "GetMethod_TypeFullName",
+      "value": "Optional declaring type full name; used only as a sanity-check display label.",
+      "kind": "parameter",
+      "line": 229
+    },
+    "methodName": {
+      "constant": "GetMethod_MethodName",
+      "value": "Optional method name; used only as a sanity-check display label.",
+      "kind": "parameter",
+      "line": 230
+    },
+    "genericArity": {
+      "constant": "GetMethod_GenericArity",
+      "value": "Optional generic arity from the producer payload. Defaults to 0.",
+      "kind": "parameter",
+      "line": 231
+    },
+    "assemblyPathHint": {
+      "constant": "GetMethod_AssemblyPathHint",
+      "value": "Optional absolute path the producer observed for this assembly. Used only when the MVID is not yet loaded: if the file at the path has a matching MVID it is loaded transparently; if it has a different MVID the call fails with mvid_mismatch (the path is a hint, never an override).",
+      "kind": "parameter",
+      "line": 232
+    },
+    "genericTypeArguments": {
+      "constant": "GetMethod_GenericTypeArguments",
+      "value": "Optional CLR reflection-style full names for the declaring type's generic arguments (e.g. ['System.Int32']). When supplied alongside genericMethodArguments produces a closed signature view per docs/handoff-contract.md §3.5. No assembly qualification; nested types use '+'.",
+      "kind": "parameter",
+      "line": 233
+    },
+    "genericMethodArguments": {
+      "constant": "GetMethod_GenericMethodArguments",
+      "value": "Optional CLR reflection-style full names for the method's generic arguments. See genericTypeArguments for the format.",
+      "kind": "parameter",
+      "line": 234
+    },
+    "methodSpecModuleVersionId": {
+      "constant": "GetMethod_MethodSpecModuleVersionId",
+      "value": "Optional fast-path (§3.5): ModuleVersionId of a MethodSpec row that natively encodes the closed instantiation. Must be paired with methodSpecMetadataToken.",
+      "kind": "parameter",
+      "line": 235
+    },
+    "methodSpecMetadataToken": {
+      "constant": "GetMethod_MethodSpecMetadataToken",
+      "value": "Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B) inside methodSpecModuleVersionId. When supplied alongside genericTypeArguments, the two are cross-checked; a mismatch yields generic_instantiation_mismatch.",
+      "kind": "parameter",
+      "line": 236
+    },
+    "includeNativeBody": {
+      "constant": "GetMethod_IncludeNativeBody",
+      "value": "When true, additionally probes the module for a precompiled native body (ReadyToRun) for this method and populates MethodSummary.NativeBody with (PE path, RVA, size) for handoff to dotnet-native-mcp.disassemble. No-op (NativeBody stays null) for JIT-only assemblies. See docs/handoff-contract.md §3.6.",
+      "kind": "parameter",
+      "line": 237
+    }
+  },
+  "DecompileMethod": {
+    "__summary": {
+      "constant": "DecompileMethod_Summary",
+      "value": "Returns the C# source of a single method via ICSharpCode.Decompiler. Output is hard-capped by maxChars (default 16 KiB) and LRU-cached keyed by (mvid, token, maxChars) so repeated calls on the same hotspot are cheap. Use get_method first to confirm the identity exists, then call this for the body. Note: generic methods are always returned in their open form (e.g. 'T Echo(T value)') — the decompiler operates on MethodDef, not on closed instantiations. For a closed signature view, use get_method with genericTypeArguments / genericMethodArguments (or the methodSpec fast-path); see docs/handoff-contract.md §3.5.",
+      "kind": "summary",
+      "line": 335
+    },
+    "moduleVersionId": {
+      "constant": "Common_ModuleVersionId",
+      "value": "ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).",
+      "kind": "parameter",
+      "line": 347
+    },
+    "metadataToken": {
+      "constant": "Common_MetadataToken",
+      "value": "Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).",
+      "kind": "parameter",
+      "line": 348
+    },
+    "maxChars": {
+      "constant": "DecompileMethod_MaxChars",
+      "value": "Optional cap on returned characters. Pass 0 to use the server default (16 KiB).",
+      "kind": "parameter",
+      "line": 349
+    },
+    "assemblyPathHint": {
+      "constant": "Common_AssemblyPathHint",
+      "value": "Optional absolute path the producer observed for this assembly (see get_method for semantics).",
+      "kind": "parameter",
+      "line": 350
+    }
+  },
+  "GetMethodIl": {
+    "__summary": {
+      "constant": "GetMethodIl_Summary",
+      "value": "Collapsed IL reader — replaces v0.13's get_method_il + get_method_il_text + scan_method_il. The 'format' argument selects the projection: 'raw' (default) returns hex-encoded IL bytes plus max-stack / EH-region / instruction counts (cheap; pair with maxBytes); 'text' returns an ildasm-style textual dump via ICSharpCode.Decompiler's ReflectionDisassembler with operand tokens resolved to readable names — useful when prefixes (tail./volatile./unaligned.), box/unbox.any placement, or call-vs-callvirt dispatch matters (pair with maxLines; cached); 'scan' walks the IL and returns structural outbound references (called methods, accessed fields, used types, string literals) — the building block for cross-reference queries without paying decompilation cost. The returned envelope carries the chosen format plus exactly one populated payload field (raw / text / scan); the other two are null. Generic methods are rendered in their open form for 'text'; IL token references in 'scan' are invariant across closed instantiations.",
+      "kind": "summary",
+      "line": 398
+    },
+    "moduleVersionId": {
+      "constant": "Common_ModuleVersionId",
+      "value": "ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).",
+      "kind": "parameter",
+      "line": 416
+    },
+    "metadataToken": {
+      "constant": "Common_MetadataToken",
+      "value": "Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).",
+      "kind": "parameter",
+      "line": 417
+    },
+    "format": {
+      "constant": "GetMethodIl_Format",
+      "value": "Projection: 'raw' (default) for hex IL bytes, 'text' for an ildasm-style textual dump, or 'scan' for outbound-reference extraction.",
+      "kind": "parameter",
+      "line": 418
+    },
+    "maxBytes": {
+      "constant": "GetMethodIl_MaxBytes",
+      "value": "Used by format='raw' only. Optional cap on raw IL bytes encoded in the response. Pass 0 for the server default (4 KiB).",
+      "kind": "parameter",
+      "line": 419
+    },
+    "maxLines": {
+      "constant": "GetMethodIl_MaxLines",
+      "value": "Used by format='text' only. Optional cap on output lines. Pass 0 for the server default (256). Hard cap 4096.",
+      "kind": "parameter",
+      "line": 420
+    },
+    "assemblyPathHint": {
+      "constant": "Common_AssemblyPathHint",
+      "value": "Optional absolute path the producer observed for this assembly (see get_method for semantics).",
+      "kind": "parameter",
+      "line": 421
+    }
+  },
+  "ListTypes": {
+    "__summary": {
+      "constant": "ListTypes_Summary",
+      "value": "Enumerates the type definitions of a module. Accepts either an MVID of an already loaded module or an absolute path (auto-loads on first call). Supports filtering by namespace prefix, name substring (case-insensitive) and kind (class/struct/interface/enum/delegate); results are paginated via cursor (pass nextCursor from the previous response). Each entry includes a type handle 't:<mvid>:0x<token>' suitable for the follow-up list_methods tool.",
+      "kind": "summary",
+      "line": 509
+    },
+    "mvidOrPath": {
+      "constant": "Common_MvidOrPathAssembly",
+      "value": "Either the MVID GUID (D format) of a loaded module, or an absolute path to a .NET PE assembly (auto-loaded).",
+      "kind": "parameter",
+      "line": 518
+    },
+    "namespacePrefix": {
+      "constant": "ListTypes_NamespacePrefix",
+      "value": "Optional namespace prefix filter, matched as a dot-segmented prefix (e.g. 'MyApp' matches 'MyApp.Foo' but not 'MyAppExt.Foo').",
+      "kind": "parameter",
+      "line": 519
+    },
+    "nameContains": {
+      "constant": "ListTypes_NameContains",
+      "value": "Optional case-insensitive substring matched against the full type name (including '+' for nested types).",
+      "kind": "parameter",
+      "line": 520
+    },
+    "kind": {
+      "constant": "ListTypes_Kind",
+      "value": "Optional kind filter. One of: class, struct, interface, enum, delegate.",
+      "kind": "parameter",
+      "line": 521
+    },
+    "cursor": {
+      "constant": "Common_PaginationCursor",
+      "value": "Pagination cursor returned by the previous call. Pass 0 or omit for the first page.",
+      "kind": "parameter",
+      "line": 522
+    },
+    "pageSize": {
+      "constant": "Common_MaxTypesPerPage",
+      "value": "Max types per page (default 50, capped at 500).",
+      "kind": "parameter",
+      "line": 523
+    }
+  },
+  "ListAssemblyReferences": {
+    "__summary": {
+      "constant": "ListAssemblyReferences_Summary",
+      "value": "Enumerates the AssemblyRef table of a single module: every external assembly the module depends on at metadata level, with name, four-part version, culture, public key token (hex), and raw AssemblyFlags. Cheap (single MetadataReader walk, not paginated). Use to reconstruct the dependency graph, audit target-framework or package versions, or pivot into load_assembly when the referenced assembly is also on disk. Accepts an MVID of an already-loaded module or an absolute path (auto-loaded on first call).",
+      "kind": "summary",
+      "line": 591
+    },
+    "mvidOrPath": {
+      "constant": "Common_MvidOrPathAssembly",
+      "value": "Either the MVID GUID (D format) of a loaded module, or an absolute path to a .NET PE assembly (auto-loaded).",
+      "kind": "parameter",
+      "line": 601
+    }
+  },
+  "FindStringReferences": {
+    "__summary": {
+      "constant": "FindStringReferences_Summary",
+      "value": "Reverse string-literal lookup: returns every method whose IL contains an ldstr opcode whose decoded user-string matches 'query' under 'matchMode' (exact / contains / regex). Scope is all loaded modules unless 'mvidOrPath' is supplied; in that case only the named module is searched (auto-loaded from path if needed). Hits include the caller's method handle, signature display, IL offset of the ldstr opcode, and the matched literal. Per-module string index is built lazily on the first call against that module and held in memory; subsequent calls are O(1) for exact / O(unique-literals) for contains+regex. Result is capped at 'maxHits' (default 1000, hard cap 10000); 'truncated' = true when hit. Typical use: 'a user reported error message X — which method produces it?'.",
+      "kind": "summary",
+      "line": 626
+    },
+    "query": {
+      "constant": "FindStringReferences_Query",
+      "value": "The string to search for. Required.",
+      "kind": "parameter",
+      "line": 638
+    },
+    "matchMode": {
+      "constant": "FindStringReferences_MatchMode",
+      "value": "Match semantics: 'exact' (default), 'contains', or 'regex'. Regex evaluation has a 1s timeout per literal.",
+      "kind": "parameter",
+      "line": 639
+    },
+    "mvidOrPath": {
+      "constant": "Common_ScopeMvidOrPath",
+      "value": "Optional scope. MVID GUID or absolute path of a single module. Omit / pass null to search every loaded module.",
+      "kind": "parameter",
+      "line": 640
+    },
+    "maxHits": {
+      "constant": "Common_MaxHitsDescription",
+      "value": "Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.",
+      "kind": "parameter",
+      "line": 641
+    }
+  },
+  "FindAttributeTargets": {
+    "__summary": {
+      "constant": "FindAttributeTargets_Summary",
+      "value": "Reverse attribute lookup: returns every assembly / type / method / parameter / field / property / event decorated with an attribute whose constructor's declaring type matches 'attributeTypeFullName' (case-sensitive full name, '+' for nested types — e.g. 'System.ObsoleteAttribute' or 'Xunit.FactAttribute'). Match is by attribute type identity, not by IL spelling, so using-aliases are irrelevant. Scope is every loaded module unless 'mvidOrPath' is supplied. Optional 'targetKinds' filters the result (comma-separated subset of assembly,type,method,parameter,field,property,event). Per-module reverse attribute index is built lazily and invalidated with the xref cache on file change. Result is capped at 'maxHits' (default 1000, hard cap 10000); 'truncated' = true when hit. Typical use: 'find every [Obsolete] API' / 'every [Authorize] controller method'.",
+      "kind": "summary",
+      "line": 693
+    },
+    "attributeTypeFullName": {
+      "constant": "FindAttributeTargets_AttributeTypeFullName",
+      "value": "Full name of the attribute type, including '+' for nested types (e.g. 'System.ObsoleteAttribute'). Required.",
+      "kind": "parameter",
+      "line": 706
+    },
+    "mvidOrPath": {
+      "constant": "Common_ScopeMvidOrPath",
+      "value": "Optional scope. MVID GUID or absolute path of a single module. Omit / pass null to search every loaded module.",
+      "kind": "parameter",
+      "line": 707
+    },
+    "targetKinds": {
+      "constant": "FindAttributeTargets_TargetKinds",
+      "value": "Optional comma-separated subset of {assembly, type, method, parameter, field, property, event}. Omit for all kinds.",
+      "kind": "parameter",
+      "line": 708
+    },
+    "maxHits": {
+      "constant": "Common_MaxHitsDescription",
+      "value": "Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.",
+      "kind": "parameter",
+      "line": 709
+    }
+  },
+  "FindMemberReferences": {
+    "__summary": {
+      "constant": "FindMemberReferences_Summary",
+      "value": "Reverse member-access lookup, collapsed from the v0.13 trio of find_field_references / find_property_references / find_event_references. The kind is dispatched from the handle prefix: 'f:<mvid>:0x<fieldToken>' (field — six opcodes ldfld/ldsfld/stfld/stsfld/ldflda/ldsflda), 'p:<mvid>:0x<propertyToken>' (property — every call to its getter/setter), 'e:<mvid>:0x<eventToken>' (event — every call to its add/remove/raise accessor). The 'accessor' filter applies to properties and events only: 'all' (default) / 'getter' / 'setter' for properties, 'all' (default) / 'add' / 'remove' / 'raise' for events, and 'all' (default) / 'read' / 'write' for fields (preserves the v0.13 find_field_references mode= filter). Same-module hits use metadata tokens; cross-module hits use the existing call/field-access xref indices. Result is capped at 'maxHits' (default 1000, hard cap 10000). The returned envelope carries a 'kind' discriminator plus exactly one populated payload field (field / property / event); the other two are null.",
+      "kind": "summary",
+      "line": 763
+    },
+    "memberHandle": {
+      "constant": "FindMemberReferences_MemberHandle",
+      "value": "Member handle: 'f:<mvid>:0x<fieldToken>' for a field, 'p:<mvid>:0x<propertyToken>' for a property, or 'e:<mvid>:0x<eventToken>' for an event.",
+      "kind": "parameter",
+      "line": 779
+    },
+    "accessor": {
+      "constant": "FindMemberReferences_Accessor",
+      "value": "Optional accessor / mode filter. Field handles: 'all' (default) / 'read' (ldfld/ldsfld + ldflda/ldsflda) / 'write' (stfld/stsfld). Property handles: 'all' (default) / 'getter' / 'setter'. Event handles: 'all' (default) / 'add' / 'remove' / 'raise'.",
+      "kind": "parameter",
+      "line": 780
+    },
+    "maxHits": {
+      "constant": "Common_MaxHitsDescription",
+      "value": "Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.",
+      "kind": "parameter",
+      "line": 781
+    }
+  },
+  "ListMethods": {
+    "__summary": {
+      "constant": "ListMethods_Summary",
+      "value": "Enumerates the methods of a single type. Identify the type either via a typeHandle ('t:<mvid>:0x<typeToken>' returned by list_types) or via mvidOrPath + typeFullName (case-sensitive, uses '+' for nested types e.g. 'NS.Outer+Inner'). Returns one MethodSummary per method (handle, name, signature, ilSize, attributes); use cursor for paging. Drill in further with decompile_method, get_method_il or find_callers.",
+      "kind": "summary",
+      "line": 916
+    },
+    "typeHandle": {
+      "constant": "Common_TypeHandle",
+      "value": "Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.",
+      "kind": "parameter",
+      "line": 924
+    },
+    "mvidOrPath": {
+      "constant": "Common_MvidOrPathModule",
+      "value": "MVID GUID or absolute path of the module; only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 925
+    },
+    "typeFullName": {
+      "constant": "Common_TypeFullNameDescription",
+      "value": "Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 926
+    },
+    "namePattern": {
+      "constant": "ListMethods_NamePattern",
+      "value": "Optional case-insensitive substring filter on the method name.",
+      "kind": "parameter",
+      "line": 927
+    },
+    "cursor": {
+      "constant": "Common_PaginationCursor",
+      "value": "Pagination cursor returned by the previous call. Pass 0 or omit for the first page.",
+      "kind": "parameter",
+      "line": 928
+    },
+    "pageSize": {
+      "constant": "ListMethods_PageSize",
+      "value": "Max methods per page (default 50, capped at 500).",
+      "kind": "parameter",
+      "line": 929
+    }
+  },
+  "FindMethod": {
+    "__summary": {
+      "constant": "FindMethod_Summary",
+      "value": "Module-wide method search. Matches every MethodDef whose short name matches the supplied regular expression (case-insensitive) and, optionally, whose signature contains a substring. Returns hits with the canonical 'm:<mvid>:0x<token>' handle ready to feed into get_method / decompile_method / find_callers. Use this when you do not yet have a type in mind; otherwise prefer list_methods which is cheaper.",
+      "kind": "summary",
+      "line": 995
+    },
+    "mvidOrPath": {
+      "constant": "FindMethod_MvidOrPath",
+      "value": "Either the MVID GUID ('D' format) of a previously loaded module, or an absolute path to a managed PE assembly (will be loaded on demand).",
+      "kind": "parameter",
+      "line": 1003
+    },
+    "namePattern": {
+      "constant": "FindMethod_NamePattern",
+      "value": "Regular expression matched (case-insensitive) against each method's short name.",
+      "kind": "parameter",
+      "line": 1004
+    },
+    "signatureContains": {
+      "constant": "FindMethod_SignatureContains",
+      "value": "Optional case-insensitive substring filter on the decoded signature (e.g. 'CancellationToken').",
+      "kind": "parameter",
+      "line": 1005
+    },
+    "cursor": {
+      "constant": "FindMethod_Cursor",
+      "value": "Optional pagination cursor returned in a prior call (exclusive lower bound on MethodDef token).",
+      "kind": "parameter",
+      "line": 1006
+    },
+    "pageSize": {
+      "constant": "FindMethod_PageSize",
+      "value": "Max matches per page (default 20, capped at 200).",
+      "kind": "parameter",
+      "line": 1007
+    }
+  },
+  "FindCallers": {
+    "__summary": {
+      "constant": "FindCallers_Summary",
+      "value": "Returns every method whose IL emits a direct call to the requested callee — within the callee's own module via MethodDef tokens, and across any other loaded module via MemberRef signature matching (assembly name + type fullname + method name + parameter signature + generic arity). The reverse index is built lazily per module and cached at ~/.cache/dotnet-assembly-mcp/<mvid>.xref so subsequent queries are O(callers).",
+      "kind": "summary",
+      "line": 1065
+    },
+    "moduleVersionId": {
+      "constant": "FindCallers_ModuleVersionId",
+      "value": "ModuleVersionId GUID of the callee, as a string ('D' format).",
+      "kind": "parameter",
+      "line": 1074
+    },
+    "metadataToken": {
+      "constant": "FindCallers_MetadataToken",
+      "value": "Callee MethodDef metadata token (table 0x06). Accepts decimal or hex.",
+      "kind": "parameter",
+      "line": 1075
+    },
+    "assemblyPathHint": {
+      "constant": "Common_AssemblyPathHint",
+      "value": "Optional absolute path the producer observed for this assembly (see get_method for semantics).",
+      "kind": "parameter",
+      "line": 1076
+    },
+    "genericTypeArguments": {
+      "constant": "FindCallers_GenericTypeArguments",
+      "value": "Optional CLR reflection-style full names for the declaring type's generic arguments (see get_method).",
+      "kind": "parameter",
+      "line": 1077
+    },
+    "genericMethodArguments": {
+      "constant": "FindCallers_GenericMethodArguments",
+      "value": "Optional CLR reflection-style full names for the method's generic arguments. When supplied, the caller list is narrowed to call sites whose MethodSpec.Instantiation matches element-wise (docs/handoff-contract.md §3.5).",
+      "kind": "parameter",
+      "line": 1078
+    },
+    "methodSpecModuleVersionId": {
+      "constant": "FindCallers_MethodSpecModuleVersionId",
+      "value": "Optional fast-path (§3.5): ModuleVersionId of a MethodSpec row. Paired with methodSpecMetadataToken.",
+      "kind": "parameter",
+      "line": 1079
+    },
+    "methodSpecMetadataToken": {
+      "constant": "FindCallers_MethodSpecMetadataToken",
+      "value": "Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B). When supplied, derives the instantiation directly from metadata.",
+      "kind": "parameter",
+      "line": 1080
+    }
+  },
+  "FindTypeReferences": {
+    "__summary": {
+      "constant": "FindTypeReferences_Summary",
+      "value": "Returns every site that references the requested TypeDef: field/property/event types, method parameters / return types / locals, IL opcodes that bake in a type token (newobj, castclass, isinst, box, unbox, ldtoken, generic args, ...), and type-hierarchy edges (BaseType + InterfaceImplementation per TypeDef, including TypeSpec closures of the target — e.g. 'class C : IRequestHandler<int,string>' registers as an InterfaceImplementation site of IRequestHandler`2). Same-module hits come from TypeDef tokens; cross-module hits come from TypeRef matching (assembly simple name + type full name). Uses the same lazily-built per-module xref cache as find_callers; the cache file format version was bumped so the first call after upgrade rebuilds.",
+      "kind": "summary",
+      "line": 1129
+    },
+    "typeHandle": {
+      "constant": "FindTypeReferences_TypeHandle",
+      "value": "Type handle 't:<mvid>:0x<typeToken>' as returned by list_types or get_type.",
+      "kind": "parameter",
+      "line": 1142
+    },
+    "mvidOrPath": {
+      "constant": "Common_MvidOrPathModule",
+      "value": "MVID GUID or absolute path of the module; only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 1143
+    },
+    "typeFullName": {
+      "constant": "Common_TypeFullNameDescription",
+      "value": "Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 1144
+    },
+    "assemblyPathHint": {
+      "constant": "FindTypeReferences_AssemblyPathHint",
+      "value": "Optional absolute path the producer observed for this assembly (used to load the module if it's not yet known).",
+      "kind": "parameter",
+      "line": 1145
+    }
+  },
+  "GetMethodSource": {
+    "__summary": {
+      "constant": "GetMethodSource_Summary",
+      "value": "Reads the module's PDB (embedded portable PDB first, then sibling .pdb) and returns the file/startLine/endLine triple plus a resolved SourceLink URL when SourceLink CustomDebugInformation is present. Second-chance source resolver: use after dotnet-diagnostics-mcp has emitted a hotspot with no SourceLocation. Metadata-only (no HTTP). Returns found=false (not an error) when no PDB exists or the method has no non-hidden sequence points (compiler-generated bodies). Note: this tool does not accept §3.5 generic-instantiation arguments — PDB sequence points anchor on the open MethodDef and the source coordinates are the same for every closed instantiation.",
+      "kind": "summary",
+      "line": 1192
+    },
+    "moduleVersionId": {
+      "constant": "Common_ModuleVersionId",
+      "value": "ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).",
+      "kind": "parameter",
+      "line": 1204
+    },
+    "metadataToken": {
+      "constant": "Common_MetadataToken",
+      "value": "Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).",
+      "kind": "parameter",
+      "line": 1205
+    },
+    "assemblyPathHint": {
+      "constant": "Common_AssemblyPathHint",
+      "value": "Optional absolute path the producer observed for this assembly (see get_method for semantics).",
+      "kind": "parameter",
+      "line": 1206
+    }
+  },
+  "ListAttributes": {
+    "__summary": {
+      "constant": "ListAttributes_Summary",
+      "value": "Enumerates the CustomAttribute rows attached to the entity identified by 'target'. Accepts a polymorphic handle: 'a:<mvid>' (assembly), 't:<mvid>:0x<token>' (type), 'm:<mvid>:0x<token>' (method), 'pa:<mvid>:0x<methodToken>:<sequence>' (parameter; sequence 0 = return value), 'f:<mvid>:0x<token>' (field), 'p:<mvid>:0x<token>' (property), or 'e:<mvid>:0x<token>' (event — same handles list_members returns). Pure metadata — no IL decoded, no decompilation. Each entry includes the attribute's full type name, its declaring assembly's simple name (when cross-module), the decoded constructor arguments, and the named arguments (properties / fields set in the attribute usage).",
+      "kind": "summary",
+      "line": 1256
+    },
+    "target": {
+      "constant": "ListAttributes_Target",
+      "value": "Target handle. One of: 'a:<mvid>', 't:<mvid>:0x<typeToken>', 'm:<mvid>:0x<methodToken>', 'pa:<mvid>:0x<methodToken>:<sequence>' (sequence 0 = return value), 'f:<mvid>:0x<fieldToken>', 'p:<mvid>:0x<propertyToken>', 'e:<mvid>:0x<eventToken>'.",
+      "kind": "parameter",
+      "line": 1268
+    },
+    "nameContains": {
+      "constant": "ListAttributes_NameContains",
+      "value": "Optional case-insensitive substring filter on the attribute type's full name (e.g. 'Authorize').",
+      "kind": "parameter",
+      "line": 1269
+    },
+    "cursor": {
+      "constant": "Common_PaginationCursor",
+      "value": "Pagination cursor returned by the previous call. Pass 0 or omit for the first page.",
+      "kind": "parameter",
+      "line": 1270
+    },
+    "pageSize": {
+      "constant": "ListAttributes_PageSize",
+      "value": "Max attributes per page (default 50, capped at 500).",
+      "kind": "parameter",
+      "line": 1271
+    }
+  },
+  "GetType": {
+    "__summary": {
+      "constant": "GetType_Summary",
+      "value": "Returns the full TypeSummary (kind, attributes, generic arity, base type, implemented interfaces) for a single type. Identify the type via 'typeHandle' ('t:<mvid>:0x<typeToken>' from list_types) or via mvidOrPath + typeFullName. Cross-module base types and interfaces are reported as TypeReferenceSummary (FullName + declaring assembly simple name) without forcing the other module to load.",
+      "kind": "summary",
+      "line": 1311
+    },
+    "typeHandle": {
+      "constant": "Common_TypeHandle",
+      "value": "Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.",
+      "kind": "parameter",
+      "line": 1319
+    },
+    "mvidOrPath": {
+      "constant": "Common_MvidOrPathModule",
+      "value": "MVID GUID or absolute path of the module; only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 1320
+    },
+    "typeFullName": {
+      "constant": "Common_TypeFullNameDescription",
+      "value": "Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 1321
+    }
+  },
+  "ListDerivedTypes": {
+    "__summary": {
+      "constant": "ListDerivedTypes_Summary",
+      "value": "Enumerates TypeDef rows across every loaded module whose base-class chain or InterfaceImplementation chain reaches the supplied base type. Use it to answer 'who derives from / implements this type?' refactor questions — same-module hits use TypeDef tokens, cross-module hits match by (assembly simple name, type full name) against the child module's TypeRef rows. With directOnly=true (default) only immediate subclasses / implementers are returned; with directOnly=false the full transitive set is returned. Generic-instantiation parents are also matched: a query against the open base (e.g. `IRequestHandler`2`) finds every closed-arg implementer, and the matched closed args are surfaced on `TypeSummary.Instantiation`. Pass `matchInstantiation` to narrow the result to a specific closed shape (e.g. `['System.Int32','System.String']` returns only `OrderHandler : IRequestHandler<int,string>`). Identify the base type via 'typeHandle' or via mvidOrPath + typeFullName, exactly like get_type / list_methods.",
+      "kind": "summary",
+      "line": 1356
+    },
+    "typeHandle": {
+      "constant": "ListDerivedTypes_TypeHandle",
+      "value": "Type handle 't:<mvid>:0x<typeToken>' of the base type, as returned by list_types or get_type.",
+      "kind": "parameter",
+      "line": 1372
+    },
+    "mvidOrPath": {
+      "constant": "Common_MvidOrPathModule",
+      "value": "MVID GUID or absolute path of the module; only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 1373
+    },
+    "typeFullName": {
+      "constant": "ListDerivedTypes_TypeFullName",
+      "value": "Full base-type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 1374
+    },
+    "directOnly": {
+      "constant": "ListDerivedTypes_DirectOnly",
+      "value": "When true (default) only immediate subclasses are returned; when false, the full transitive descendant set is returned.",
+      "kind": "parameter",
+      "line": 1375
+    },
+    "cursor": {
+      "constant": "Common_PaginationCursor",
+      "value": "Pagination cursor returned by the previous call. Pass 0 or omit for the first page.",
+      "kind": "parameter",
+      "line": 1376
+    },
+    "pageSize": {
+      "constant": "Common_MaxTypesPerPage",
+      "value": "Max types per page (default 50, capped at 500).",
+      "kind": "parameter",
+      "line": 1377
+    },
+    "matchInstantiation": {
+      "constant": "ListDerivedTypes_MatchInstantiation",
+      "value": "Optional CLR reflection-style full names for the base type's generic arguments (e.g. ['System.Int32','System.String']) per docs/handoff-contract.md §3.5. When supplied, only TypeSpec parent edges whose closed args match element-wise are returned; non-generic parents are excluded. Omit for open match (default).",
+      "kind": "parameter",
+      "line": 1378
+    }
+  },
+  "ListMembers": {
+    "__summary": {
+      "constant": "ListMembers_Summary",
+      "value": "Enumerates the structural members of a single type — fields, properties, and events — with paging and optional kind / name / signature filters. Methods are intentionally excluded; use list_methods for those (it carries IL-size + generic arity which don't apply to fields/properties/events). Each MemberSummary carries a prefix-tagged handle ('f:', 'p:', 'e:') accepted by list_attributes as a target.",
+      "kind": "summary",
+      "line": 1427
+    },
+    "typeHandle": {
+      "constant": "Common_TypeHandle",
+      "value": "Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.",
+      "kind": "parameter",
+      "line": 1435
+    },
+    "mvidOrPath": {
+      "constant": "Common_MvidOrPathModule",
+      "value": "MVID GUID or absolute path of the module; only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 1436
+    },
+    "typeFullName": {
+      "constant": "Common_TypeFullNameDescription",
+      "value": "Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.",
+      "kind": "parameter",
+      "line": 1437
+    },
+    "kind": {
+      "constant": "ListMembers_Kind",
+      "value": "Optional kind filter: Field, Property, or Event. Omit to return all kinds in metadata order (fields, then properties, then events).",
+      "kind": "parameter",
+      "line": 1438
+    },
+    "namePattern": {
+      "constant": "ListMembers_NamePattern",
+      "value": "Optional case-insensitive substring filter on the member name.",
+      "kind": "parameter",
+      "line": 1439
+    },
+    "signatureContains": {
+      "constant": "ListMembers_SignatureContains",
+      "value": "Optional case-insensitive substring filter on the rendered signature (e.g. 'int', 'EventHandler').",
+      "kind": "parameter",
+      "line": 1440
+    },
+    "cursor": {
+      "constant": "Common_PaginationCursor",
+      "value": "Pagination cursor returned by the previous call. Pass 0 or omit for the first page.",
+      "kind": "parameter",
+      "line": 1441
+    },
+    "pageSize": {
+      "constant": "ListMembers_PageSize",
+      "value": "Max members per page (default 50, capped at 500).",
+      "kind": "parameter",
+      "line": 1442
+    }
+  }
+}
