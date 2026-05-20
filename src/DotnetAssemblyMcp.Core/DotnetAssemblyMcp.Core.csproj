@@ -8,4 +8,8 @@
   <ItemGroup>
     <PackageReference Include="ICSharpCode.Decompiler" />
   </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotnetAssemblyMcp.Core.Tests" />
+  </ItemGroup>
 </Project>
