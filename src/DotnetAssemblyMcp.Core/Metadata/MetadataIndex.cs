@@ -2734,5 +2734,58 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
         return list;
     }
+
+    /// <inheritdoc />
+    public AssemblyError? EnsureLoaded(Guid moduleVersionId, string? assemblyPathHint)
+    {
+        if (moduleVersionId == Guid.Empty)
+            return new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required.");
+        if (_store.TryGet(moduleVersionId, out _)) return null;
+
+        var hint = assemblyPathHint;
+        if (string.IsNullOrWhiteSpace(hint) && _store.TryGetPathHint(moduleVersionId, out var lazy))
+            hint = lazy;
+        if (string.IsNullOrWhiteSpace(hint))
+        {
+            return new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {moduleVersionId:D}.");
+        }
+
+        var probe = _store.Probe(hint);
+        if (probe.Error is not null) return probe.Error;
+        if (probe.Mvid != moduleVersionId)
+        {
+            return new AssemblyError(
+                ErrorKinds.MvidMismatch,
+                $"assemblyPathHint '{hint}' has MVID {probe.Mvid:D} but the caller requested {moduleVersionId:D}.");
+        }
+        var load = _store.Load(hint);
+        return load.IsSuccess ? null : load.Error;
+    }
+
+    /// <inheritdoc />
+    public FindTypeByNameResult FindTypeByFullName(Guid moduleVersionId, string typeFullName)
+    {
+        if (moduleVersionId == Guid.Empty)
+            return FindTypeByNameResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
+        if (string.IsNullOrWhiteSpace(typeFullName))
+            return FindTypeByNameResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "typeFullName is required."));
+        if (!_store.TryGet(moduleVersionId, out var module))
+            return FindTypeByNameResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
+                $"no loaded module has MVID {moduleVersionId:D}."));
+
+        var total = module.MD.TypeDefinitions.Count;
+        for (int row = 1; row <= total; row++)
+        {
+            TypeSummary? summary;
+            try { summary = TrySummarizeType(module, row); }
+            catch (BadImageFormatException) { continue; }
+            if (summary is null) continue;
+            if (string.Equals(summary.FullName, typeFullName, StringComparison.Ordinal))
+                return FindTypeByNameResult.Ok(summary);
+        }
+        return FindTypeByNameResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
+            $"type '{typeFullName}' not found in module {moduleVersionId:D}."));
+    }
 }
 

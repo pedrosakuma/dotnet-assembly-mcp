@@ -38,9 +38,9 @@ samples|fixtures/
 
 ### 2.1 Budget: **~10 tools, justify every addition**
 
-Anthropic recommends ≤10 tools per LLM context. This server currently exposes **24**
+Anthropic recommends ≤10 tools per LLM context. This server currently exposes **20**
 because the consumer-side handoff (§3.5) plus the full Tier-4 cross-reference suite
-each earn their slot — but the bar for adding the 25th must stay high. Before
+each earn their slot — but the bar for adding the 21st must stay high. Before
 adding a new tool, check the alternatives:
 
 1. Extend an existing tool with a parameter, or
@@ -54,7 +54,7 @@ If you still need a new tool, justify it in the PR description: which producer
 hotspot or agent workflow needs it, why a Resource or parameter wouldn't carry the
 same payload, and what the total count will be after the addition.
 
-Current surface (24 tools — keep this table in sync with `AssemblyTools.cs`):
+Current surface (20 tools — keep this table in sync with `AssemblyTools.cs`):
 
 | Tool | Purpose | Tier |
 |---|---|---|
@@ -70,18 +70,14 @@ Current surface (24 tools — keep this table in sync with `AssemblyTools.cs`):
 | `list_attributes` | Custom attributes for a method / type / module | T1 |
 | `find_method` | Module-wide method search by regex | T1 |
 | `get_method` | Method summary by `(MVID, token)`. Optional `includeNativeBody=true` adds R2R native-body handoff (issue #74). | T1 |
-| `get_method_il` | Raw IL bytes for a method | T2 |
-| `get_method_il_text` | Disassembled IL listing for a method | T2 |
-| `scan_method_il` | Structured IL summary (outbound refs) | T2.5 |
+| `get_method_il` | IL reader, dispatched by `format`: `raw` (hex bytes), `text` (ildasm-style dump), `scan` (structured outbound refs) | T2/T2.5 |
 | `decompile_method` | C# decompilation by `(MVID, token)` | T3 |
 | `get_method_source` | PDB second-chance source location | T2 |
 | `find_callers` | Inbound method xref | T4 |
 | `find_type_references` | Inbound type xref | T4 |
 | `find_string_references` | Inbound string-literal xref | T4 |
 | `find_attribute_targets` | Reverse attribute index | T4 |
-| `find_field_references` | Inbound field-access xref | T4 |
-| `find_property_references` | Inbound property-accessor xref | T4 |
-| `find_event_references` | Inbound event-accessor (add/remove/raise) xref | T4 |
+| `find_member_references` | Inbound field / property / event xref, dispatched by handle prefix (`f:` / `p:` / `e:`) | T4 |
 
 ### 2.2 Attribute checklist
 

@@ -102,7 +102,7 @@ This server resolves a `MethodIdentity` to an in-memory `MethodDefinition` (or e
 
 ### 3.1 `assemblyPathHint` — single-call resolution from a producer payload
 
-Every `(MVID, token)`-keyed tool (`get_method`, `decompile_method`, `get_method_il`, `scan_method_il`, `find_callers`) accepts an optional `assemblyPathHint` parameter. It is the recommended way for an agent that consumes a `MethodIdentity` from `dotnet-diagnostics-mcp` to resolve a hotspot in a single call instead of `load_assembly` + tool.
+Every `(MVID, token)`-keyed tool (`get_method`, `decompile_method`, `get_method_il`, `find_callers`) accepts an optional `assemblyPathHint` parameter. It is the recommended way for an agent that consumes a `MethodIdentity` from `dotnet-diagnostics-mcp` to resolve a hotspot in a single call instead of `load_assembly` + tool.
 
 ```jsonc
 get_method({
@@ -158,11 +158,11 @@ The three result buckets partition the input: every entry appears in exactly one
 ### 3.3 Loop singular tools for N hotspots
 
 Earlier versions of this server shipped dedicated `*_batch` variants of `get_method`,
-`scan_method_il`, `find_callers` and `get_method_source`. They were dropped in v0.10:
+`get_method_il`, `find_callers` and `get_method_source`. They were dropped in v0.10:
 the xref / scan / PDB caches are already lazy and module-scoped, so issuing N
 singular calls amortises identically on the second call onwards, and the MCP-over-stdio
 transport cost of N requests is negligible. For producer hotspot dumps, loop the
-matching singular tool — `get_method`, `scan_method_il`, `find_callers`,
+matching singular tool — `get_method`, `get_method_il`, `find_callers`,
 `get_method_source` — and aggregate the results client-side.
 
 `decompile_method` was always single-call by design (heavy + cache-friendly only on
@@ -258,7 +258,7 @@ Tools that accept the §3.5 parameters: `get_method`, `find_callers`, and `list_
 
 `decompile_method` intentionally does **not** accept the generic args: ICSharpCode.Decompiler operates on `MethodDef`, not on closed instantiations, so it always emits the open C# (`T Echo(T value)`). The open form is the correct decompiler output — for a closed *signature* view, use `get_method` with `genericTypeArguments` / `genericMethodArguments` (or the `methodSpec` fast-path). Tracked in [issue #10](https://github.com/pedrosakuma/dotnet-assembly-mcp/issues/10) if demand arises for a header-substitution mode.
 
-`scan_method_il` and `get_method_source` do not accept the §3.5 parameters either: IL token references are invariant across instantiations (the IL of an open generic method is identical regardless of how it's invoked), and PDB sequence points anchor on the open `MethodDef`. Pass the closed args to `get_method` if you need a closed signature alongside the IL/source view.
+`get_method_il` (in all three formats — `raw`, `text`, `scan`) and `get_method_source` do not accept the §3.5 parameters either: IL token references are invariant across instantiations (the IL of an open generic method is identical regardless of how it's invoked), and PDB sequence points anchor on the open `MethodDef`. Pass the closed args to `get_method` if you need a closed signature alongside the IL/source view.
 
 #### Out of scope
 

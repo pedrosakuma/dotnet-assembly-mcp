@@ -1,3 +1,4 @@
+using DotnetAssemblyMcp.Core.Errors;
 using DotnetAssemblyMcp.Core.Identity;
 
 namespace DotnetAssemblyMcp.Core.Metadata;
@@ -270,6 +271,24 @@ public interface IMetadataIndex
     /// <c>docs/handoff-contract.md</c>.
     /// </remarks>
     NativeBodyResult GetNativeBodyRef(Guid moduleVersionId, int methodMetadataToken);
+
+    /// <summary>
+    /// Ensures the module identified by <paramref name="moduleVersionId"/> is loaded, using
+    /// <paramref name="assemblyPathHint"/> (or any previously registered path hint) when the
+    /// MVID is not yet known. Implements the §3.1 hint-with-MVID-check protocol: a hinted
+    /// path whose on-disk MVID differs from the request is rejected with
+    /// <see cref="ErrorKinds"/>.<c>MvidMismatch</c> — the path is a hint, never an override. Returns
+    /// <c>null</c> on success.
+    /// </summary>
+    AssemblyError? EnsureLoaded(Guid moduleVersionId, string? assemblyPathHint);
+
+    /// <summary>
+    /// Resolves a type by its case-sensitive full name (with <c>+</c> separating nested types)
+    /// to a <see cref="TypeSummary"/>. Direct lookup — does not page the TypeDef table from
+    /// the caller side. The module must be loaded; callers can pair this with
+    /// <see cref="EnsureLoaded"/> when starting from an (mvid, path) pair.
+    /// </summary>
+    FindTypeByNameResult FindTypeByFullName(Guid moduleVersionId, string typeFullName);
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>
@@ -294,4 +313,12 @@ public readonly record struct ProbeResult(Guid Mvid, AssemblyError? Error)
     public bool IsSuccess => Error is null;
     public static ProbeResult Ok(Guid mvid) => new(mvid, null);
     public static ProbeResult Fail(AssemblyError e) => new(Guid.Empty, e);
+}
+
+/// <summary>Result of <see cref="IMetadataIndex.FindTypeByFullName"/>.</summary>
+public readonly record struct FindTypeByNameResult(TypeSummary? Type, AssemblyError? Error)
+{
+    public bool IsSuccess => Type is not null;
+    public static FindTypeByNameResult Ok(TypeSummary t) => new(t, null);
+    public static FindTypeByNameResult Fail(AssemblyError e) => new(null, e);
 }

@@ -1,6 +1,6 @@
 # dotnet-assembly-mcp
 
-> **Status:** 24 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool`, Docker image, and self-contained single-file binaries. Latest release: [`v0.11.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases/tag/v0.11.0) — `find_event_references` + cross-module `list_derived_types` (subclasses & interface implementers).
+> **Status:** 20 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool`, Docker image, and self-contained single-file binaries. Latest release: [`v0.14.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases) — collapsed `find_member_references` (field/property/event in one tool) and `get_method_il(format=raw|text|scan)` (issue #83, breaking).
 
 An **MCP server** for *static* navigation of compiled .NET assemblies — types, methods, attributes, signatures, IL, cross-references, and on-demand decompilation — designed as a **token-efficient alternative to feeding source code into an LLM context**.
 
@@ -13,8 +13,8 @@ This server lets the agent **drill down**:
 ```
 load_assembly(path)                  →  moduleVersionId + method count   (~30 tokens)
 get_method(mvid, token)              →  signature, attributes, IL size   (~30 tokens)
-get_method_il(mvid, token)           →  raw IL hex, instruction count    (~80 tokens)
-scan_method_il(mvid, token)          →  outbound calls / fields / types  (~150 tokens)
+get_method_il(mvid, token, format='raw')   →  raw IL hex, instruction count    (~80 tokens)
+get_method_il(mvid, token, format='scan')  →  outbound calls / fields / types  (~150 tokens)
 decompile_method(mvid, token)        →  C# body, hard-capped             (~200–500 tokens)
 find_callers(mvid, token)            →  reverse call graph (intra+cross) (~100 tokens)
 get_method_source(mvid, token)       →  PDB file/lines + SourceLink URL  (~40 tokens)
@@ -99,7 +99,7 @@ If the tool isn't on `PATH`, point `command` at the absolute path (e.g. `~/.dotn
 
 ## Tools
 
-All tools share the same response envelope (`summary`, `data`, `hints`, `error`); `hints` advertise the suggested next tool so an agent can chain without rediscovering the API. Cross-module xref tools (`find_callers`, `find_type_references`, `find_field_references`, `find_property_references`, `find_event_references`, `find_string_references`, `find_attribute_targets`, `list_derived_types`) all use the same matching convention: same-module hits by metadata token, cross-module hits by `(assembly simple name, type full name, member signature)` against the child module's `TypeRef` / `MemberRef` rows.
+All tools share the same response envelope (`summary`, `data`, `hints`, `error`); `hints` advertise the suggested next tool so an agent can chain without rediscovering the API. Cross-module xref tools (`find_callers`, `find_type_references`, `find_member_references`, `find_string_references`, `find_attribute_targets`, `list_derived_types`) all use the same matching convention: same-module hits by metadata token, cross-module hits by `(assembly simple name, type full name, member signature)` against the child module's `TypeRef` / `MemberRef` rows.
 
 ### Discovery & loading
 | Tool | Purpose |
@@ -124,9 +124,7 @@ All tools share the same response envelope (`summary`, `data`, `hints`, `error`)
 | Tool | Purpose |
 |---|---|
 | `get_method` | Resolve `(mvid, token)` to a method summary; accepts `genericTypeArguments` / `genericMethodArguments` for a closed signature view |
-| `get_method_il` | Raw IL bytes (hex), max-stack, instruction count |
-| `get_method_il_text` | ildasm-like textual IL listing (capped, LRU-cached) |
-| `scan_method_il` | Structured outbound references parsed from IL (calls, fields, types, strings) |
+| `get_method_il` | IL reader for a method, dispatched by `format`: `raw` (hex IL bytes + max-stack + counts), `text` (ildasm-style textual dump, capped + LRU-cached), `scan` (structured outbound references — calls, fields, types, strings) |
 | `decompile_method` | C# body via ICSharpCode.Decompiler (hard-capped, LRU-cached) |
 | `get_method_source` | PDB-resolved file/lines plus SourceLink URL (embedded PDB or sibling `.pdb`) |
 
@@ -135,9 +133,7 @@ All tools share the same response envelope (`summary`, `data`, `hints`, `error`)
 |---|---|
 | `find_callers` | Every method whose IL calls a given method; narrows by instantiation when `genericMethodArguments` is supplied |
 | `find_type_references` | Every site referencing a TypeDef (field/parameter/return/local types + `newobj` / `castclass` / `isinst` / `box` / `ldtoken` / generic args) |
-| `find_field_references` | Every method whose IL touches a field (six opcodes: `ldfld`/`ldsfld`/`stfld`/`stsfld`/`ldflda`/`ldsflda`), filterable by read/write/all |
-| `find_property_references` | Every call to a property's getter or setter, filterable by accessor |
-| `find_event_references` | Every call to an event's add/remove/raise accessor, filterable by accessor |
+| `find_member_references` | Inbound xref for a field, property, or event — dispatched by handle prefix (`f:` / `p:` / `e:`); `accessor` narrows property to getter/setter and event to add/remove/raise |
 | `find_string_references` | Every method whose IL emits `ldstr` for a given literal (exact / contains / regex) |
 | `find_attribute_targets` | Reverse custom-attribute index: every assembly/type/method/parameter/field/property/event bearing a given attribute |
 
@@ -150,7 +146,7 @@ Scope-disjoint from [`pedrosakuma/dotnet-diagnostics-mcp`](https://github.com/pe
    ──────────────────────             ──────────────────────
    list_dotnet_processes              load_assembly
    collect_cpu_sample        ──┐  ┌─→ get_method
-   collect_exceptions          │  │   get_method_il / scan_method_il
+   collect_exceptions          │  │   get_method_il (format='scan')
                                │  │   decompile_method
                                ▼  │   find_callers
                         (MethodIdentity)

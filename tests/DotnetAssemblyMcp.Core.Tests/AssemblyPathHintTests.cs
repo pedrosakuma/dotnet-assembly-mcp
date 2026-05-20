@@ -134,12 +134,15 @@ public sealed class AssemblyPathHintTests
         warmup.Dispose();
 
         var index = new MetadataIndex();
+        var disassembler = new IlDisassembler(index);
         var result = AssemblyTools.GetMethodIl(
-            index, mvid.ToString("D"), $"0x{token:X8}",
-            assemblyPathHint: SampleLibPath);
+            disassembler, index, mvid.ToString("D"), $"0x{token:X8}",
+            format: "raw", assemblyPathHint: SampleLibPath);
 
         result.IsError.Should().BeFalse(result.Summary);
-        result.Data!.IlSize.Should().BeGreaterThan(0);
+        result.Data!.Format.Should().Be(MethodIlFormat.Raw);
+        result.Data.Raw.Should().NotBeNull();
+        result.Data.Raw!.IlSize.Should().BeGreaterThan(0);
         index.Dispose();
     }
 
@@ -150,12 +153,15 @@ public sealed class AssemblyPathHintTests
         warmup.Dispose();
 
         var index = new MetadataIndex();
-        var result = AssemblyTools.ScanMethodIl(
-            index, mvid.ToString("D"), $"0x{token:X8}",
-            assemblyPathHint: SampleLibPath);
+        var disassembler = new IlDisassembler(index);
+        var result = AssemblyTools.GetMethodIl(
+            disassembler, index, mvid.ToString("D"), $"0x{token:X8}",
+            format: "scan", assemblyPathHint: SampleLibPath);
 
         result.IsError.Should().BeFalse(result.Summary);
-        result.Data!.InstructionCount.Should().BeGreaterThan(0);
+        result.Data!.Format.Should().Be(MethodIlFormat.Scan);
+        result.Data.Scan.Should().NotBeNull();
+        result.Data.Scan!.InstructionCount.Should().BeGreaterThan(0);
         index.Dispose();
     }
 

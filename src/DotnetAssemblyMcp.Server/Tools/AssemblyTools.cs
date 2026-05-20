@@ -39,7 +39,7 @@ public sealed class AssemblyTools
             return AssemblyResult.Fail<ModuleSummary>(
                 $"Failed to load '{path}': {result.Error!.Message}",
                 result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
         }
 
         var m = result.Module!;
@@ -242,7 +242,7 @@ public sealed class AssemblyTools
             return AssemblyResult.Fail<MethodSummary>(
                 "moduleVersionId is not a valid GUID.",
                 err,
-                ErrorRecoveryHint(err));
+                AssemblyErrorRecovery.For(err));
         }
 
         if (!TryParseToken(metadataToken, out var token))
@@ -251,19 +251,19 @@ public sealed class AssemblyTools
             return AssemblyResult.Fail<MethodSummary>(
                 "metadataToken is not a valid integer.",
                 err,
-                ErrorRecoveryHint(err));
+                AssemblyErrorRecovery.For(err));
         }
 
-        if (TryEnsureModuleLoaded(index, mvid, assemblyPathHint) is { } loadErr)
-            return AssemblyResult.Fail<MethodSummary>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+        if (index.EnsureLoaded(mvid, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<MethodSummary>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
 
         if (!TryParseGenericArgs(genericTypeArguments, nameof(genericTypeArguments), out var typeArgs, out var parseErr))
-            return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+            return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, AssemblyErrorRecovery.For(parseErr));
         if (!TryParseGenericArgs(genericMethodArguments, nameof(genericMethodArguments), out var methodArgs, out parseErr))
-            return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+            return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, AssemblyErrorRecovery.For(parseErr));
 
         if (!TryParseMethodSpec(methodSpecModuleVersionId, methodSpecMetadataToken, out var methodSpec, out parseErr))
-            return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+            return AssemblyResult.Fail<MethodSummary>(parseErr!.Message, parseErr, AssemblyErrorRecovery.For(parseErr));
 
         var identity = new MethodIdentity(
             mvid, token,
@@ -276,7 +276,7 @@ public sealed class AssemblyTools
         var result = index.Resolve(identity);
         if (!result.IsSuccess)
         {
-            return AssemblyResult.Fail<MethodSummary>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
+            return AssemblyResult.Fail<MethodSummary>(result.Error!.Message, result.Error, AssemblyErrorRecovery.For(result.Error));
         }
 
         var m = result.Method!;
@@ -356,7 +356,7 @@ public sealed class AssemblyTools
             return AssemblyResult.Fail<DecompiledMethod>(
                 "moduleVersionId is not a valid GUID.",
                 err,
-                ErrorRecoveryHint(err));
+                AssemblyErrorRecovery.For(err));
         }
         if (!TryParseToken(metadataToken, out var token))
         {
@@ -364,17 +364,17 @@ public sealed class AssemblyTools
             return AssemblyResult.Fail<DecompiledMethod>(
                 "metadataToken is not a valid integer.",
                 err,
-                ErrorRecoveryHint(err));
+                AssemblyErrorRecovery.For(err));
         }
 
-        if (TryEnsureModuleLoaded(index, mvid, assemblyPathHint) is { } loadErr)
-            return AssemblyResult.Fail<DecompiledMethod>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+        if (index.EnsureLoaded(mvid, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<DecompiledMethod>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
 
         var identity = new MethodIdentity(mvid, token);
         var result = decompiler.Decompile(identity, maxChars, cancellationToken);
         if (!result.IsSuccess)
         {
-            return AssemblyResult.Fail<DecompiledMethod>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
+            return AssemblyResult.Fail<DecompiledMethod>(result.Error!.Message, result.Error, AssemblyErrorRecovery.For(result.Error));
         }
 
         var d = result.Source!;
@@ -387,141 +387,116 @@ public sealed class AssemblyTools
                 new Dictionary<string, object?> { ["moduleVersionId"] = d.ModuleVersionId.ToString("D") }));
     }
 
+
     [McpServerTool(
-        Name = "get_method_il_text",
-        Title = "Get ildasm-like textual IL dump for a method",
+        Name = "get_method_il",
+        Title = "Read a method's IL (raw bytes, ildasm-style text, or outbound-reference scan)",
         Destructive = false,
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(
-        "Returns an ildasm-style textual dump of a single method's IL via " +
-        "ICSharpCode.Decompiler's ReflectionDisassembler. Operand tokens are resolved to " +
-        "readable names; cross-module MemberRefs render with an assembly hint " +
-        "(e.g. '[System.Runtime]System.Object::GetHashCode'). Capped server-side by " +
-        "maxLines (default 256, hard cap 4096) and LRU-cached by (mvid, token, maxLines). " +
-        "Sits between get_method_il (raw hex bytes) and decompile_method (C#): use this " +
-        "when prefixes (tail./volatile./unaligned.), box/unbox.any placement, or " +
-        "call-vs-callvirt dispatch matters. Generic methods rendered in open form, like " +
-        "decompile_method.")]
-    public static AssemblyResult<MethodIlText> GetMethodIlText(
+        "Collapsed IL reader — replaces v0.13's get_method_il + get_method_il_text + " +
+        "scan_method_il. The 'format' argument selects the projection: " +
+        "'raw' (default) returns hex-encoded IL bytes plus max-stack / EH-region / instruction " +
+        "counts (cheap; pair with maxBytes); " +
+        "'text' returns an ildasm-style textual dump via ICSharpCode.Decompiler's " +
+        "ReflectionDisassembler with operand tokens resolved to readable names — useful when " +
+        "prefixes (tail./volatile./unaligned.), box/unbox.any placement, or call-vs-callvirt " +
+        "dispatch matters (pair with maxLines; cached); " +
+        "'scan' walks the IL and returns structural outbound references (called methods, " +
+        "accessed fields, used types, string literals) — the building block for cross-reference " +
+        "queries without paying decompilation cost. The returned envelope carries the chosen " +
+        "format plus exactly one populated payload field (raw / text / scan); the other two " +
+        "are null. Generic methods are rendered in their open form for 'text'; IL token " +
+        "references in 'scan' are invariant across closed instantiations.")]
+    public static AssemblyResult<MethodIlResult> GetMethodIl(
         IIlDisassembler disassembler,
         IMetadataIndex index,
         [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
         [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Optional cap on output lines. Pass 0 for the server default (256). Hard cap 4096.")] int maxLines = 0,
+        [Description("Projection: 'raw' (default) for hex IL bytes, 'text' for an ildasm-style textual dump, or 'scan' for outbound-reference extraction.")] string format = "raw",
+        [Description("Used by format='raw' only. Optional cap on raw IL bytes encoded in the response. Pass 0 for the server default (4 KiB).")] int maxBytes = 0,
+        [Description("Used by format='text' only. Optional cap on output lines. Pass 0 for the server default (256). Hard cap 4096.")] int maxLines = 0,
         [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
         CancellationToken cancellationToken = default)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
-            return AssemblyResult.Fail<MethodIlText>(err!.Message, err, ErrorRecoveryHint(err));
+            return AssemblyResult.Fail<MethodIlResult>(err!.Message, err, AssemblyErrorRecovery.For(err));
 
-        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
-            return AssemblyResult.Fail<MethodIlText>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+        MethodIlFormat fmt;
+        if (string.IsNullOrEmpty(format) || string.Equals(format, "raw", StringComparison.OrdinalIgnoreCase)) fmt = MethodIlFormat.Raw;
+        else if (string.Equals(format, "text", StringComparison.OrdinalIgnoreCase)) fmt = MethodIlFormat.Text;
+        else if (string.Equals(format, "scan", StringComparison.OrdinalIgnoreCase)) fmt = MethodIlFormat.Scan;
+        else
+        {
+            var argErr = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"format must be 'raw', 'text', or 'scan' (got '{format}').");
+            return AssemblyResult.Fail<MethodIlResult>(argErr.Message, argErr);
+        }
 
-        var result = disassembler.Disassemble(identity, maxLines, cancellationToken);
-        if (!result.IsSuccess)
-            return AssemblyResult.Fail<MethodIlText>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
+        if (index.EnsureLoaded(identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<MethodIlResult>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
 
-        var t = result.Text!;
-        var prefix = t.CacheHit ? "[cache hit] " : string.Empty;
-        var suffix = t.Truncated ? $" — truncated at {t.LineCount} lines" : string.Empty;
-        return AssemblyResult.Ok(
-            t,
-            $"{prefix}{t.TypeFullName}.{t.MethodName} — {t.InstructionCount} IL instruction(s), {t.LineCount} line(s){suffix}.",
-            new NextActionHint("decompile_method", "Read the reconstructed C# if the IL is hard to follow.",
-                new Dictionary<string, object?>
-                {
-                    ["moduleVersionId"] = t.ModuleVersionId.ToString("D"),
-                    ["metadataToken"] = $"0x{t.MetadataToken:X8}",
-                }));
-    }
-
-    [McpServerTool(
-        Name = "get_method_il",
-        Title = "Get raw IL of a method",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Returns the raw IL bytes of a method (hex-encoded, capped by maxBytes; default " +
-        "4 KiB) plus max-stack, exception region count and instruction count. Cheaper than " +
-        "decompile_method when you only need to confirm the method exists with a non-empty " +
-        "body or to count instructions.")]
-    public static AssemblyResult<IlMethodBody> GetMethodIl(
-        IMetadataIndex index,
-        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
-        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Optional cap on raw IL bytes encoded in the response. Pass 0 for the server default (4 KiB).")] int maxBytes = 0,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
-        CancellationToken cancellationToken = default)
-    {
-        if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
-            return AssemblyResult.Fail<IlMethodBody>(err!.Message, err, ErrorRecoveryHint(err));
-
-        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
-            return AssemblyResult.Fail<IlMethodBody>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
-
-        var result = index.GetIlBody(identity, maxBytes, cancellationToken);
-        if (!result.IsSuccess)
-            return AssemblyResult.Fail<IlMethodBody>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
-
-        var b = result.Body!;
-        var suffix = b.IlTruncated ? $" (hex truncated at {b.IlHex.Length / 2} bytes)" : string.Empty;
-        return AssemblyResult.Ok(
-            b,
-            $"IL body: {b.IlSize} bytes, {b.InstructionCount} instructions, maxStack={b.MaxStack}, {b.ExceptionRegionCount} EH region(s){suffix}.",
-            new NextActionHint("scan_method_il", "Extract outbound calls / fields / types from the same method.",
-                new Dictionary<string, object?>
-                {
-                    ["moduleVersionId"] = b.ModuleVersionId.ToString("D"),
-                    ["metadataToken"] = $"0x{b.MetadataToken:X8}",
-                }));
-    }
-
-    [McpServerTool(
-        Name = "scan_method_il",
-        Title = "Scan a method's IL for outbound references",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Walks the method's IL and returns its structural outbound references: called methods, " +
-        "accessed fields, used types and string literals — each with its raw token and a " +
-        "best-effort textual rendering. Designed as the building block for cross-reference " +
-        "queries without paying the cost of full decompilation. " +
-        "Note: this tool does not accept §3.5 generic-instantiation arguments — IL token " +
-        "references are invariant across instantiations of an open generic method. Pass the " +
-        "closed args to get_method if you need a closed signature alongside the IL scan.")]
-    public static AssemblyResult<IlScanResult> ScanMethodIl(
-        IMetadataIndex index,
-        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
-        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
-        CancellationToken cancellationToken = default)
-    {
-        if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
-            return AssemblyResult.Fail<IlScanResult>(err!.Message, err, ErrorRecoveryHint(err));
-
-        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
-            return AssemblyResult.Fail<IlScanResult>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
-
-        var result = index.ScanIl(identity, cancellationToken);
-        if (!result.IsSuccess)
-            return AssemblyResult.Fail<IlScanResult>(result.Error!.Message, result.Error, ErrorRecoveryHint(result.Error));
-
-        var s = result.Scan!;
-        return AssemblyResult.Ok(
-            s,
-            $"{s.InstructionCount} instructions: {s.Calls.Count} call(s), {s.Fields.Count} field ref(s), {s.Types.Count} type ref(s), {s.Strings.Count} string literal(s).",
-            new NextActionHint("decompile_method", "Read the C# source if the call list is ambiguous.",
-                new Dictionary<string, object?>
-                {
-                    ["moduleVersionId"] = s.ModuleVersionId.ToString("D"),
-                    ["metadataToken"] = $"0x{s.MetadataToken:X8}",
-                }));
+        switch (fmt)
+        {
+            case MethodIlFormat.Raw:
+            {
+                var result = index.GetIlBody(identity, maxBytes, cancellationToken);
+                if (!result.IsSuccess)
+                    return AssemblyResult.Fail<MethodIlResult>(result.Error!.Message, result.Error,
+                        AssemblyErrorRecovery.For(result.Error));
+                var b = result.Body!;
+                var suffix = b.IlTruncated ? $" (hex truncated at {b.IlHex.Length / 2} bytes)" : string.Empty;
+                return AssemblyResult.Ok(
+                    new MethodIlResult(MethodIlFormat.Raw, Raw: b),
+                    $"IL body: {b.IlSize} bytes, {b.InstructionCount} instructions, maxStack={b.MaxStack}, {b.ExceptionRegionCount} EH region(s){suffix}.",
+                    new NextActionHint("get_method_il", "Switch to format='scan' to extract outbound calls / fields / types from the same method.",
+                        new Dictionary<string, object?>
+                        {
+                            ["moduleVersionId"] = b.ModuleVersionId.ToString("D"),
+                            ["metadataToken"] = $"0x{b.MetadataToken:X8}",
+                            ["format"] = "scan",
+                        }));
+            }
+            case MethodIlFormat.Text:
+            {
+                var result = disassembler.Disassemble(identity, maxLines, cancellationToken);
+                if (!result.IsSuccess)
+                    return AssemblyResult.Fail<MethodIlResult>(result.Error!.Message, result.Error,
+                        AssemblyErrorRecovery.For(result.Error));
+                var t = result.Text!;
+                var prefix = t.CacheHit ? "[cache hit] " : string.Empty;
+                var suffix = t.Truncated ? $" — truncated at {t.LineCount} lines" : string.Empty;
+                return AssemblyResult.Ok(
+                    new MethodIlResult(MethodIlFormat.Text, Text: t),
+                    $"{prefix}{t.TypeFullName}.{t.MethodName} — {t.InstructionCount} IL instruction(s), {t.LineCount} line(s){suffix}.",
+                    new NextActionHint("decompile_method", "Read the reconstructed C# if the IL is hard to follow.",
+                        new Dictionary<string, object?>
+                        {
+                            ["moduleVersionId"] = t.ModuleVersionId.ToString("D"),
+                            ["metadataToken"] = $"0x{t.MetadataToken:X8}",
+                        }));
+            }
+            case MethodIlFormat.Scan:
+            default:
+            {
+                var result = index.ScanIl(identity, cancellationToken);
+                if (!result.IsSuccess)
+                    return AssemblyResult.Fail<MethodIlResult>(result.Error!.Message, result.Error,
+                        AssemblyErrorRecovery.For(result.Error));
+                var s = result.Scan!;
+                return AssemblyResult.Ok(
+                    new MethodIlResult(MethodIlFormat.Scan, Scan: s),
+                    $"{s.InstructionCount} instructions: {s.Calls.Count} call(s), {s.Fields.Count} field ref(s), {s.Types.Count} type ref(s), {s.Strings.Count} string literal(s).",
+                    new NextActionHint("decompile_method", "Read the C# source if the call list is ambiguous.",
+                        new Dictionary<string, object?>
+                        {
+                            ["moduleVersionId"] = s.ModuleVersionId.ToString("D"),
+                            ["metadataToken"] = $"0x{s.MetadataToken:X8}",
+                        }));
+            }
+        }
     }
 
     [McpServerTool(
@@ -548,7 +523,7 @@ public sealed class AssemblyTools
         [Description("Max types per page (default 50, capped at 500).")] int pageSize = ListTypesQuery.DefaultPageSize)
     {
         if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var loadErr))
-            return AssemblyResult.Fail<ListTypesPage>(loadErr!.Message, loadErr, ErrorRecoveryHint(loadErr));
+            return AssemblyResult.Fail<ListTypesPage>(loadErr!.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
 
         TypeKind? kindFilter = null;
         if (!string.IsNullOrWhiteSpace(kind))
@@ -573,7 +548,7 @@ public sealed class AssemblyTools
         var result = index.ListTypes(mvid, query);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<ListTypesPage>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var p = result.Page!;
         var summary = p.Types.Count == 0
@@ -626,12 +601,12 @@ public sealed class AssemblyTools
         [Description("Either the MVID GUID (D format) of a loaded module, or an absolute path to a .NET PE assembly (auto-loaded).")] string mvidOrPath)
     {
         if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var loadErr))
-            return AssemblyResult.Fail<ListAssemblyReferencesPage>(loadErr!.Message, loadErr, ErrorRecoveryHint(loadErr));
+            return AssemblyResult.Fail<ListAssemblyReferencesPage>(loadErr!.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
 
         var result = index.ListAssemblyReferences(mvid);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<ListAssemblyReferencesPage>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var p = result.Page!;
         var summary = p.References.Count == 0
@@ -691,13 +666,13 @@ public sealed class AssemblyTools
         if (!string.IsNullOrEmpty(mvidOrPath))
         {
             if (!TryResolveModuleId(index, mvidOrPath, out mvidFilter, out var loadErr))
-                return AssemblyResult.Fail<FindStringReferencesResult>(loadErr!.Message, loadErr, ErrorRecoveryHint(loadErr));
+                return AssemblyResult.Fail<FindStringReferencesResult>(loadErr!.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
         }
 
         var result = index.FindStringReferences(query, mode, mvidFilter, maxHits, cancellationToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<FindStringReferencesResult>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var r = result.Result!;
         var truncTag = r.Truncated ? " (truncated)" : "";
@@ -760,13 +735,13 @@ public sealed class AssemblyTools
         if (!string.IsNullOrEmpty(mvidOrPath))
         {
             if (!TryResolveModuleId(index, mvidOrPath, out mvidFilter, out var loadErr))
-                return AssemblyResult.Fail<FindAttributeTargetsResult>(loadErr!.Message, loadErr, ErrorRecoveryHint(loadErr));
+                return AssemblyResult.Fail<FindAttributeTargetsResult>(loadErr!.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
         }
 
         var result = index.FindAttributeTargets(attributeTypeFullName, mvidFilter, kindFilter, maxHits, cancellationToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<FindAttributeTargetsResult>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var r = result.Result!;
         var truncTag = r.Truncated ? " (truncated)" : "";
@@ -777,187 +752,151 @@ public sealed class AssemblyTools
             new NextActionHint("list_attributes", "Inspect the decoded arguments of a specific attribute occurrence."));
     }
 
+
     [McpServerTool(
-        Name = "find_field_references",
-        Title = "Find every method that reads, writes, or takes the address of a given field",
+        Name = "find_member_references",
+        Title = "Find references to a field, property, or event (collapsed; dispatched by handle prefix)",
         Destructive = false,
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(
-        "Reverse field-access lookup: returns every method whose IL touches the field identified " +
-        "by 'fieldHandle' ('f:<mvid>:0x<fieldToken>') through one of the six field opcodes — " +
-        "ldfld / ldsfld (read), stfld / stsfld (write), ldflda / ldsflda (address). Same-module " +
-        "hits use FieldDef tokens; cross-module hits match via assembly + declaring-type-fullname " +
-        "+ field-name. 'mode' filters by access kind ('all' default, 'read' (incl. address), or " +
-        "'write'). Per-module field-access index is built lazily on first call and invalidated " +
-        "with the xref cache on file change. Result is capped at 'maxHits' (default 1000, hard " +
-        "cap 10000). Typical use: 'who writes to this static cache field?' / 'who depends on the " +
-        "value of FeatureFlags.X?'.")]
-    public static AssemblyResult<FindFieldReferencesResult> FindFieldReferences(
+        "Reverse member-access lookup, collapsed from the v0.13 trio of " +
+        "find_field_references / find_property_references / find_event_references. The kind " +
+        "is dispatched from the handle prefix: 'f:<mvid>:0x<fieldToken>' (field — six opcodes " +
+        "ldfld/ldsfld/stfld/stsfld/ldflda/ldsflda), 'p:<mvid>:0x<propertyToken>' (property — " +
+        "every call to its getter/setter), 'e:<mvid>:0x<eventToken>' (event — every call to " +
+        "its add/remove/raise accessor). The 'accessor' filter applies to properties and " +
+        "events only: 'all' (default) / 'getter' / 'setter' for properties, 'all' (default) / " +
+        "'add' / 'remove' / 'raise' for events; it is ignored for fields. Same-module hits " +
+        "use metadata tokens; cross-module hits use the existing call/field-access xref " +
+        "indices. Result is capped at 'maxHits' (default 1000, hard cap 10000). The returned " +
+        "envelope carries a 'kind' discriminator plus exactly one populated payload field " +
+        "(field / property / event); the other two are null.")]
+    public static AssemblyResult<FindMemberReferencesResult> FindMemberReferences(
         IMetadataIndex index,
-        [Description("Field handle 'f:<mvid>:0x<fieldToken>' (as returned by list_fields / find_attribute_targets).")] string fieldHandle,
-        [Description("Optional access mode filter: 'all' (default), 'read' (ldfld/ldsfld + ldflda/ldsflda), or 'write' (stfld/stsfld).")] string? mode = null,
+        [Description("Member handle: 'f:<mvid>:0x<fieldToken>' for a field, 'p:<mvid>:0x<propertyToken>' for a property, or 'e:<mvid>:0x<eventToken>' for an event.")] string memberHandle,
+        [Description("Optional accessor filter — applies to property/event handles only and is ignored for field handles. Property: 'all' (default) / 'getter' / 'setter'. Event: 'all' (default) / 'add' / 'remove' / 'raise'.")] string? accessor = null,
         [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(fieldHandle))
+        if (string.IsNullOrEmpty(memberHandle))
         {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument, "fieldHandle is required.");
-            return AssemblyResult.Fail<FindFieldReferencesResult>(err.Message, err);
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, "memberHandle is required.");
+            return AssemblyResult.Fail<FindMemberReferencesResult>(err.Message, err);
         }
-        if (!HandleSyntax.TryParseField(fieldHandle, out var mvid, out var token))
+        if (!HandleSyntax.TryParseAny(memberHandle, out var kind, out var mvid, out var token, out _))
         {
             var err = new AssemblyError(ErrorKinds.InvalidArgument,
-                $"could not parse '{fieldHandle}' as 'f:<mvid>:0x<fieldToken>'.");
-            return AssemblyResult.Fail<FindFieldReferencesResult>(err.Message, err);
+                $"could not parse memberHandle '{memberHandle}'. Expected 'f:<mvid>:0x<fieldToken>', "
+                + "'p:<mvid>:0x<propertyToken>', or 'e:<mvid>:0x<eventToken>'.");
+            return AssemblyResult.Fail<FindMemberReferencesResult>(err.Message, err);
         }
 
-        var accessMode = FieldAccessMode.All;
-        if (!string.IsNullOrEmpty(mode))
+        switch (kind)
         {
-            if (string.Equals(mode, "all", StringComparison.OrdinalIgnoreCase)) accessMode = FieldAccessMode.All;
-            else if (string.Equals(mode, "read", StringComparison.OrdinalIgnoreCase)) accessMode = FieldAccessMode.Read;
-            else if (string.Equals(mode, "write", StringComparison.OrdinalIgnoreCase)) accessMode = FieldAccessMode.Write;
-            else
-            {
+            case HandleKind.Field:
+                return DispatchField(index, mvid, token, accessor, memberHandle, maxHits, cancellationToken);
+            case HandleKind.Property:
+                return DispatchProperty(index, mvid, token, accessor, memberHandle, maxHits, cancellationToken);
+            case HandleKind.Event:
+                return DispatchEvent(index, mvid, token, accessor, memberHandle, maxHits, cancellationToken);
+            default:
                 var err = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"mode must be 'all', 'read', or 'write' (got '{mode}').");
-                return AssemblyResult.Fail<FindFieldReferencesResult>(err.Message, err);
-            }
+                    $"memberHandle '{memberHandle}' is a {kind} handle; find_member_references accepts only field (f:), property (p:), or event (e:) handles.");
+                return AssemblyResult.Fail<FindMemberReferencesResult>(err.Message, err);
+        }
+    }
+
+    private static AssemblyResult<FindMemberReferencesResult> DispatchField(
+        IMetadataIndex index, Guid mvid, int token, string? accessor, string memberHandle,
+        int maxHits, CancellationToken ct)
+    {
+        if (!string.IsNullOrEmpty(accessor) && !string.Equals(accessor, "all", StringComparison.OrdinalIgnoreCase))
+        {
+            // Field handles ignore the accessor argument; reject anything other than 'all' so a
+            // typo (e.g. accessor=getter on a field) doesn't silently look like a no-op.
+            var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"accessor='{accessor}' is not valid for a field handle. Omit accessor or pass 'all'.");
+            return AssemblyResult.Fail<FindMemberReferencesResult>(err.Message, err);
         }
 
-        var result = index.FindFieldReferences(mvid, token, accessMode, maxHits, cancellationToken);
+        var result = index.FindFieldReferences(mvid, token, FieldAccessMode.All, maxHits, ct);
         if (!result.IsSuccess)
-            return AssemblyResult.Fail<FindFieldReferencesResult>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+            return AssemblyResult.Fail<FindMemberReferencesResult>(result.Error!.Message, result.Error,
+                AssemblyErrorRecovery.For(result.Error));
 
         var r = result.Result!;
+        var envelope = new FindMemberReferencesResult(MemberHandleKind.Field, Field: r);
         var summary = r.References.Count == 0
             ? $"No references to {r.TargetHandle} across {r.ModulesSearched} module(s)."
             : $"{r.References.Count} reference(s) to {r.TargetHandle} across {r.ModulesSearched} module(s).";
-        return AssemblyResult.Ok(r, summary,
+        return AssemblyResult.Ok(envelope, summary,
             new NextActionHint("get_method", "Inspect a specific caller around the field-access offset."));
     }
 
-    [McpServerTool(
-        Name = "find_property_references",
-        Title = "Find every method that calls a given property's getter or setter",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Reverse property-access lookup: resolves 'propertyHandle' ('p:<mvid>:0x<propertyToken>') " +
-        "to its getter / setter MethodDefs and reuses the call xref to list every invocation, " +
-        "tagged with which accessor was hit. 'accessor' filters the result ('all' default, " +
-        "'getter', or 'setter'). Same-module and cross-module hits both supported. Typical use: " +
-        "'who reads CurrentUser.Name?' / 'every assignment to Service.IsEnabled'.")]
-    public static AssemblyResult<FindPropertyReferencesResult> FindPropertyReferences(
-        IMetadataIndex index,
-        [Description("Property handle 'p:<mvid>:0x<propertyToken>'.")] string propertyHandle,
-        [Description("Optional accessor filter: 'all' (default), 'getter', or 'setter'.")] string? accessor = null,
-        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
-        CancellationToken cancellationToken = default)
+    private static AssemblyResult<FindMemberReferencesResult> DispatchProperty(
+        IMetadataIndex index, Guid mvid, int token, string? accessor, string memberHandle,
+        int maxHits, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(propertyHandle))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument, "propertyHandle is required.");
-            return AssemblyResult.Fail<FindPropertyReferencesResult>(err.Message, err);
-        }
-        if (!HandleSyntax.TryParseProperty(propertyHandle, out var mvid, out var token))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument,
-                $"could not parse '{propertyHandle}' as 'p:<mvid>:0x<propertyToken>'.");
-            return AssemblyResult.Fail<FindPropertyReferencesResult>(err.Message, err);
-        }
-
-        var accessorFilter = PropertyAccessorFilter.All;
+        var filter = PropertyAccessorFilter.All;
         if (!string.IsNullOrEmpty(accessor))
         {
-            if (string.Equals(accessor, "all", StringComparison.OrdinalIgnoreCase)) accessorFilter = PropertyAccessorFilter.All;
-            else if (string.Equals(accessor, "getter", StringComparison.OrdinalIgnoreCase)) accessorFilter = PropertyAccessorFilter.GetterOnly;
-            else if (string.Equals(accessor, "setter", StringComparison.OrdinalIgnoreCase)) accessorFilter = PropertyAccessorFilter.SetterOnly;
+            if (string.Equals(accessor, "all", StringComparison.OrdinalIgnoreCase)) filter = PropertyAccessorFilter.All;
+            else if (string.Equals(accessor, "getter", StringComparison.OrdinalIgnoreCase)) filter = PropertyAccessorFilter.GetterOnly;
+            else if (string.Equals(accessor, "setter", StringComparison.OrdinalIgnoreCase)) filter = PropertyAccessorFilter.SetterOnly;
             else
             {
                 var err = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"accessor must be 'all', 'getter', or 'setter' (got '{accessor}').");
-                return AssemblyResult.Fail<FindPropertyReferencesResult>(err.Message, err);
+                    $"accessor must be 'all', 'getter', or 'setter' for a property handle (got '{accessor}').");
+                return AssemblyResult.Fail<FindMemberReferencesResult>(err.Message, err);
             }
         }
 
-        var result = index.FindPropertyReferences(mvid, token, accessorFilter, maxHits, cancellationToken);
+        var result = index.FindPropertyReferences(mvid, token, filter, maxHits, ct);
         if (!result.IsSuccess)
-            return AssemblyResult.Fail<FindPropertyReferencesResult>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+            return AssemblyResult.Fail<FindMemberReferencesResult>(result.Error!.Message, result.Error,
+                AssemblyErrorRecovery.For(result.Error));
 
         var r = result.Result!;
+        var envelope = new FindMemberReferencesResult(MemberHandleKind.Property, Property: r);
         var summary = r.References.Count == 0
             ? $"No references to {r.TargetHandle} across {r.ModulesSearched} module(s)."
             : $"{r.References.Count} reference(s) to {r.TargetHandle} across {r.ModulesSearched} module(s).";
-        return AssemblyResult.Ok(r, summary,
+        return AssemblyResult.Ok(envelope, summary,
             new NextActionHint("get_method", "Inspect a specific caller for context."));
     }
 
-    [McpServerTool(
-        Name = "find_event_references",
-        Title = "Find every method that subscribes, unsubscribes, or raises a given event",
-        Destructive = false,
-        ReadOnly = true,
-        Idempotent = true,
-        UseStructuredContent = true)]
-    [Description(
-        "Reverse event-accessor lookup: resolves 'eventHandle' ('e:<mvid>:0x<eventToken>') " +
-        "to its adder / remover / raiser MethodDefs and reuses the call xref to list every " +
-        "invocation, tagged with which accessor was hit. 'accessor' filters the result " +
-        "('all' default, 'add', 'remove', or 'raise'). Same-module and cross-module hits both " +
-        "supported. Typical use: 'who subscribes to Service.OnTick?' / 'every handler attached " +
-        "to AppDomain.UnhandledException' / pairing with dotnet-diagnostics-mcp's delegate-target " +
-        "view to root-cause 'event handler never unsubscribed' leaks.")]
-    public static AssemblyResult<FindEventReferencesResult> FindEventReferences(
-        IMetadataIndex index,
-        [Description("Event handle 'e:<mvid>:0x<eventToken>' (as returned by list_members kind=Event).")] string eventHandle,
-        [Description("Optional accessor filter: 'all' (default), 'add', 'remove', or 'raise'.")] string? accessor = null,
-        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
-        CancellationToken cancellationToken = default)
+    private static AssemblyResult<FindMemberReferencesResult> DispatchEvent(
+        IMetadataIndex index, Guid mvid, int token, string? accessor, string memberHandle,
+        int maxHits, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(eventHandle))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument, "eventHandle is required.");
-            return AssemblyResult.Fail<FindEventReferencesResult>(err.Message, err);
-        }
-        if (!HandleSyntax.TryParseEvent(eventHandle, out var mvid, out var token))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument,
-                $"could not parse '{eventHandle}' as 'e:<mvid>:0x<eventToken>'.");
-            return AssemblyResult.Fail<FindEventReferencesResult>(err.Message, err);
-        }
-
-        var accessorFilter = EventAccessorFilter.All;
+        var filter = EventAccessorFilter.All;
         if (!string.IsNullOrEmpty(accessor))
         {
-            if (string.Equals(accessor, "all", StringComparison.OrdinalIgnoreCase)) accessorFilter = EventAccessorFilter.All;
-            else if (string.Equals(accessor, "add", StringComparison.OrdinalIgnoreCase)) accessorFilter = EventAccessorFilter.AdderOnly;
-            else if (string.Equals(accessor, "remove", StringComparison.OrdinalIgnoreCase)) accessorFilter = EventAccessorFilter.RemoverOnly;
-            else if (string.Equals(accessor, "raise", StringComparison.OrdinalIgnoreCase)) accessorFilter = EventAccessorFilter.RaiserOnly;
+            if (string.Equals(accessor, "all", StringComparison.OrdinalIgnoreCase)) filter = EventAccessorFilter.All;
+            else if (string.Equals(accessor, "add", StringComparison.OrdinalIgnoreCase)) filter = EventAccessorFilter.AdderOnly;
+            else if (string.Equals(accessor, "remove", StringComparison.OrdinalIgnoreCase)) filter = EventAccessorFilter.RemoverOnly;
+            else if (string.Equals(accessor, "raise", StringComparison.OrdinalIgnoreCase)) filter = EventAccessorFilter.RaiserOnly;
             else
             {
                 var err = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"accessor must be 'all', 'add', 'remove', or 'raise' (got '{accessor}').");
-                return AssemblyResult.Fail<FindEventReferencesResult>(err.Message, err);
+                    $"accessor must be 'all', 'add', 'remove', or 'raise' for an event handle (got '{accessor}').");
+                return AssemblyResult.Fail<FindMemberReferencesResult>(err.Message, err);
             }
         }
 
-        var result = index.FindEventReferences(mvid, token, accessorFilter, maxHits, cancellationToken);
+        var result = index.FindEventReferences(mvid, token, filter, maxHits, ct);
         if (!result.IsSuccess)
-            return AssemblyResult.Fail<FindEventReferencesResult>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+            return AssemblyResult.Fail<FindMemberReferencesResult>(result.Error!.Message, result.Error,
+                AssemblyErrorRecovery.For(result.Error));
 
         var r = result.Result!;
+        var envelope = new FindMemberReferencesResult(MemberHandleKind.Event, Event: r);
         var summary = r.References.Count == 0
             ? $"No references to {r.TargetHandle} across {r.ModulesSearched} module(s)."
             : $"{r.References.Count} reference(s) to {r.TargetHandle} across {r.ModulesSearched} module(s).";
-        return AssemblyResult.Ok(r, summary,
+        return AssemblyResult.Ok(envelope, summary,
             new NextActionHint("get_method", "Inspect a specific subscriber for context."));
     }
 
@@ -990,7 +929,7 @@ public sealed class AssemblyTools
             // (use list_types to discover a real handle) so we still prefer the centralized helper.
             var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
                 ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
-                : ErrorRecoveryHint(resolveErr);
+                : AssemblyErrorRecovery.For(resolveErr);
             return AssemblyResult.Fail<ListMethodsPage>(resolveErr.Message, resolveErr, resolveHint);
         }
 
@@ -1002,7 +941,7 @@ public sealed class AssemblyTools
         var result = index.ListMethods(mvid, typeToken, query);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<ListMethodsPage>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var p = result.Page!;
         var summary = p.Methods.Count == 0
@@ -1063,13 +1002,13 @@ public sealed class AssemblyTools
         CancellationToken cancellationToken = default)
     {
         if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var resolveErr))
-            return AssemblyResult.Fail<FindMethodPage>(resolveErr!.Message, resolveErr, ErrorRecoveryHint(resolveErr));
+            return AssemblyResult.Fail<FindMethodPage>(resolveErr!.Message, resolveErr, AssemblyErrorRecovery.For(resolveErr));
 
         var query = new FindMethodQuery(namePattern, signatureContains, cursor, pageSize);
         var result = index.FindMethod(mvid, query, cancellationToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<FindMethodPage>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var p = result.Page!;
         var summary = p.Matches.Count == 0
@@ -1136,17 +1075,17 @@ public sealed class AssemblyTools
         CancellationToken cancellationToken = default)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
-            return AssemblyResult.Fail<FindCallersResult>(err!.Message, err, ErrorRecoveryHint(err));
+            return AssemblyResult.Fail<FindCallersResult>(err!.Message, err, AssemblyErrorRecovery.For(err));
 
-        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
-            return AssemblyResult.Fail<FindCallersResult>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+        if (index.EnsureLoaded(identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<FindCallersResult>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
 
         if (!TryParseGenericArgs(genericTypeArguments, nameof(genericTypeArguments), out var typeArgs, out var parseErr))
-            return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+            return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, AssemblyErrorRecovery.For(parseErr));
         if (!TryParseGenericArgs(genericMethodArguments, nameof(genericMethodArguments), out var methodArgs, out parseErr))
-            return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+            return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, AssemblyErrorRecovery.For(parseErr));
         if (!TryParseMethodSpec(methodSpecModuleVersionId, methodSpecMetadataToken, out var methodSpec, out parseErr))
-            return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+            return AssemblyResult.Fail<FindCallersResult>(parseErr!.Message, parseErr, AssemblyErrorRecovery.For(parseErr));
 
         identity = identity with
         {
@@ -1158,7 +1097,7 @@ public sealed class AssemblyTools
         var result = index.FindCallers(identity, cancellationToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<FindCallersResult>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var r = result.Result!;
         var cacheTag = r.FromCache ? " (cached)" : " (built)";
@@ -1204,17 +1143,17 @@ public sealed class AssemblyTools
         {
             var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
                 ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
-                : ErrorRecoveryHint(resolveErr);
+                : AssemblyErrorRecovery.For(resolveErr);
             return AssemblyResult.Fail<FindTypeReferencesResult>(resolveErr.Message, resolveErr, resolveHint);
         }
 
-        if (TryEnsureModuleLoaded(index, mvid, assemblyPathHint) is { } loadErr)
-            return AssemblyResult.Fail<FindTypeReferencesResult>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+        if (index.EnsureLoaded(mvid, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<FindTypeReferencesResult>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
 
         var result = index.FindTypeReferences(mvid, typeToken, cancellationToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<FindTypeReferencesResult>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var r = result.Result!;
         var cacheTag = r.FromCache ? " (cached)" : " (built)";
@@ -1261,16 +1200,16 @@ public sealed class AssemblyTools
         CancellationToken cancellationToken = default)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
-            return AssemblyResult.Fail<MethodSourceLocation>(err!.Message, err, ErrorRecoveryHint(err));
+            return AssemblyResult.Fail<MethodSourceLocation>(err!.Message, err, AssemblyErrorRecovery.For(err));
 
-        if (TryEnsureModuleLoaded(index, identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
-            return AssemblyResult.Fail<MethodSourceLocation>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+        if (index.EnsureLoaded(identity.ModuleVersionId, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<MethodSourceLocation>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
 
         cancellationToken.ThrowIfCancellationRequested();
         var result = index.GetMethodSource(identity);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<MethodSourceLocation>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var loc = result.Location!;
         if (loc.Found)
@@ -1325,10 +1264,10 @@ public sealed class AssemblyTools
         [Description("Max attributes per page (default 50, capped at 500).")] int pageSize = ListAttributesQuery.DefaultPageSize)
     {
         if (!TryParseAttributeTarget(target, out var parsed, out var parseErr))
-            return AssemblyResult.Fail<ListAttributesPage>(parseErr!.Message, parseErr, ErrorRecoveryHint(parseErr));
+            return AssemblyResult.Fail<ListAttributesPage>(parseErr!.Message, parseErr, AssemblyErrorRecovery.For(parseErr));
 
-        if (TryEnsureModuleLoaded(index, parsed.ModuleVersionId, assemblyPathHint: null) is { } loadErr)
-            return AssemblyResult.Fail<ListAttributesPage>(loadErr.Message, loadErr, ErrorRecoveryHint(loadErr));
+        if (index.EnsureLoaded(parsed.ModuleVersionId, assemblyPathHint: null) is { } loadErr)
+            return AssemblyResult.Fail<ListAttributesPage>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
 
         var query = new ListAttributesQuery(
             NameContains: string.IsNullOrEmpty(nameContains) ? null : nameContains,
@@ -1338,7 +1277,7 @@ public sealed class AssemblyTools
         var result = index.ListAttributes(parsed, query);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<ListAttributesPage>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var p = result.Page!;
         var summary = p.Attributes.Count == 0
@@ -1379,14 +1318,14 @@ public sealed class AssemblyTools
         {
             var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
                 ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
-                : ErrorRecoveryHint(resolveErr);
+                : AssemblyErrorRecovery.For(resolveErr);
             return AssemblyResult.Fail<TypeSummary>(resolveErr.Message, resolveErr, resolveHint);
         }
 
         var result = index.GetTypeDefinition(mvid, typeToken);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<TypeSummary>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var t = result.Type!;
         var baseSummary = t.BaseType is null ? "no base type" : $"base = {t.BaseType.FullName}";
@@ -1436,12 +1375,12 @@ public sealed class AssemblyTools
         {
             var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
                 ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
-                : ErrorRecoveryHint(resolveErr);
+                : AssemblyErrorRecovery.For(resolveErr);
             return AssemblyResult.Fail<ListDerivedTypesPage>(resolveErr.Message, resolveErr, resolveHint);
         }
 
         if (!TryParseGenericArgs(matchInstantiation, nameof(matchInstantiation), out var matchArgs, out var matchErr))
-            return AssemblyResult.Fail<ListDerivedTypesPage>(matchErr!.Message, matchErr, ErrorRecoveryHint(matchErr));
+            return AssemblyResult.Fail<ListDerivedTypesPage>(matchErr!.Message, matchErr, AssemblyErrorRecovery.For(matchErr));
 
         var query = new ListDerivedTypesQuery(
             DirectOnly: directOnly,
@@ -1452,7 +1391,7 @@ public sealed class AssemblyTools
         var result = index.ListDerivedTypes(mvid, typeToken, query);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<ListDerivedTypesPage>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var p = result.Page!;
         var summary = p.Types.Count == 0
@@ -1500,7 +1439,7 @@ public sealed class AssemblyTools
         {
             var resolveHint = resolveErr!.Kind == ErrorKinds.IdentityMalformed
                 ? new NextActionHint("list_types", "Use list_types first to discover a valid type handle or full name.")
-                : ErrorRecoveryHint(resolveErr);
+                : AssemblyErrorRecovery.For(resolveErr);
             return AssemblyResult.Fail<ListMembersPage>(resolveErr.Message, resolveErr, resolveHint);
         }
 
@@ -1514,7 +1453,7 @@ public sealed class AssemblyTools
         var result = index.ListMembers(mvid, typeToken, query);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<ListMembersPage>(result.Error!.Message, result.Error,
-                ErrorRecoveryHint(result.Error));
+                AssemblyErrorRecovery.For(result.Error));
 
         var p = result.Page!;
         var summary = p.Members.Count == 0
@@ -1593,52 +1532,6 @@ public sealed class AssemblyTools
         error = null;
         return true;
     }
-
-    private static NextActionHint ErrorRecoveryHint(AssemblyError error) => error.Kind switch
-    {
-        ErrorKinds.ModuleNotFound => new NextActionHint(
-            "load_assembly",
-            "Load the assembly whose MVID matches the request, then retry."),
-        ErrorKinds.ModuleLoadFailed => new NextActionHint(
-            "list_assemblies",
-            "Verify the path / file is a valid managed PE and confirm what is already loaded."),
-        ErrorKinds.MvidMismatch => new NextActionHint(
-            "list_assemblies",
-            "Inspect loaded MVIDs and reload the build that matches the diagnostic payload."),
-        ErrorKinds.TokenWrongTable => new NextActionHint(
-            "find_method",
-            "The token does not point at a MethodDef. Search by name to locate the right token."),
-        ErrorKinds.TokenOutOfRange => new NextActionHint(
-            "find_method",
-            "The MethodDef row id exceeds the table. Re-discover the token via find_method or list_methods."),
-        ErrorKinds.TokenTrimmed => new NextActionHint(
-            "get_method",
-            "The method has no IL body (trimmed / NativeAOT). Use get_method for the signature-only view."),
-        ErrorKinds.IdentityMalformed => new NextActionHint(
-            "get_method",
-            "Re-issue the call with both moduleVersionId (GUID) and metadataToken populated."),
-        ErrorKinds.PathNotAllowed => new NextActionHint(
-            "list_assemblies",
-            "The path is outside the configured search roots. Inspect loaded modules and use their MVID instead."),
-        ErrorKinds.InvalidArgument => new NextActionHint(
-            "list_assemblies",
-            "Validate the argument shape against the tool description and retry."),
-        ErrorKinds.GenericInstantiationUnresolvable => new NextActionHint(
-            "import_assembly_manifest",
-            "A type-argument name did not resolve in any loaded module. Import the manifest for the dependency or supply assemblyPathHint, then retry."),
-        ErrorKinds.GenericInstantiationAmbiguous => new NextActionHint(
-            "list_assemblies",
-            "A type-argument name resolved in 2+ modules with conflicting MVIDs. Inspect loaded modules and narrow the manifest, or qualify on the producer side."),
-        ErrorKinds.GenericInstantiationOpen => new NextActionHint(
-            "get_method",
-            "Wire instantiations must be closed. Re-emit on the producer side with concrete type arguments instead of open type parameters."),
-        ErrorKinds.GenericInstantiationMismatch => new NextActionHint(
-            "get_method",
-            "methodSpec and genericTypeArguments decode to different instantiations. Re-issue the call with only one of them, or fix the producer to keep them consistent."),
-        _ => new NextActionHint(
-            "list_assemblies",
-            "Inspect loaded modules and retry the call."),
-    };
 
 
     /// <summary>
@@ -1726,42 +1619,6 @@ public sealed class AssemblyTools
         return true;
     }
 
-    /// <summary>
-    /// Ensures the module identified by <paramref name="mvid"/> is loaded in the index. If it
-    /// isn't and <paramref name="assemblyPathHint"/> is non-empty, opens the PE at the hint,
-    /// confirms the MVID matches, and loads it idempotently. A hinted path whose MVID differs
-    /// is rejected with <see cref="ErrorKinds.MvidMismatch"/> — the path is a hint, never an
-    /// override. See issue #4 / docs/handoff-contract.md.
-    /// </summary>
-    private static AssemblyError? TryEnsureModuleLoaded(IMetadataIndex index, Guid mvid, string? assemblyPathHint)
-    {
-        foreach (var loaded in index.List())
-        {
-            if (loaded.ModuleVersionId == mvid) return null;
-        }
-        var hint = assemblyPathHint;
-        if (string.IsNullOrWhiteSpace(hint) && index.TryGetPathHint(mvid, out var lazyHint))
-        {
-            hint = lazyHint;
-        }
-        if (string.IsNullOrWhiteSpace(hint))
-        {
-            return new AssemblyError(ErrorKinds.ModuleNotFound,
-                $"no loaded module has MVID {mvid:D}.");
-        }
-        var probe = index.Probe(hint);
-        if (probe.Error is not null) return probe.Error;
-        if (probe.Mvid != mvid)
-        {
-            return new AssemblyError(
-                ErrorKinds.MvidMismatch,
-                $"assemblyPathHint '{hint}' has MVID {probe.Mvid:D} but the caller requested {mvid:D}.");
-        }
-        var load = index.Load(hint);
-        if (!load.IsSuccess) return load.Error;
-        return null;
-    }
-
     private static bool TryResolveTypeIdentity(IMetadataIndex index, string? typeHandle,
         string? mvidOrPath, string? typeFullName,
         out Guid mvid, out int typeToken, out AssemblyError? error)
@@ -1794,39 +1651,15 @@ public sealed class AssemblyTools
             return false;
         }
 
-        if (!TryFindTypeByFullName(index, mvid, typeFullName!, out typeToken))
+        var find = index.FindTypeByFullName(mvid, typeFullName!);
+        if (!find.IsSuccess)
         {
-            error = new AssemblyError(ErrorKinds.IdentityMalformed,
-                $"type '{typeFullName}' not found in module {mvid:D}.");
+            error = find.Error;
             return false;
         }
+        typeToken = find.Type!.MetadataToken;
         error = null;
         return true;
-    }
-
-    private static bool TryFindTypeByFullName(IMetadataIndex index, Guid mvid, string typeFullName, out int token)
-    {
-        token = 0;
-        // Paginate through all types until we find an exact-match full name. The page size cap
-        // protects giant assemblies; we read the whole table only on misses, which is acceptable
-        // for the typeFullName entry-point (callers should prefer typeHandle from list_types).
-        int? cursor = null;
-        while (true)
-        {
-            var page = index.ListTypes(mvid, new ListTypesQuery(
-                Cursor: cursor, PageSize: ListTypesQuery.MaxPageSize));
-            if (!page.IsSuccess) return false;
-            foreach (var t in page.Page!.Types)
-            {
-                if (string.Equals(t.FullName, typeFullName, StringComparison.Ordinal))
-                {
-                    token = t.MetadataToken;
-                    return true;
-                }
-            }
-            if (!page.Page.Truncated) return false;
-            cursor = page.Page.NextCursor;
-        }
     }
 
     private static bool TryParseToken(string raw, out int token) => HandleSyntax.TryParseToken(raw, out token);
