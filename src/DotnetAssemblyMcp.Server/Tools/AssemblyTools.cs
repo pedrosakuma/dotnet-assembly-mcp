@@ -25,13 +25,10 @@ public sealed class AssemblyTools
         ReadOnly = false,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Opens a managed PE file (.dll / .exe) via System.Reflection.Metadata and caches a " +
-        "metadata-only handle keyed by its ModuleVersionId. Idempotent: loading the same MVID " +
-        "twice returns the cached handle. Never executes the assembly. Usually the first call.")]
+    [Description(AssemblyToolDescriptions.LoadAssembly_Summary)]
     public static AssemblyResult<ModuleSummary> LoadAssembly(
         IMetadataIndex index,
-        [Description("Absolute path to a .NET PE assembly on the local filesystem.")] string path)
+        [Description(AssemblyToolDescriptions.LoadAssembly_Path)] string path)
     {
         var result = index.Load(path);
         if (!result.IsSuccess)
@@ -63,10 +60,7 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Returns the modules currently held by the metadata index (mvid, path, method count). " +
-        "Useful to confirm a target assembly is loaded before calling get_method, or to check " +
-        "whether two builds with the same name have different MVIDs.")]
+    [Description(AssemblyToolDescriptions.ListAssemblies_Summary)]
     public static AssemblyResult<IReadOnlyList<ModuleSummary>> ListAssemblies(IMetadataIndex index)
     {
         var modules = index.List();
@@ -92,20 +86,11 @@ public sealed class AssemblyTools
         ReadOnly = false,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Bulk handshake intended for sidecar scenarios: a producer (typically " +
-        "dotnet-diagnostics-mcp) supplies a manifest of (moduleVersionId, path) pairs " +
-        "observed in a running process. In 'lazy' mode (default) each entry is recorded as " +
-        "a (mvid → path) hint without opening the PE — later get_method calls for that MVID " +
-        "use the hint automatically. In 'tier1' mode each entry is opened eagerly and added " +
-        "to the metadata index. Every entry's on-disk MVID is verified before use; an entry " +
-        "whose actual MVID differs from the manifest is rejected with reason " +
-        "'mvid_mismatch_with_path' (the path is never silently re-mapped). Re-importing the " +
-        "same MVID is idempotent.")]
+    [Description(AssemblyToolDescriptions.ImportAssemblyManifest_Summary)]
     public static AssemblyResult<ManifestImportResult> ImportAssemblyManifest(
         IMetadataIndex index,
-        [Description("Manifest entries. Each must carry moduleVersionId (GUID 'D' format) and an absolute path; name is optional.")] IReadOnlyList<ManifestEntry> entries,
-        [Description("'lazy' (default) records (mvid → path) hints without opening the PEs; 'tier1' eagerly loads every entry into the metadata index.")] ManifestImportMode mode = ManifestImportMode.Lazy)
+        [Description(AssemblyToolDescriptions.ImportAssemblyManifest_Entries)] IReadOnlyList<ManifestEntry> entries,
+        [Description(AssemblyToolDescriptions.ImportAssemblyManifest_Mode)] ManifestImportMode mode = ManifestImportMode.Lazy)
     {
         if (entries is null || entries.Count == 0)
         {
@@ -217,24 +202,20 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Implements the consumer side of the MethodIdentity handoff contract: given a " +
-        "moduleVersionId + metadataToken (typically copied from a dotnet-diagnostics-mcp " +
-        "response), returns the declaring type, method name, signature, IL size and method " +
-        "attributes. See docs/handoff-contract.md for the full semantics and error kinds.")]
+    [Description(AssemblyToolDescriptions.GetMethod_Summary)]
     public static AssemblyResult<MethodSummary> GetMethod(
         IMetadataIndex index,
-        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
-        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Optional declaring type full name; used only as a sanity-check display label.")] string? typeFullName = null,
-        [Description("Optional method name; used only as a sanity-check display label.")] string? methodName = null,
-        [Description("Optional generic arity from the producer payload. Defaults to 0.")] int genericArity = 0,
-        [Description("Optional absolute path the producer observed for this assembly. Used only when the MVID is not yet loaded: if the file at the path has a matching MVID it is loaded transparently; if it has a different MVID the call fails with mvid_mismatch (the path is a hint, never an override).")] string? assemblyPathHint = null,
-        [Description("Optional CLR reflection-style full names for the declaring type's generic arguments (e.g. ['System.Int32']). When supplied alongside genericMethodArguments produces a closed signature view per docs/handoff-contract.md §3.5. No assembly qualification; nested types use '+'.")] string[]? genericTypeArguments = null,
-        [Description("Optional CLR reflection-style full names for the method's generic arguments. See genericTypeArguments for the format.")] string[]? genericMethodArguments = null,
-        [Description("Optional fast-path (§3.5): ModuleVersionId of a MethodSpec row that natively encodes the closed instantiation. Must be paired with methodSpecMetadataToken.")] string? methodSpecModuleVersionId = null,
-        [Description("Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B) inside methodSpecModuleVersionId. When supplied alongside genericTypeArguments, the two are cross-checked; a mismatch yields generic_instantiation_mismatch.")] string? methodSpecMetadataToken = null,
-        [Description("When true, additionally probes the module for a precompiled native body (ReadyToRun) for this method and populates MethodSummary.NativeBody with (PE path, RVA, size) for handoff to dotnet-native-mcp.disassemble. No-op (NativeBody stays null) for JIT-only assemblies. See docs/handoff-contract.md §3.6.")] bool includeNativeBody = false)
+        [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
+        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.GetMethod_TypeFullName)] string? typeFullName = null,
+        [Description(AssemblyToolDescriptions.GetMethod_MethodName)] string? methodName = null,
+        [Description(AssemblyToolDescriptions.GetMethod_GenericArity)] int genericArity = 0,
+        [Description(AssemblyToolDescriptions.GetMethod_AssemblyPathHint)] string? assemblyPathHint = null,
+        [Description(AssemblyToolDescriptions.GetMethod_GenericTypeArguments)] string[]? genericTypeArguments = null,
+        [Description(AssemblyToolDescriptions.GetMethod_GenericMethodArguments)] string[]? genericMethodArguments = null,
+        [Description(AssemblyToolDescriptions.GetMethod_MethodSpecModuleVersionId)] string? methodSpecModuleVersionId = null,
+        [Description(AssemblyToolDescriptions.GetMethod_MethodSpecMetadataToken)] string? methodSpecMetadataToken = null,
+        [Description(AssemblyToolDescriptions.GetMethod_IncludeNativeBody)] bool includeNativeBody = false)
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
         {
@@ -332,22 +313,14 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Returns the C# source of a single method via ICSharpCode.Decompiler. Output is " +
-        "hard-capped by maxChars (default 16 KiB) and LRU-cached keyed by (mvid, token, " +
-        "maxChars) so repeated calls on the same hotspot are cheap. Use get_method first to " +
-        "confirm the identity exists, then call this for the body. " +
-        "Note: generic methods are always returned in their open form (e.g. 'T Echo(T value)') — " +
-        "the decompiler operates on MethodDef, not on closed instantiations. For a closed " +
-        "signature view, use get_method with genericTypeArguments / genericMethodArguments " +
-        "(or the methodSpec fast-path); see docs/handoff-contract.md §3.5.")]
+    [Description(AssemblyToolDescriptions.DecompileMethod_Summary)]
     public static AssemblyResult<DecompiledMethod> DecompileMethod(
         IDecompiler decompiler,
         IMetadataIndex index,
-        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
-        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Optional cap on returned characters. Pass 0 to use the server default (16 KiB).")] int maxChars = 0,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
+        [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
+        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.DecompileMethod_MaxChars)] int maxChars = 0,
+        [Description(AssemblyToolDescriptions.Common_AssemblyPathHint)] string? assemblyPathHint = null,
         CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParse(moduleVersionId, out var mvid))
@@ -395,30 +368,16 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Collapsed IL reader — replaces v0.13's get_method_il + get_method_il_text + " +
-        "scan_method_il. The 'format' argument selects the projection: " +
-        "'raw' (default) returns hex-encoded IL bytes plus max-stack / EH-region / instruction " +
-        "counts (cheap; pair with maxBytes); " +
-        "'text' returns an ildasm-style textual dump via ICSharpCode.Decompiler's " +
-        "ReflectionDisassembler with operand tokens resolved to readable names — useful when " +
-        "prefixes (tail./volatile./unaligned.), box/unbox.any placement, or call-vs-callvirt " +
-        "dispatch matters (pair with maxLines; cached); " +
-        "'scan' walks the IL and returns structural outbound references (called methods, " +
-        "accessed fields, used types, string literals) — the building block for cross-reference " +
-        "queries without paying decompilation cost. The returned envelope carries the chosen " +
-        "format plus exactly one populated payload field (raw / text / scan); the other two " +
-        "are null. Generic methods are rendered in their open form for 'text'; IL token " +
-        "references in 'scan' are invariant across closed instantiations.")]
+    [Description(AssemblyToolDescriptions.GetMethodIl_Summary)]
     public static AssemblyResult<MethodIlResult> GetMethodIl(
         IIlDisassembler disassembler,
         IMetadataIndex index,
-        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
-        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Projection: 'raw' (default) for hex IL bytes, 'text' for an ildasm-style textual dump, or 'scan' for outbound-reference extraction.")] string format = "raw",
-        [Description("Used by format='raw' only. Optional cap on raw IL bytes encoded in the response. Pass 0 for the server default (4 KiB).")] int maxBytes = 0,
-        [Description("Used by format='text' only. Optional cap on output lines. Pass 0 for the server default (256). Hard cap 4096.")] int maxLines = 0,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
+        [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
+        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.GetMethodIl_Format)] string format = "raw",
+        [Description(AssemblyToolDescriptions.GetMethodIl_MaxBytes)] int maxBytes = 0,
+        [Description(AssemblyToolDescriptions.GetMethodIl_MaxLines)] int maxLines = 0,
+        [Description(AssemblyToolDescriptions.Common_AssemblyPathHint)] string? assemblyPathHint = null,
         CancellationToken cancellationToken = default)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
@@ -506,21 +465,15 @@ public sealed class AssemblyTools
         ReadOnly = false,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Enumerates the type definitions of a module. Accepts either an MVID of an already " +
-        "loaded module or an absolute path (auto-loads on first call). Supports filtering by " +
-        "namespace prefix, name substring (case-insensitive) and kind (class/struct/interface/" +
-        "enum/delegate); results are paginated via cursor (pass nextCursor from the previous " +
-        "response). Each entry includes a type handle 't:<mvid>:0x<token>' suitable for the " +
-        "follow-up list_methods tool.")]
+    [Description(AssemblyToolDescriptions.ListTypes_Summary)]
     public static AssemblyResult<ListTypesPage> ListTypes(
         IMetadataIndex index,
-        [Description("Either the MVID GUID (D format) of a loaded module, or an absolute path to a .NET PE assembly (auto-loaded).")] string mvidOrPath,
-        [Description("Optional namespace prefix filter, matched as a dot-segmented prefix (e.g. 'MyApp' matches 'MyApp.Foo' but not 'MyAppExt.Foo').")] string? namespacePrefix = null,
-        [Description("Optional case-insensitive substring matched against the full type name (including '+' for nested types).")] string? nameContains = null,
-        [Description("Optional kind filter. One of: class, struct, interface, enum, delegate.")] string? kind = null,
-        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
-        [Description("Max types per page (default 50, capped at 500).")] int pageSize = ListTypesQuery.DefaultPageSize)
+        [Description(AssemblyToolDescriptions.Common_MvidOrPathAssembly)] string mvidOrPath,
+        [Description(AssemblyToolDescriptions.ListTypes_NamespacePrefix)] string? namespacePrefix = null,
+        [Description(AssemblyToolDescriptions.ListTypes_NameContains)] string? nameContains = null,
+        [Description(AssemblyToolDescriptions.ListTypes_Kind)] string? kind = null,
+        [Description(AssemblyToolDescriptions.Common_PaginationCursor)] int cursor = 0,
+        [Description(AssemblyToolDescriptions.Common_MaxTypesPerPage)] int pageSize = ListTypesQuery.DefaultPageSize)
     {
         if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var loadErr))
             return AssemblyResult.Fail<ListTypesPage>(loadErr!.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
@@ -588,17 +541,10 @@ public sealed class AssemblyTools
         ReadOnly = false,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Enumerates the AssemblyRef table of a single module: every external assembly the " +
-        "module depends on at metadata level, with name, four-part version, culture, public " +
-        "key token (hex), and raw AssemblyFlags. Cheap (single MetadataReader walk, not " +
-        "paginated). Use to reconstruct the dependency graph, audit target-framework or " +
-        "package versions, or pivot into load_assembly when the referenced assembly is also " +
-        "on disk. Accepts an MVID of an already-loaded module or an absolute path (auto-" +
-        "loaded on first call).")]
+    [Description(AssemblyToolDescriptions.ListAssemblyReferences_Summary)]
     public static AssemblyResult<ListAssemblyReferencesPage> ListAssemblyReferences(
         IMetadataIndex index,
-        [Description("Either the MVID GUID (D format) of a loaded module, or an absolute path to a .NET PE assembly (auto-loaded).")] string mvidOrPath)
+        [Description(AssemblyToolDescriptions.Common_MvidOrPathAssembly)] string mvidOrPath)
     {
         if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var loadErr))
             return AssemblyResult.Fail<ListAssemblyReferencesPage>(loadErr!.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
@@ -623,22 +569,13 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Reverse string-literal lookup: returns every method whose IL contains an ldstr opcode " +
-        "whose decoded user-string matches 'query' under 'matchMode' (exact / contains / regex). " +
-        "Scope is all loaded modules unless 'mvidOrPath' is supplied; in that case only the named " +
-        "module is searched (auto-loaded from path if needed). Hits include the caller's method " +
-        "handle, signature display, IL offset of the ldstr opcode, and the matched literal. " +
-        "Per-module string index is built lazily on the first call against that module and held " +
-        "in memory; subsequent calls are O(1) for exact / O(unique-literals) for contains+regex. " +
-        "Result is capped at 'maxHits' (default 1000, hard cap 10000); 'truncated' = true when hit. " +
-        "Typical use: 'a user reported error message X — which method produces it?'.")]
+    [Description(AssemblyToolDescriptions.FindStringReferences_Summary)]
     public static AssemblyResult<FindStringReferencesResult> FindStringReferences(
         IMetadataIndex index,
-        [Description("The string to search for. Required.")] string query,
-        [Description("Match semantics: 'exact' (default), 'contains', or 'regex'. Regex evaluation has a 1s timeout per literal.")] string? matchMode = null,
-        [Description("Optional scope. MVID GUID or absolute path of a single module. Omit / pass null to search every loaded module.")] string? mvidOrPath = null,
-        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
+        [Description(AssemblyToolDescriptions.FindStringReferences_Query)] string query,
+        [Description(AssemblyToolDescriptions.FindStringReferences_MatchMode)] string? matchMode = null,
+        [Description(AssemblyToolDescriptions.Common_ScopeMvidOrPath)] string? mvidOrPath = null,
+        [Description(AssemblyToolDescriptions.Common_MaxHitsDescription)] int maxHits = 0,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(query))
@@ -690,23 +627,13 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Reverse attribute lookup: returns every assembly / type / method / parameter / field / " +
-        "property / event decorated with an attribute whose constructor's declaring type matches " +
-        "'attributeTypeFullName' (case-sensitive full name, '+' for nested types — e.g. " +
-        "'System.ObsoleteAttribute' or 'Xunit.FactAttribute'). Match is by attribute type identity, " +
-        "not by IL spelling, so using-aliases are irrelevant. Scope is every loaded module unless " +
-        "'mvidOrPath' is supplied. Optional 'targetKinds' filters the result (comma-separated " +
-        "subset of assembly,type,method,parameter,field,property,event). Per-module reverse " +
-        "attribute index is built lazily and invalidated with the xref cache on file change. " +
-        "Result is capped at 'maxHits' (default 1000, hard cap 10000); 'truncated' = true when hit. " +
-        "Typical use: 'find every [Obsolete] API' / 'every [Authorize] controller method'.")]
+    [Description(AssemblyToolDescriptions.FindAttributeTargets_Summary)]
     public static AssemblyResult<FindAttributeTargetsResult> FindAttributeTargets(
         IMetadataIndex index,
-        [Description("Full name of the attribute type, including '+' for nested types (e.g. 'System.ObsoleteAttribute'). Required.")] string attributeTypeFullName,
-        [Description("Optional scope. MVID GUID or absolute path of a single module. Omit / pass null to search every loaded module.")] string? mvidOrPath = null,
-        [Description("Optional comma-separated subset of {assembly, type, method, parameter, field, property, event}. Omit for all kinds.")] string? targetKinds = null,
-        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
+        [Description(AssemblyToolDescriptions.FindAttributeTargets_AttributeTypeFullName)] string attributeTypeFullName,
+        [Description(AssemblyToolDescriptions.Common_ScopeMvidOrPath)] string? mvidOrPath = null,
+        [Description(AssemblyToolDescriptions.FindAttributeTargets_TargetKinds)] string? targetKinds = null,
+        [Description(AssemblyToolDescriptions.Common_MaxHitsDescription)] int maxHits = 0,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(attributeTypeFullName))
@@ -760,25 +687,12 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Reverse member-access lookup, collapsed from the v0.13 trio of " +
-        "find_field_references / find_property_references / find_event_references. The kind " +
-        "is dispatched from the handle prefix: 'f:<mvid>:0x<fieldToken>' (field — six opcodes " +
-        "ldfld/ldsfld/stfld/stsfld/ldflda/ldsflda), 'p:<mvid>:0x<propertyToken>' (property — " +
-        "every call to its getter/setter), 'e:<mvid>:0x<eventToken>' (event — every call to " +
-        "its add/remove/raise accessor). The 'accessor' filter applies to properties and " +
-        "events only: 'all' (default) / 'getter' / 'setter' for properties, 'all' (default) / " +
-        "'add' / 'remove' / 'raise' for events, and 'all' (default) / 'read' / 'write' for " +
-        "fields (preserves the v0.13 find_field_references mode= filter). Same-module hits " +
-        "use metadata tokens; cross-module hits use the existing call/field-access xref " +
-        "indices. Result is capped at 'maxHits' (default 1000, hard cap 10000). The returned " +
-        "envelope carries a 'kind' discriminator plus exactly one populated payload field " +
-        "(field / property / event); the other two are null.")]
+    [Description(AssemblyToolDescriptions.FindMemberReferences_Summary)]
     public static AssemblyResult<FindMemberReferencesResult> FindMemberReferences(
         IMetadataIndex index,
-        [Description("Member handle: 'f:<mvid>:0x<fieldToken>' for a field, 'p:<mvid>:0x<propertyToken>' for a property, or 'e:<mvid>:0x<eventToken>' for an event.")] string memberHandle,
-        [Description("Optional accessor / mode filter. Field handles: 'all' (default) / 'read' (ldfld/ldsfld + ldflda/ldsflda) / 'write' (stfld/stsfld). Property handles: 'all' (default) / 'getter' / 'setter'. Event handles: 'all' (default) / 'add' / 'remove' / 'raise'.")] string? accessor = null,
-        [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
+        [Description(AssemblyToolDescriptions.FindMemberReferences_MemberHandle)] string memberHandle,
+        [Description(AssemblyToolDescriptions.FindMemberReferences_Accessor)] string? accessor = null,
+        [Description(AssemblyToolDescriptions.Common_MaxHitsDescription)] int maxHits = 0,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(memberHandle))
@@ -913,20 +827,15 @@ public sealed class AssemblyTools
         ReadOnly = false,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Enumerates the methods of a single type. Identify the type either via a typeHandle " +
-        "('t:<mvid>:0x<typeToken>' returned by list_types) or via mvidOrPath + typeFullName " +
-        "(case-sensitive, uses '+' for nested types e.g. 'NS.Outer+Inner'). Returns one " +
-        "MethodSummary per method (handle, name, signature, ilSize, attributes); use cursor " +
-        "for paging. Drill in further with decompile_method, get_method_il or find_callers.")]
+    [Description(AssemblyToolDescriptions.ListMethods_Summary)]
     public static AssemblyResult<ListMethodsPage> ListMethods(
         IMetadataIndex index,
-        [Description("Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.")] string? typeHandle = null,
-        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
-        [Description("Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null,
-        [Description("Optional case-insensitive substring filter on the method name.")] string? namePattern = null,
-        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
-        [Description("Max methods per page (default 50, capped at 500).")] int pageSize = ListMethodsQuery.DefaultPageSize)
+        [Description(AssemblyToolDescriptions.Common_TypeHandle)] string? typeHandle = null,
+        [Description(AssemblyToolDescriptions.Common_MvidOrPathModule)] string? mvidOrPath = null,
+        [Description(AssemblyToolDescriptions.Common_TypeFullNameDescription)] string? typeFullName = null,
+        [Description(AssemblyToolDescriptions.ListMethods_NamePattern)] string? namePattern = null,
+        [Description(AssemblyToolDescriptions.Common_PaginationCursor)] int cursor = 0,
+        [Description(AssemblyToolDescriptions.ListMethods_PageSize)] int pageSize = ListMethodsQuery.DefaultPageSize)
     {
         if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
             out var mvid, out var typeToken, out var resolveErr))
@@ -992,19 +901,14 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Module-wide method search. Matches every MethodDef whose short name matches the " +
-        "supplied regular expression (case-insensitive) and, optionally, whose signature " +
-        "contains a substring. Returns hits with the canonical 'm:<mvid>:0x<token>' handle " +
-        "ready to feed into get_method / decompile_method / find_callers. Use this when you " +
-        "do not yet have a type in mind; otherwise prefer list_methods which is cheaper.")]
+    [Description(AssemblyToolDescriptions.FindMethod_Summary)]
     public static AssemblyResult<FindMethodPage> FindMethod(
         IMetadataIndex index,
-        [Description("Either the MVID GUID ('D' format) of a previously loaded module, or an absolute path to a managed PE assembly (will be loaded on demand).")] string mvidOrPath,
-        [Description("Regular expression matched (case-insensitive) against each method's short name.")] string namePattern,
-        [Description("Optional case-insensitive substring filter on the decoded signature (e.g. 'CancellationToken').")] string? signatureContains = null,
-        [Description("Optional pagination cursor returned in a prior call (exclusive lower bound on MethodDef token).")] int? cursor = null,
-        [Description("Max matches per page (default 20, capped at 200).")] int pageSize = FindMethodQuery.DefaultPageSize,
+        [Description(AssemblyToolDescriptions.FindMethod_MvidOrPath)] string mvidOrPath,
+        [Description(AssemblyToolDescriptions.FindMethod_NamePattern)] string namePattern,
+        [Description(AssemblyToolDescriptions.FindMethod_SignatureContains)] string? signatureContains = null,
+        [Description(AssemblyToolDescriptions.FindMethod_Cursor)] int? cursor = null,
+        [Description(AssemblyToolDescriptions.FindMethod_PageSize)] int pageSize = FindMethodQuery.DefaultPageSize,
         CancellationToken cancellationToken = default)
     {
         if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var resolveErr))
@@ -1062,22 +966,16 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Returns every method whose IL emits a direct call to the requested callee — within " +
-        "the callee's own module via MethodDef tokens, and across any other loaded module via " +
-        "MemberRef signature matching (assembly name + type fullname + method name + " +
-        "parameter signature + generic arity). The reverse index is built lazily per module " +
-        "and cached at ~/.cache/dotnet-assembly-mcp/<mvid>.xref so subsequent queries are " +
-        "O(callers).")]
+    [Description(AssemblyToolDescriptions.FindCallers_Summary)]
     public static AssemblyResult<FindCallersResult> FindCallers(
         IMetadataIndex index,
-        [Description("ModuleVersionId GUID of the callee, as a string ('D' format).")] string moduleVersionId,
-        [Description("Callee MethodDef metadata token (table 0x06). Accepts decimal or hex.")] string metadataToken,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
-        [Description("Optional CLR reflection-style full names for the declaring type's generic arguments (see get_method).")] string[]? genericTypeArguments = null,
-        [Description("Optional CLR reflection-style full names for the method's generic arguments. When supplied, the caller list is narrowed to call sites whose MethodSpec.Instantiation matches element-wise (docs/handoff-contract.md §3.5).")] string[]? genericMethodArguments = null,
-        [Description("Optional fast-path (§3.5): ModuleVersionId of a MethodSpec row. Paired with methodSpecMetadataToken.")] string? methodSpecModuleVersionId = null,
-        [Description("Optional fast-path (§3.5): MethodSpec metadata token (table 0x2B). When supplied, derives the instantiation directly from metadata.")] string? methodSpecMetadataToken = null,
+        [Description(AssemblyToolDescriptions.FindCallers_ModuleVersionId)] string moduleVersionId,
+        [Description(AssemblyToolDescriptions.FindCallers_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.Common_AssemblyPathHint)] string? assemblyPathHint = null,
+        [Description(AssemblyToolDescriptions.FindCallers_GenericTypeArguments)] string[]? genericTypeArguments = null,
+        [Description(AssemblyToolDescriptions.FindCallers_GenericMethodArguments)] string[]? genericMethodArguments = null,
+        [Description(AssemblyToolDescriptions.FindCallers_MethodSpecModuleVersionId)] string? methodSpecModuleVersionId = null,
+        [Description(AssemblyToolDescriptions.FindCallers_MethodSpecMetadataToken)] string? methodSpecMetadataToken = null,
         CancellationToken cancellationToken = default)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
@@ -1126,23 +1024,13 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Returns every site that references the requested TypeDef: field/property/event " +
-        "types, method parameters / return types / locals, IL opcodes that bake in a type " +
-        "token (newobj, castclass, isinst, box, unbox, ldtoken, generic args, ...), and " +
-        "type-hierarchy edges (BaseType + InterfaceImplementation per TypeDef, including " +
-        "TypeSpec closures of the target — e.g. 'class C : IRequestHandler<int,string>' " +
-        "registers as an InterfaceImplementation site of IRequestHandler`2). Same-module " +
-        "hits come from TypeDef tokens; cross-module hits come from TypeRef matching " +
-        "(assembly simple name + type full name). Uses the same lazily-built per-module " +
-        "xref cache as find_callers; the cache file format version was bumped so the first " +
-        "call after upgrade rebuilds.")]
+    [Description(AssemblyToolDescriptions.FindTypeReferences_Summary)]
     public static AssemblyResult<FindTypeReferencesResult> FindTypeReferences(
         IMetadataIndex index,
-        [Description("Type handle 't:<mvid>:0x<typeToken>' as returned by list_types or get_type.")] string? typeHandle = null,
-        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
-        [Description("Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null,
-        [Description("Optional absolute path the producer observed for this assembly (used to load the module if it's not yet known).")] string? assemblyPathHint = null,
+        [Description(AssemblyToolDescriptions.FindTypeReferences_TypeHandle)] string? typeHandle = null,
+        [Description(AssemblyToolDescriptions.Common_MvidOrPathModule)] string? mvidOrPath = null,
+        [Description(AssemblyToolDescriptions.Common_TypeFullNameDescription)] string? typeFullName = null,
+        [Description(AssemblyToolDescriptions.FindTypeReferences_AssemblyPathHint)] string? assemblyPathHint = null,
         CancellationToken cancellationToken = default)
     {
         if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
@@ -1189,21 +1077,12 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Reads the module's PDB (embedded portable PDB first, then sibling .pdb) and " +
-        "returns the file/startLine/endLine triple plus a resolved SourceLink URL when " +
-        "SourceLink CustomDebugInformation is present. Second-chance source resolver: use " +
-        "after dotnet-diagnostics-mcp has emitted a hotspot with no SourceLocation. " +
-        "Metadata-only (no HTTP). Returns found=false (not an error) when no PDB exists or " +
-        "the method has no non-hidden sequence points (compiler-generated bodies). " +
-        "Note: this tool does not accept §3.5 generic-instantiation arguments — PDB sequence " +
-        "points anchor on the open MethodDef and the source coordinates are the same for " +
-        "every closed instantiation.")]
+    [Description(AssemblyToolDescriptions.GetMethodSource_Summary)]
     public static AssemblyResult<MethodSourceLocation> GetMethodSource(
         IMetadataIndex index,
-        [Description("ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).")] string moduleVersionId,
-        [Description("Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).")] string metadataToken,
-        [Description("Optional absolute path the producer observed for this assembly (see get_method for semantics).")] string? assemblyPathHint = null,
+        [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
+        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.Common_AssemblyPathHint)] string? assemblyPathHint = null,
         CancellationToken cancellationToken = default)
     {
         if (!TryParseIdentity(moduleVersionId, metadataToken, out var identity, out var err))
@@ -1253,22 +1132,13 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Enumerates the CustomAttribute rows attached to the entity identified by 'target'. " +
-        "Accepts a polymorphic handle: 'a:<mvid>' (assembly), 't:<mvid>:0x<token>' (type), " +
-        "'m:<mvid>:0x<token>' (method), 'pa:<mvid>:0x<methodToken>:<sequence>' (parameter; " +
-        "sequence 0 = return value), 'f:<mvid>:0x<token>' (field), 'p:<mvid>:0x<token>' " +
-        "(property), or 'e:<mvid>:0x<token>' (event — same handles list_members returns). " +
-        "Pure metadata — no IL decoded, no decompilation. Each entry includes the " +
-        "attribute's full type name, its declaring assembly's simple name (when " +
-        "cross-module), the decoded constructor arguments, and the named arguments " +
-        "(properties / fields set in the attribute usage).")]
+    [Description(AssemblyToolDescriptions.ListAttributes_Summary)]
     public static AssemblyResult<ListAttributesPage> ListAttributes(
         IMetadataIndex index,
-        [Description("Target handle. One of: 'a:<mvid>', 't:<mvid>:0x<typeToken>', 'm:<mvid>:0x<methodToken>', 'pa:<mvid>:0x<methodToken>:<sequence>' (sequence 0 = return value), 'f:<mvid>:0x<fieldToken>', 'p:<mvid>:0x<propertyToken>', 'e:<mvid>:0x<eventToken>'.")] string target,
-        [Description("Optional case-insensitive substring filter on the attribute type's full name (e.g. 'Authorize').")] string? nameContains = null,
-        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
-        [Description("Max attributes per page (default 50, capped at 500).")] int pageSize = ListAttributesQuery.DefaultPageSize)
+        [Description(AssemblyToolDescriptions.ListAttributes_Target)] string target,
+        [Description(AssemblyToolDescriptions.ListAttributes_NameContains)] string? nameContains = null,
+        [Description(AssemblyToolDescriptions.Common_PaginationCursor)] int cursor = 0,
+        [Description(AssemblyToolDescriptions.ListAttributes_PageSize)] int pageSize = ListAttributesQuery.DefaultPageSize)
     {
         if (!TryParseAttributeTarget(target, out var parsed, out var parseErr))
             return AssemblyResult.Fail<ListAttributesPage>(parseErr!.Message, parseErr, AssemblyErrorRecovery.For(parseErr));
@@ -1308,17 +1178,12 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Returns the full TypeSummary (kind, attributes, generic arity, base type, implemented " +
-        "interfaces) for a single type. Identify the type via 'typeHandle' " +
-        "('t:<mvid>:0x<typeToken>' from list_types) or via mvidOrPath + typeFullName. " +
-        "Cross-module base types and interfaces are reported as TypeReferenceSummary " +
-        "(FullName + declaring assembly simple name) without forcing the other module to load.")]
+    [Description(AssemblyToolDescriptions.GetType_Summary)]
     public static AssemblyResult<TypeSummary> GetType(
         IMetadataIndex index,
-        [Description("Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.")] string? typeHandle = null,
-        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
-        [Description("Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null)
+        [Description(AssemblyToolDescriptions.Common_TypeHandle)] string? typeHandle = null,
+        [Description(AssemblyToolDescriptions.Common_MvidOrPathModule)] string? mvidOrPath = null,
+        [Description(AssemblyToolDescriptions.Common_TypeFullNameDescription)] string? typeFullName = null)
     {
         if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
             out var mvid, out var typeToken, out var resolveErr))
@@ -1353,29 +1218,16 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Enumerates TypeDef rows across every loaded module whose base-class chain or " +
-        "InterfaceImplementation chain reaches the supplied base type. Use it to answer " +
-        "'who derives from / implements this type?' refactor questions — same-module hits " +
-        "use TypeDef tokens, cross-module hits match by (assembly simple name, type full " +
-        "name) against the child module's TypeRef rows. With directOnly=true (default) only " +
-        "immediate subclasses / implementers are returned; with directOnly=false the full " +
-        "transitive set is returned. Generic-instantiation parents are also matched: a " +
-        "query against the open base (e.g. `IRequestHandler\u00602`) finds every closed-arg " +
-        "implementer, and the matched closed args are surfaced on `TypeSummary.Instantiation`. " +
-        "Pass `matchInstantiation` to narrow the result to a specific closed shape (e.g. " +
-        "`['System.Int32','System.String']` returns only `OrderHandler : IRequestHandler<int,string>`). " +
-        "Identify the base type via 'typeHandle' or via mvidOrPath + typeFullName, exactly " +
-        "like get_type / list_methods.")]
+    [Description(AssemblyToolDescriptions.ListDerivedTypes_Summary)]
     public static AssemblyResult<ListDerivedTypesPage> ListDerivedTypes(
         IMetadataIndex index,
-        [Description("Type handle 't:<mvid>:0x<typeToken>' of the base type, as returned by list_types or get_type.")] string? typeHandle = null,
-        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
-        [Description("Full base-type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null,
-        [Description("When true (default) only immediate subclasses are returned; when false, the full transitive descendant set is returned.")] bool directOnly = true,
-        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
-        [Description("Max types per page (default 50, capped at 500).")] int pageSize = ListDerivedTypesQuery.DefaultPageSize,
-        [Description("Optional CLR reflection-style full names for the base type's generic arguments (e.g. ['System.Int32','System.String']) per docs/handoff-contract.md \u00A73.5. When supplied, only TypeSpec parent edges whose closed args match element-wise are returned; non-generic parents are excluded. Omit for open match (default).")] string[]? matchInstantiation = null)
+        [Description(AssemblyToolDescriptions.ListDerivedTypes_TypeHandle)] string? typeHandle = null,
+        [Description(AssemblyToolDescriptions.Common_MvidOrPathModule)] string? mvidOrPath = null,
+        [Description(AssemblyToolDescriptions.ListDerivedTypes_TypeFullName)] string? typeFullName = null,
+        [Description(AssemblyToolDescriptions.ListDerivedTypes_DirectOnly)] bool directOnly = true,
+        [Description(AssemblyToolDescriptions.Common_PaginationCursor)] int cursor = 0,
+        [Description(AssemblyToolDescriptions.Common_MaxTypesPerPage)] int pageSize = ListDerivedTypesQuery.DefaultPageSize,
+        [Description(AssemblyToolDescriptions.ListDerivedTypes_MatchInstantiation)] string[]? matchInstantiation = null)
     {
         if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
             out var mvid, out var typeToken, out var resolveErr))
@@ -1424,22 +1276,17 @@ public sealed class AssemblyTools
         ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
-    [Description(
-        "Enumerates the structural members of a single type — fields, properties, and " +
-        "events — with paging and optional kind / name / signature filters. Methods are " +
-        "intentionally excluded; use list_methods for those (it carries IL-size + generic " +
-        "arity which don't apply to fields/properties/events). Each MemberSummary carries a " +
-        "prefix-tagged handle ('f:', 'p:', 'e:') accepted by list_attributes as a target.")]
+    [Description(AssemblyToolDescriptions.ListMembers_Summary)]
     public static AssemblyResult<ListMembersPage> ListMembers(
         IMetadataIndex index,
-        [Description("Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.")] string? typeHandle = null,
-        [Description("MVID GUID or absolute path of the module; only used when typeHandle is omitted.")] string? mvidOrPath = null,
-        [Description("Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.")] string? typeFullName = null,
-        [Description("Optional kind filter: Field, Property, or Event. Omit to return all kinds in metadata order (fields, then properties, then events).")] MemberKind? kind = null,
-        [Description("Optional case-insensitive substring filter on the member name.")] string? namePattern = null,
-        [Description("Optional case-insensitive substring filter on the rendered signature (e.g. 'int', 'EventHandler').")] string? signatureContains = null,
-        [Description("Pagination cursor returned by the previous call. Pass 0 or omit for the first page.")] int cursor = 0,
-        [Description("Max members per page (default 50, capped at 500).")] int pageSize = ListMembersQuery.DefaultPageSize)
+        [Description(AssemblyToolDescriptions.Common_TypeHandle)] string? typeHandle = null,
+        [Description(AssemblyToolDescriptions.Common_MvidOrPathModule)] string? mvidOrPath = null,
+        [Description(AssemblyToolDescriptions.Common_TypeFullNameDescription)] string? typeFullName = null,
+        [Description(AssemblyToolDescriptions.ListMembers_Kind)] MemberKind? kind = null,
+        [Description(AssemblyToolDescriptions.ListMembers_NamePattern)] string? namePattern = null,
+        [Description(AssemblyToolDescriptions.ListMembers_SignatureContains)] string? signatureContains = null,
+        [Description(AssemblyToolDescriptions.Common_PaginationCursor)] int cursor = 0,
+        [Description(AssemblyToolDescriptions.ListMembers_PageSize)] int pageSize = ListMembersQuery.DefaultPageSize)
     {
         if (!TryResolveTypeIdentity(index, typeHandle, mvidOrPath, typeFullName,
             out var mvid, out var typeToken, out var resolveErr))
