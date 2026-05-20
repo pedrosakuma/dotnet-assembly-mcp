@@ -1747,18 +1747,25 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         try
         {
             var h = MetadataTokens.Handle(token);
-            // NOTE: MemberReference tokens (table 0x0A) can carry either a method or a field
-            // signature. We bucket them as `calls` for backward compatibility; the underlying
-            // Token field on each IlSymbolRef remains the source of truth for consumers that
-            // need precise classification. Refining this is tracked separately from #80.
-            var bucket = h.Kind switch
+            // MemberReference rows (table 0x0A) can carry either a method or a field signature;
+            // route them to the correct bucket using the symbol Kind populated by
+            // BuildSymbolRef (issue #86 — pre-fix every MemberRef leaked into `calls`).
+            if (h.Kind == HandleKind.MemberReference)
             {
-                HandleKind.MethodDefinition or HandleKind.MemberReference or HandleKind.MethodSpecification => calls,
+                var symbol = BuildSymbolRef(m, token);
+                var bucket = symbol.Kind == IlSymbolKind.FieldMemberRef ? fields : calls;
+                bucket.Add(symbol);
+                return;
+            }
+
+            var target = h.Kind switch
+            {
+                HandleKind.MethodDefinition or HandleKind.MethodSpecification => calls,
                 HandleKind.FieldDefinition => fields,
                 HandleKind.TypeDefinition or HandleKind.TypeReference or HandleKind.TypeSpecification => types,
                 _ => (List<IlSymbolRef>?)null,
             };
-            bucket?.Add(BuildSymbolRef(m, token));
+            target?.Add(BuildSymbolRef(m, token));
         }
         catch (BadImageFormatException) { /* ignore malformed token */ }
     }
