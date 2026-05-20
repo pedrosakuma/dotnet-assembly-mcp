@@ -298,7 +298,7 @@ internal sealed class R2RReader
         int boundsOffset = hdr.GetNextByteOffset();
         try
         {
-            map = ParseBounds(boundsOffset);
+            map = ParseBounds(boundsOffset, boundsByteCount);
         }
         catch (BadImageFormatException)
         {
@@ -309,7 +309,7 @@ internal sealed class R2RReader
 
     private const uint DebugInfo_MaxMappingValue = 0xFFFFFFFDu; // Epilog — see DebugInfoTypes.cs
 
-    private List<NativeIlMapEntry> ParseBounds(int offset)
+    private List<NativeIlMapEntry> ParseBounds(int offset, uint boundsByteCount)
     {
         // Only the >=16 bit-packed encoding is currently emitted by crossgen2 — older
         // R2R headers are not produced by any supported SDK. We mirror the modern path.
@@ -322,8 +322,19 @@ internal sealed class R2RReader
         if (bitsPerEntry == 0 || bitsPerEntry > 60) // sanity — fits in our 64-bit accumulator
             throw new BadImageFormatException("R2R DebugInfo: implausible bitsPerEntry.");
 
-        ulong bitsMeaningfulMask = (1UL << (int)bitsPerEntry) - 1;
+        // Cap `count` against the bytes actually claimed by the bounds payload. An attacker-controlled
+        // R2R image cannot make us allocate or scan past the declared bounds blob.
+        // Header (count + 2 nibble-encoded width fields) consumed `headerNibbles` nibbles already.
         int bytesOffset = reader.GetNextByteOffset();
+        long headerBytes = bytesOffset - offset;
+        if (headerBytes < 0 || headerBytes > boundsByteCount)
+            throw new BadImageFormatException("R2R DebugInfo: bounds header exceeds declared boundsByteCount.");
+        long payloadBytes = boundsByteCount - headerBytes;
+        long maxEntries = (payloadBytes * 8) / bitsPerEntry;
+        if (count > maxEntries)
+            throw new BadImageFormatException("R2R DebugInfo: bounds count exceeds declared payload size.");
+
+        ulong bitsMeaningfulMask = (1UL << (int)bitsPerEntry) - 1;
 
         List<NativeIlMapEntry> entries = new((int)count);
         uint bitsCollected = 0;
