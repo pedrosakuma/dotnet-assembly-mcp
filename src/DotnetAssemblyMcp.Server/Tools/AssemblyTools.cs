@@ -1944,13 +1944,25 @@ public sealed class AssemblyTools
 
     private static bool TryParseToken(string raw, out int token)
     {
+        token = 0;
         var s = raw?.Trim() ?? string.Empty;
-        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase) || s.StartsWith("0X", StringComparison.Ordinal))
+        if (s.Length == 0) return false;
+        // Metadata tokens are unsigned 32-bit values (table id << 24 | rid). Reject any
+        // explicit sign — `-1` is not a token, and decimal parses that overflow `int`
+        // silently turning into negatives must not slip past `Resolve()`.
+        if (s[0] == '-' || s[0] == '+') return false;
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
         {
-            return int.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber,
-                System.Globalization.CultureInfo.InvariantCulture, out token);
+            if (!uint.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture, out var u)) return false;
+            token = unchecked((int)u);
+            return true;
         }
-        return int.TryParse(s, System.Globalization.NumberStyles.Integer,
-            System.Globalization.CultureInfo.InvariantCulture, out token);
+        {
+            if (!uint.TryParse(s, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var u)) return false;
+            token = unchecked((int)u);
+            return true;
+        }
     }
 }

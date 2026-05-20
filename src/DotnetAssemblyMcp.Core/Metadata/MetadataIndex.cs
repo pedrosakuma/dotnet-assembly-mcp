@@ -39,6 +39,20 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private readonly ConcurrentDictionary<Guid, AttributeIndexData> _attributeIndexCache = new();
     private readonly ConcurrentDictionary<Guid, FieldAccessIndexData> _fieldAccessCache = new();
     private readonly ConcurrentDictionary<Guid, R2R.R2RReader?> _r2rCache = new();
+    // PEReader graveyard: holds readers we logically evicted (same-MVID reload, MVID change)
+    // but cannot dispose immediately because in-flight requests on other threads may still
+    // hold a reference to the old Module. The queue is drained on index Dispose.
+    //
+    // Trade-off (audit #78): this graveyard is *intentionally unbounded* during the index's
+    // lifetime — a request that's still walking an old `PEReader` cannot be detected from
+    // outside without true reader ref-counting. Memory cost is bounded by the number of
+    // distinct reloads in a session and by the PE size (file is fully read into a
+    // MemoryStream on Load); for typical dev workflows this is < a few hundred MB. The
+    // complete fix (per-reader lease + active-reader tracking) is tracked under the
+    // ModuleStore extraction (#79) where the access surface is small enough to make the
+    // refactor safe. Bounding the queue here would re-introduce the dispose-while-reading
+    // race for high-churn reload bursts, which defeats the purpose of the graveyard.
+    private readonly ConcurrentQueue<PEReader> _evictedPe = new();
     private readonly string _xrefCacheDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".cache", "dotnet-assembly-mcp");
@@ -85,7 +99,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 var replacement = new Module(mvid, fullPath, opened.PE!, opened.MD!);
                 if (_modules.TryUpdate(mvid, replacement, existing))
                 {
-                    existing.PE.Dispose();
+                    // Defer disposal of the old PE — in-flight requests on other threads
+                    // may still be reading through `existing.PE`. The graveyard is drained
+                    // on index Dispose. See _evictedPe declaration for the bounding trade-off.
+                    _evictedPe.Enqueue(existing.PE);
                     // Even when the MVID hasn't changed, the IL we just opened may differ from
                     // what built the xref / source caches (deterministic rebuild, manual file
                     // swap). Drop those caches and fan the event out so subscribers (e.g. the
@@ -210,7 +227,8 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var newMvid = result.Module!.ModuleVersionId;
         if (oldMvid is { } prev && prev != newMvid && _modules.TryRemove(prev, out var stale))
         {
-            stale.PE.Dispose();
+            // Defer disposal — see _evictedPe declaration.
+            _evictedPe.Enqueue(stale.PE);
             InvalidateXref(prev);
         }
         else if (oldMvid is { } same && same == newMvid)
@@ -589,15 +607,25 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 "call load_assembly with the path to the assembly first, or list_assemblies to see what is loaded."));
         }
 
-        var handle = MetadataTokens.Handle(identity.MetadataToken);
-        if (handle.Kind != HandleKind.MethodDefinition)
+        HandleKind handleKind;
+        try
+        {
+            handleKind = MetadataTokens.Handle(identity.MetadataToken).Kind;
+        }
+        catch (ArgumentException)
+        {
+            return ResolveResult.Fail(new AssemblyError(
+                ErrorKinds.IdentityMalformed,
+                $"metadataToken 0x{identity.MetadataToken:X8} is not a valid metadata token."));
+        }
+        if (handleKind != HandleKind.MethodDefinition)
         {
             return ResolveResult.Fail(new AssemblyError(
                 ErrorKinds.TokenWrongTable,
-                $"metadataToken 0x{identity.MetadataToken:X8} is a {handle.Kind}, expected MethodDefinition (table 0x06)."));
+                $"metadataToken 0x{identity.MetadataToken:X8} is a {handleKind}, expected MethodDefinition (table 0x06)."));
         }
 
-        var methodHandle = (MethodDefinitionHandle)handle;
+        var methodHandle = (MethodDefinitionHandle)MetadataTokens.Handle(identity.MetadataToken);
         var rid = MetadataTokens.GetRowNumber(methodHandle);
         if (rid <= 0 || rid > module.MD.MethodDefinitions.Count)
         {
@@ -1772,20 +1800,30 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         if (arch != NativeArchitecture.X64)
             return NativeBodyResult.NotFound();
 
-        if (!r2r.TryGetHotRegion(rid, out var hot, out int runtimeFunctionIndex) || hot is null)
+        try
+        {
+            if (!r2r.TryGetHotRegion(rid, out var hot, out int runtimeFunctionIndex) || hot is null)
+                return NativeBodyResult.NotFound();
+
+            IReadOnlyList<NativeIlMapEntry>? ilMap = null;
+            if (r2r.TryGetIlMap(runtimeFunctionIndex, out var decoded))
+                ilMap = decoded;
+
+            return NativeBodyResult.Ok(new NativeBodyRef(
+                Source: NativeBodySource.R2R,
+                PePath: module.Path,
+                Architecture: arch,
+                HotRegion: hot,
+                ColdRegion: null,
+                IlMap: ilMap));
+        }
+        catch (BadImageFormatException)
+        {
+            // Malformed R2R metadata downstream of the reader probe (NativeArray entry,
+            // RuntimeFunctions table, DebugInfo NibbleReader, etc.). Surface as NotFound
+            // rather than letting a raw BadImageFormatException escape the MCP envelope.
             return NativeBodyResult.NotFound();
-
-        IReadOnlyList<NativeIlMapEntry>? ilMap = null;
-        if (r2r.TryGetIlMap(runtimeFunctionIndex, out var decoded))
-            ilMap = decoded;
-
-        return NativeBodyResult.Ok(new NativeBodyRef(
-            Source: NativeBodySource.R2R,
-            PePath: module.Path,
-            Architecture: arch,
-            HotRegion: hot,
-            ColdRegion: null,
-            IlMap: ilMap));
+        }
     }
 
     private static MethodIdentity BuildMethodIdentity(Module module, MethodDefinitionHandle h) =>
@@ -3842,6 +3880,8 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         foreach (var m in _modules.Values)
             m.PE.Dispose();
         _modules.Clear();
+        while (_evictedPe.TryDequeue(out var pe))
+            pe.Dispose();
         foreach (var pdb in _sourceCache.Values)
         {
             // Embedded portable PDB providers pin native memory; releasing them is mandatory.
