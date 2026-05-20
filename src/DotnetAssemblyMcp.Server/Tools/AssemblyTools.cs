@@ -2,6 +2,7 @@ using System.ComponentModel;
 using DotnetAssemblyMcp.Core;
 using DotnetAssemblyMcp.Core.Decompilation;
 using DotnetAssemblyMcp.Core.Errors;
+using DotnetAssemblyMcp.Core.Handles;
 using DotnetAssemblyMcp.Core.Identity;
 using DotnetAssemblyMcp.Core.Metadata;
 using ModelContextProtocol.Server;
@@ -805,8 +806,7 @@ public sealed class AssemblyTools
             var err = new AssemblyError(ErrorKinds.InvalidArgument, "fieldHandle is required.");
             return AssemblyResult.Fail<FindFieldReferencesResult>(err.Message, err);
         }
-        if (!fieldHandle.StartsWith("f:", StringComparison.Ordinal)
-            || !TryParsePrefixedHandle(fieldHandle, 2, out var mvid, out var token))
+        if (!HandleSyntax.TryParseField(fieldHandle, out var mvid, out var token))
         {
             var err = new AssemblyError(ErrorKinds.InvalidArgument,
                 $"could not parse '{fieldHandle}' as 'f:<mvid>:0x<fieldToken>'.");
@@ -865,8 +865,7 @@ public sealed class AssemblyTools
             var err = new AssemblyError(ErrorKinds.InvalidArgument, "propertyHandle is required.");
             return AssemblyResult.Fail<FindPropertyReferencesResult>(err.Message, err);
         }
-        if (!propertyHandle.StartsWith("p:", StringComparison.Ordinal)
-            || !TryParsePrefixedHandle(propertyHandle, 2, out var mvid, out var token))
+        if (!HandleSyntax.TryParseProperty(propertyHandle, out var mvid, out var token))
         {
             var err = new AssemblyError(ErrorKinds.InvalidArgument,
                 $"could not parse '{propertyHandle}' as 'p:<mvid>:0x<propertyToken>'.");
@@ -927,8 +926,7 @@ public sealed class AssemblyTools
             var err = new AssemblyError(ErrorKinds.InvalidArgument, "eventHandle is required.");
             return AssemblyResult.Fail<FindEventReferencesResult>(err.Message, err);
         }
-        if (!eventHandle.StartsWith("e:", StringComparison.Ordinal)
-            || !TryParsePrefixedHandle(eventHandle, 2, out var mvid, out var token))
+        if (!HandleSyntax.TryParseEvent(eventHandle, out var mvid, out var token))
         {
             var err = new AssemblyError(ErrorKinds.InvalidArgument,
                 $"could not parse '{eventHandle}' as 'e:<mvid>:0x<eventToken>'.");
@@ -1017,7 +1015,7 @@ public sealed class AssemblyTools
             hint = new NextActionHint("list_methods", "Fetch the next page using the returned cursor.",
                 new Dictionary<string, object?>
                 {
-                    ["typeHandle"] = HandleFormat.FormatType(p.ModuleVersionId, p.TypeMetadataToken),
+                    ["typeHandle"] = HandleSyntax.FormatType(p.ModuleVersionId, p.TypeMetadataToken),
                     ["cursor"] = p.NextCursor,
                 });
         }
@@ -1036,7 +1034,7 @@ public sealed class AssemblyTools
             hint = new NextActionHint("list_methods", "Drop the namePattern filter and retry to see all methods of the type.",
                 new Dictionary<string, object?>
                 {
-                    ["typeHandle"] = HandleFormat.FormatType(p.ModuleVersionId, p.TypeMetadataToken),
+                    ["typeHandle"] = HandleSyntax.FormatType(p.ModuleVersionId, p.TypeMetadataToken),
                 });
         }
         return AssemblyResult.Ok(p, summary, hint);
@@ -1397,7 +1395,7 @@ public sealed class AssemblyTools
         NextActionHint hint = new("list_derived_types", "Walk the descendants and implementers of this type across every loaded module.",
             new Dictionary<string, object?>
             {
-                ["typeHandle"] = HandleFormat.FormatType(t.ModuleVersionId, t.MetadataToken),
+                ["typeHandle"] = HandleSyntax.FormatType(t.ModuleVersionId, t.MetadataToken),
             });
         return AssemblyResult.Ok(t, summary, hint);
     }
@@ -1464,7 +1462,7 @@ public sealed class AssemblyTools
             ? new NextActionHint("list_derived_types", "Fetch the next page using the returned cursor.",
                 new Dictionary<string, object?>
                 {
-                    ["typeHandle"] = HandleFormat.FormatType(p.ModuleVersionId, p.BaseTypeMetadataToken),
+                    ["typeHandle"] = HandleSyntax.FormatType(p.ModuleVersionId, p.BaseTypeMetadataToken),
                     ["cursor"] = p.NextCursor,
                     ["directOnly"] = directOnly,
                     ["matchInstantiation"] = matchInstantiation,
@@ -1526,7 +1524,7 @@ public sealed class AssemblyTools
             ? new NextActionHint("list_members", "Fetch the next page using the returned cursor.",
                 new Dictionary<string, object?>
                 {
-                    ["typeHandle"] = HandleFormat.FormatType(p.ModuleVersionId, p.TypeMetadataToken),
+                    ["typeHandle"] = HandleSyntax.FormatType(p.ModuleVersionId, p.TypeMetadataToken),
                     ["cursor"] = p.NextCursor,
                 })
             : new NextActionHint("list_attributes", "Inspect the custom attributes attached to one of the listed members.",
@@ -1545,130 +1543,32 @@ public sealed class AssemblyTools
             error = new AssemblyError(ErrorKinds.InvalidArgument, "target is required.");
             return false;
         }
-        var s = target.Trim();
-        // Order matters: 'pa:' must be tested before 'p:' (no 'p:' kind here but be defensive).
-        if (s.StartsWith("a:", StringComparison.Ordinal))
+        if (!HandleSyntax.TryParseAny(target, out var kind, out var mvid, out var token, out var sequence))
         {
-            if (!Guid.TryParse(s.AsSpan(2), out var mvid))
-            {
-                error = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"could not parse '{target}' as 'a:<mvid>'.");
-                return false;
-            }
-            parsed = AttributeTarget.Assembly(mvid);
-            error = null;
-            return true;
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse '{target}'. Expected one of: 'a:<mvid>', 't:<mvid>:0x<token>', "
+                + "'m:<mvid>:0x<token>', 'pa:<mvid>:0x<methodToken>:<sequence>', 'f:<mvid>:0x<token>', "
+                + "'p:<mvid>:0x<token>', 'e:<mvid>:0x<token>'.");
+            return false;
         }
-        if (s.StartsWith("t:", StringComparison.Ordinal))
+        parsed = kind switch
         {
-            if (!TryParseTypeHandle(s, out var mvid, out var typeToken))
-            {
-                error = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"could not parse '{target}' as 't:<mvid>:0x<typeToken>'.");
-                return false;
-            }
-            parsed = AttributeTarget.Type(mvid, typeToken);
-            error = null;
-            return true;
-        }
-        if (s.StartsWith("m:", StringComparison.Ordinal))
+            HandleKind.Assembly => AttributeTarget.Assembly(mvid),
+            HandleKind.Type => AttributeTarget.Type(mvid, token),
+            HandleKind.Method => AttributeTarget.Method(mvid, token),
+            HandleKind.Parameter => AttributeTarget.Parameter(mvid, token, sequence),
+            HandleKind.Field => AttributeTarget.Field(mvid, token),
+            HandleKind.Property => AttributeTarget.Property(mvid, token),
+            HandleKind.Event => AttributeTarget.Event(mvid, token),
+            _ => null!,
+        };
+        if (parsed is null)
         {
-            var rest = s.AsSpan(2);
-            var sep = rest.IndexOf(':');
-            if (sep < 0 || !Guid.TryParse(rest[..sep], out var mvid)
-                || !TryParseToken(rest[(sep + 1)..].ToString(), out var methodToken))
-            {
-                error = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"could not parse '{target}' as 'm:<mvid>:0x<methodToken>'.");
-                return false;
-            }
-            parsed = AttributeTarget.Method(mvid, methodToken);
-            error = null;
-            return true;
+            error = new AssemblyError(ErrorKinds.InvalidArgument, $"unsupported handle kind '{kind}' in '{target}'.");
+            return false;
         }
-        if (s.StartsWith("pa:", StringComparison.Ordinal))
-        {
-            var rest = s.AsSpan(3);
-            var sep1 = rest.IndexOf(':');
-            if (sep1 < 0)
-            {
-                error = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"could not parse '{target}' as 'pa:<mvid>:0x<methodToken>:<sequence>'.");
-                return false;
-            }
-            if (!Guid.TryParse(rest[..sep1], out var mvid))
-            {
-                error = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"could not parse '{target}' as 'pa:<mvid>:0x<methodToken>:<sequence>'.");
-                return false;
-            }
-            var afterMvid = rest[(sep1 + 1)..];
-            var sep2 = afterMvid.IndexOf(':');
-            if (sep2 < 0
-                || !TryParseToken(afterMvid[..sep2].ToString(), out var methodToken)
-                || !int.TryParse(afterMvid[(sep2 + 1)..], System.Globalization.NumberStyles.Integer,
-                       System.Globalization.CultureInfo.InvariantCulture, out var seq)
-                || seq < 0)
-            {
-                error = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"could not parse '{target}' as 'pa:<mvid>:0x<methodToken>:<sequence>'.");
-                return false;
-            }
-            parsed = AttributeTarget.Parameter(mvid, methodToken, seq);
-            error = null;
-            return true;
-        }
-        // 'pa:' must be tested before 'p:' (parameter takes precedence).
-        if (s.StartsWith("f:", StringComparison.Ordinal))
-        {
-            if (!TryParsePrefixedHandle(s, 2, out var mvid, out var token))
-            {
-                error = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"could not parse '{target}' as 'f:<mvid>:0x<fieldToken>'.");
-                return false;
-            }
-            parsed = AttributeTarget.Field(mvid, token);
-            error = null;
-            return true;
-        }
-        if (s.StartsWith("p:", StringComparison.Ordinal))
-        {
-            if (!TryParsePrefixedHandle(s, 2, out var mvid, out var token))
-            {
-                error = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"could not parse '{target}' as 'p:<mvid>:0x<propertyToken>'.");
-                return false;
-            }
-            parsed = AttributeTarget.Property(mvid, token);
-            error = null;
-            return true;
-        }
-        if (s.StartsWith("e:", StringComparison.Ordinal))
-        {
-            if (!TryParsePrefixedHandle(s, 2, out var mvid, out var token))
-            {
-                error = new AssemblyError(ErrorKinds.InvalidArgument,
-                    $"could not parse '{target}' as 'e:<mvid>:0x<eventToken>'.");
-                return false;
-            }
-            parsed = AttributeTarget.Event(mvid, token);
-            error = null;
-            return true;
-        }
-        error = new AssemblyError(ErrorKinds.InvalidArgument,
-            $"unknown target prefix in '{target}'. Expected one of: 'a:', 't:', 'm:', 'pa:', 'f:', 'p:', 'e:'.");
-        return false;
-    }
-
-    private static bool TryParsePrefixedHandle(string s, int prefixLen, out Guid mvid, out int token)
-    {
-        mvid = default;
-        token = 0;
-        var rest = s.AsSpan(prefixLen);
-        var sep = rest.IndexOf(':');
-        if (sep < 0) return false;
-        if (!Guid.TryParse(rest[..sep], out mvid)) return false;
-        return TryParseToken(rest[(sep + 1)..].ToString(), out token);
+        error = null;
+        return true;
     }
 
 
@@ -1871,7 +1771,7 @@ public sealed class AssemblyTools
 
         if (!string.IsNullOrWhiteSpace(typeHandle))
         {
-            if (!TryParseTypeHandle(typeHandle!, out mvid, out typeToken))
+            if (!HandleSyntax.TryParseType(typeHandle!, out mvid, out typeToken))
             {
                 error = new AssemblyError(ErrorKinds.InvalidArgument,
                     $"could not parse typeHandle '{typeHandle}'. Expected 't:<mvid>:0x<typeToken>'.");
@@ -1904,19 +1804,6 @@ public sealed class AssemblyTools
         return true;
     }
 
-    private static bool TryParseTypeHandle(string handle, out Guid mvid, out int token)
-    {
-        mvid = Guid.Empty;
-        token = 0;
-        var s = handle.Trim();
-        if (!s.StartsWith("t:", StringComparison.Ordinal)) return false;
-        var rest = s.AsSpan(2);
-        var sep = rest.IndexOf(':');
-        if (sep < 0) return false;
-        if (!Guid.TryParse(rest[..sep], out mvid)) return false;
-        return TryParseToken(rest[(sep + 1)..].ToString(), out token);
-    }
-
     private static bool TryFindTypeByFullName(IMetadataIndex index, Guid mvid, string typeFullName, out int token)
     {
         token = 0;
@@ -1942,27 +1829,5 @@ public sealed class AssemblyTools
         }
     }
 
-    private static bool TryParseToken(string raw, out int token)
-    {
-        token = 0;
-        var s = raw?.Trim() ?? string.Empty;
-        if (s.Length == 0) return false;
-        // Metadata tokens are unsigned 32-bit values (table id << 24 | rid). Reject any
-        // explicit sign — `-1` is not a token, and decimal parses that overflow `int`
-        // silently turning into negatives must not slip past `Resolve()`.
-        if (s[0] == '-' || s[0] == '+') return false;
-        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-        {
-            if (!uint.TryParse(s.AsSpan(2), System.Globalization.NumberStyles.HexNumber,
-                System.Globalization.CultureInfo.InvariantCulture, out var u)) return false;
-            token = unchecked((int)u);
-            return true;
-        }
-        {
-            if (!uint.TryParse(s, System.Globalization.NumberStyles.Integer,
-                System.Globalization.CultureInfo.InvariantCulture, out var u)) return false;
-            token = unchecked((int)u);
-            return true;
-        }
-    }
+    private static bool TryParseToken(string raw, out int token) => HandleSyntax.TryParseToken(raw, out token);
 }
