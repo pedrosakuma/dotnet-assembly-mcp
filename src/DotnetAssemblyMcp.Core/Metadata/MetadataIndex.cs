@@ -1772,14 +1772,20 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         if (arch != NativeArchitecture.X64)
             return NativeBodyResult.NotFound();
 
-        if (!r2r.TryGetHotRegion(rid, out var hot) || hot is null)
+        if (!r2r.TryGetHotRegion(rid, out var hot, out int runtimeFunctionIndex) || hot is null)
             return NativeBodyResult.NotFound();
+
+        IReadOnlyList<NativeIlMapEntry>? ilMap = null;
+        if (r2r.TryGetIlMap(runtimeFunctionIndex, out var decoded))
+            ilMap = decoded;
 
         return NativeBodyResult.Ok(new NativeBodyRef(
             Source: NativeBodySource.R2R,
             PePath: module.Path,
             Architecture: arch,
-            HotRegion: hot));
+            HotRegion: hot,
+            ColdRegion: null,
+            IlMap: ilMap));
     }
 
     private static MethodIdentity BuildMethodIdentity(Module module, MethodDefinitionHandle h) =>

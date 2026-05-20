@@ -47,6 +47,79 @@ public sealed class GetNativeBodyRefTests
         body.HotRegion.Size.Should().BeGreaterThan(0);
     }
 
+    [SkippableFact]
+    public void Populates_ilmap_with_valid_entries_for_R2R_method()
+    {
+        Skip.If(SpcPath is null, "Could not locate shared framework System.Private.CoreLib.dll.");
+
+        using var index = new MetadataIndex();
+        var loaded = index.Load(SpcPath!);
+        var mvid = loaded.Module!.ModuleVersionId;
+        var lengthToken = typeof(string).GetProperty("Length")!.GetMethod!.MetadataToken;
+
+        var body = index.GetNativeBodyRef(mvid, lengthToken).Body!;
+
+        body.IlMap.Should().NotBeNull("R2R DebugInfo section is present on shared SPCorLib");
+        body.IlMap!.Should().NotBeEmpty();
+        // Universal invariants — the specific prolog/body/epilog layout varies by SDK build.
+        body.IlMap.Should().OnlyContain(e => e.IlOffset >= -3,
+            "IlOffset sentinels are only -1 (NoMapping), -2 (Prolog), -3 (Epilog)");
+    }
+
+    [SkippableFact]
+    public void Ilmap_native_offsets_are_monotonically_non_decreasing()
+    {
+        Skip.If(SpcPath is null, "Could not locate shared framework System.Private.CoreLib.dll.");
+
+        using var index = new MetadataIndex();
+        var loaded = index.Load(SpcPath!);
+        var mvid = loaded.Module!.ModuleVersionId;
+
+        // Sample 1000 R2R bodies — enough variety to catch a broken delta-decode.
+        int sampled = 0, withIl = 0;
+        for (int rid = 1; rid <= loaded.Module.MethodCount && sampled < 1000; rid++)
+        {
+            var r = index.GetNativeBodyRef(mvid, 0x06000000 | rid);
+            if (!r.Found) continue;
+            sampled++;
+            if (r.Body!.IlMap is not { Count: > 0 } map) continue;
+            withIl++;
+            int prev = -1;
+            foreach (var e in map)
+            {
+                e.NativeOffset.Should().BeGreaterThanOrEqualTo(prev,
+                    "bounds are delta-encoded over NativeOffset and must be sorted ascending (rid 0x{0:X})", rid);
+                prev = e.NativeOffset;
+            }
+        }
+        sampled.Should().BeGreaterThan(100, "we expect at least a few hundred R2R bodies in SPCorLib");
+        withIl.Should().BeGreaterThan((int)(sampled * 0.9),
+            "≥90% of R2R bodies in shared SPCorLib should carry DebugInfo");
+    }
+
+    [SkippableFact]
+    public void Ilmap_sourcetypes_use_known_flag_names_only()
+    {
+        Skip.If(SpcPath is null, "Could not locate shared framework System.Private.CoreLib.dll.");
+
+        using var index = new MetadataIndex();
+        var loaded = index.Load(SpcPath!);
+        var mvid = loaded.Module!.ModuleVersionId;
+
+        string[] valid = { "CallInstruction", "StackEmpty", "Async" };
+
+        for (int rid = 1; rid <= 200; rid++)
+        {
+            var r = index.GetNativeBodyRef(mvid, 0x06000000 | rid);
+            if (!r.Found || r.Body!.IlMap is not { Count: > 0 } map) continue;
+            foreach (var e in map.Where(x => x.SourceTypes is not null))
+            {
+                foreach (var flag in e.SourceTypes!.Split('|'))
+                    valid.Should().Contain(flag, "decoder must not invent flag names");
+            }
+        }
+    }
+
     [Fact]
     public void Returns_not_found_for_JIT_only_assembly()
     {
