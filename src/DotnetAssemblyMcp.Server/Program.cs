@@ -133,13 +133,14 @@ static Microsoft.Extensions.DependencyInjection.IMcpServerBuilder ConfigureMcpSe
                   4. `decompile_method` — heavier follow-up: returns the C# source of a single
                      method via ICSharpCode.Decompiler. Output is hard-capped (`maxChars`) and
                      LRU-cached, so it is safe to call back-to-back on the same hotspot.
-                  5. `get_method_il` — raw IL bytes (hex), max-stack, exception region count and
-                     instruction count. Cheaper than decompile when you only need to confirm a
-                     method's shape or count instructions.
-                  6. `scan_method_il` — symbolic outbound references parsed from the IL: called
-                     methods, accessed fields, used types and string literals. The cheapest way
-                     to build a "what does this call?" graph without decompiling.
-                  7. `find_callers` — Tier-4 reverse index: lists every method that emits a
+                  5. `get_method_il` — IL reader for a method, with a `format` discriminator:
+                     `raw` (default) returns hex-encoded IL bytes plus max-stack / EH-region /
+                     instruction counts (cheapest); `text` returns an ildasm-style textual
+                     listing via ICSharpCode.Decompiler's ReflectionDisassembler (LRU-cached);
+                     `scan` returns symbolic outbound references parsed from the IL — called
+                     methods, accessed fields, used types and string literals — the cheapest
+                     way to build a "what does this call?" graph without decompiling.
+                  6. `find_callers` — Tier-4 reverse index: lists every method that emits a
                      direct call to the callee, both intra-module (MethodDef) and cross-module
                      (MemberRef with matching assembly/type/method/signature). Lazily built and
                      cached at ~/.cache/dotnet-assembly-mcp/<mvid>.xref.

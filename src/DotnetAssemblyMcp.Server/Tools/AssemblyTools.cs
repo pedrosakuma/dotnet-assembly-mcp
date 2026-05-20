@@ -768,7 +768,8 @@ public sealed class AssemblyTools
         "every call to its getter/setter), 'e:<mvid>:0x<eventToken>' (event — every call to " +
         "its add/remove/raise accessor). The 'accessor' filter applies to properties and " +
         "events only: 'all' (default) / 'getter' / 'setter' for properties, 'all' (default) / " +
-        "'add' / 'remove' / 'raise' for events; it is ignored for fields. Same-module hits " +
+        "'add' / 'remove' / 'raise' for events, and 'all' (default) / 'read' / 'write' for " +
+        "fields (preserves the v0.13 find_field_references mode= filter). Same-module hits " +
         "use metadata tokens; cross-module hits use the existing call/field-access xref " +
         "indices. Result is capped at 'maxHits' (default 1000, hard cap 10000). The returned " +
         "envelope carries a 'kind' discriminator plus exactly one populated payload field " +
@@ -776,7 +777,7 @@ public sealed class AssemblyTools
     public static AssemblyResult<FindMemberReferencesResult> FindMemberReferences(
         IMetadataIndex index,
         [Description("Member handle: 'f:<mvid>:0x<fieldToken>' for a field, 'p:<mvid>:0x<propertyToken>' for a property, or 'e:<mvid>:0x<eventToken>' for an event.")] string memberHandle,
-        [Description("Optional accessor filter — applies to property/event handles only and is ignored for field handles. Property: 'all' (default) / 'getter' / 'setter'. Event: 'all' (default) / 'add' / 'remove' / 'raise'.")] string? accessor = null,
+        [Description("Optional accessor / mode filter. Field handles: 'all' (default) / 'read' (ldfld/ldsfld + ldflda/ldsflda) / 'write' (stfld/stsfld). Property handles: 'all' (default) / 'getter' / 'setter'. Event handles: 'all' (default) / 'add' / 'remove' / 'raise'.")] string? accessor = null,
         [Description("Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.")] int maxHits = 0,
         CancellationToken cancellationToken = default)
     {
@@ -812,16 +813,21 @@ public sealed class AssemblyTools
         IMetadataIndex index, Guid mvid, int token, string? accessor, string memberHandle,
         int maxHits, CancellationToken ct)
     {
-        if (!string.IsNullOrEmpty(accessor) && !string.Equals(accessor, "all", StringComparison.OrdinalIgnoreCase))
+        var mode = FieldAccessMode.All;
+        if (!string.IsNullOrEmpty(accessor))
         {
-            // Field handles ignore the accessor argument; reject anything other than 'all' so a
-            // typo (e.g. accessor=getter on a field) doesn't silently look like a no-op.
-            var err = new AssemblyError(ErrorKinds.InvalidArgument,
-                $"accessor='{accessor}' is not valid for a field handle. Omit accessor or pass 'all'.");
-            return AssemblyResult.Fail<FindMemberReferencesResult>(err.Message, err);
+            if (string.Equals(accessor, "all", StringComparison.OrdinalIgnoreCase)) mode = FieldAccessMode.All;
+            else if (string.Equals(accessor, "read", StringComparison.OrdinalIgnoreCase)) mode = FieldAccessMode.Read;
+            else if (string.Equals(accessor, "write", StringComparison.OrdinalIgnoreCase)) mode = FieldAccessMode.Write;
+            else
+            {
+                var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"accessor must be 'all', 'read', or 'write' for a field handle (got '{accessor}').");
+                return AssemblyResult.Fail<FindMemberReferencesResult>(err.Message, err);
+            }
         }
 
-        var result = index.FindFieldReferences(mvid, token, FieldAccessMode.All, maxHits, ct);
+        var result = index.FindFieldReferences(mvid, token, mode, maxHits, ct);
         if (!result.IsSuccess)
             return AssemblyResult.Fail<FindMemberReferencesResult>(result.Error!.Message, result.Error,
                 AssemblyErrorRecovery.For(result.Error));
@@ -1104,11 +1110,12 @@ public sealed class AssemblyTools
         return AssemblyResult.Ok(
             r,
             $"{r.Callers.Count} caller(s) in {r.ModulesSearched} module{cacheTag}.",
-            new NextActionHint("scan_method_il", "Inspect a specific caller's outbound references.",
+            new NextActionHint("get_method_il", "Inspect a specific caller's outbound references.",
                 new Dictionary<string, object?>
                 {
                     ["moduleVersionId"] = r.CalleeModuleVersionId.ToString("D"),
                     ["metadataToken"] = $"0x{r.CalleeMetadataToken:X8}",
+                    ["format"] = "scan",
                 }));
     }
 
