@@ -1,6 +1,6 @@
 # dotnet-assembly-mcp
 
-> **Status:** 16 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool`, Docker image, and self-contained single-file binaries. Latest release: [`v0.7.1`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases/tag/v0.7.1) — paginated-tool schema validation hotfix.
+> **Status:** 24 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool`, Docker image, and self-contained single-file binaries. Latest release: [`v0.11.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases/tag/v0.11.0) — `find_event_references` + cross-module `list_derived_types` (subclasses & interface implementers).
 
 An **MCP server** for *static* navigation of compiled .NET assemblies — types, methods, attributes, signatures, IL, cross-references, and on-demand decompilation — designed as a **token-efficient alternative to feeding source code into an LLM context**.
 
@@ -99,27 +99,47 @@ If the tool isn't on `PATH`, point `command` at the absolute path (e.g. `~/.dotn
 
 ## Tools
 
+All tools share the same response envelope (`summary`, `data`, `hints`, `error`); `hints` advertise the suggested next tool so an agent can chain without rediscovering the API. Cross-module xref tools (`find_callers`, `find_type_references`, `find_field_references`, `find_property_references`, `find_event_references`, `find_string_references`, `find_attribute_targets`, `list_derived_types`) all use the same matching convention: same-module hits by metadata token, cross-module hits by `(assembly simple name, type full name, member signature)` against the child module's `TypeRef` / `MemberRef` rows.
+
 ### Discovery & loading
 | Tool | Purpose |
 |---|---|
 | `load_assembly` | Load a `.dll`/`.exe` from disk (idempotent by MVID) |
 | `list_assemblies` | List currently loaded modules |
-| `import_assembly_manifest` | Bulk-import a list of paths under configured roots |
-| `list_types` | Paginated TypeDef listing |
-| `list_methods` | Paginated MethodDef listing (filterable by declaring type) |
-| `find_method` | Search MethodDefs by regex on name / type / signature |
+| `list_assembly_references` | Outbound `AssemblyRef` rows for one module |
+| `import_assembly_manifest` | Bulk-register a list of paths under configured roots |
 
-### Single-method resolution
+### Type & method enumeration (Tier-1)
+| Tool | Purpose |
+|---|---|
+| `list_types` | Paginated TypeDef listing, filterable by namespace / name / kind |
+| `get_type` | Resolve `(mvid, token)` to a type summary (base type, interfaces, kind) |
+| `list_derived_types` | Walk subclasses **and** interface implementers across every loaded module (`directOnly` / transitive) |
+| `list_members` | Enumerate fields / properties / events of a type |
+| `list_methods` | Paginated MethodDef listing, filterable by declaring type |
+| `find_method` | Module-wide MethodDef search by regex on name / signature |
+| `list_attributes` | Custom attributes on a module / type / method / parameter / field / property / event |
+
+### Single-method resolution (Tier-2 / Tier-3)
 | Tool | Purpose |
 |---|---|
 | `get_method` | Resolve `(mvid, token)` to a method summary; accepts `genericTypeArguments` / `genericMethodArguments` for a closed signature view |
 | `get_method_il` | Raw IL bytes (hex), max-stack, instruction count |
-| `scan_method_il` | Outbound references parsed from IL (calls, fields, types, strings) |
+| `get_method_il_text` | ildasm-like textual IL listing (capped, LRU-cached) |
+| `scan_method_il` | Structured outbound references parsed from IL (calls, fields, types, strings) |
 | `decompile_method` | C# body via ICSharpCode.Decompiler (hard-capped, LRU-cached) |
-| `find_callers` | Reverse call graph (intra-module MethodDef + cross-module MemberRef matching); narrows by instantiation when `genericMethodArguments` is supplied |
 | `get_method_source` | PDB-resolved file/lines plus SourceLink URL (embedded PDB or sibling `.pdb`) |
 
-Every tool returns the same envelope (`summary`, `data`, `hints`, `error`); `hints` advertise the suggested next tool so an agent can chain without rediscovering the API.
+### Reverse cross-reference (Tier-4)
+| Tool | Purpose |
+|---|---|
+| `find_callers` | Every method whose IL calls a given method; narrows by instantiation when `genericMethodArguments` is supplied |
+| `find_type_references` | Every site referencing a TypeDef (field/parameter/return/local types + `newobj` / `castclass` / `isinst` / `box` / `ldtoken` / generic args) |
+| `find_field_references` | Every method whose IL touches a field (six opcodes: `ldfld`/`ldsfld`/`stfld`/`stsfld`/`ldflda`/`ldsflda`), filterable by read/write/all |
+| `find_property_references` | Every call to a property's getter or setter, filterable by accessor |
+| `find_event_references` | Every call to an event's add/remove/raise accessor, filterable by accessor |
+| `find_string_references` | Every method whose IL emits `ldstr` for a given literal (exact / contains / regex) |
+| `find_attribute_targets` | Reverse custom-attribute index: every assembly/type/method/parameter/field/property/event bearing a given attribute |
 
 ## Companion project
 
