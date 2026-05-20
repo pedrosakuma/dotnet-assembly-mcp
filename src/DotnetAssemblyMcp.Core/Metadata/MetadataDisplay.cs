@@ -122,46 +122,92 @@ internal static class MetadataDisplay
         // the returned handle straight back into the corresponding `find_*_references` /
         // `get_method` tool without re-parsing. Pre-#80 every entry was 'm:' prefixed
         // regardless of kind — fields and types could never round-trip.
+        //
+        // The Kind discriminator (added in #86) is the source of truth for classification:
+        // MemberReference (table 0x0A) handles can carry either a method or field signature,
+        // and the wire grammar has no first-class prefix for either MemberRef flavor, so the
+        // Handle string is a synthetic carrier and Kind tells the consumer what was actually
+        // pointed at.
         string handleStr;
         string display;
+        IlSymbolKind kind;
         try
         {
             var h = MetadataTokens.Handle(token);
-            (handleStr, display) = h.Kind switch
+            (handleStr, display, kind) = h.Kind switch
             {
                 HandleKind.MethodDefinition =>
-                    (HandleSyntax.FormatMethod(m.Mvid, token), RenderMethodDef(m, (MethodDefinitionHandle)h)),
+                    (HandleSyntax.FormatMethod(m.Mvid, token),
+                     RenderMethodDef(m, (MethodDefinitionHandle)h),
+                     IlSymbolKind.MethodDef),
                 HandleKind.MemberReference =>
-                    // MemberRefs (tokens in table 0x0A) have no first-class wire prefix —
-                    // 'm:' formally addresses MethodDef (table 0x06) and 'f:' addresses FieldDef
-                    // (table 0x04). We emit a synthetic 'm:' as a stable token-carrier so
-                    // existing consumers keep working; precise round-trip into find_*_references
-                    // requires the Token field, not the Handle string. See follow-up to #80.
-                    (HandleSyntax.FormatMethod(m.Mvid, token), RenderMemberRef(m, (MemberReferenceHandle)h)),
+                    RenderMemberRefWithKind(m, (MemberReferenceHandle)h, token),
                 HandleKind.MethodSpecification =>
-                    (HandleSyntax.FormatMethod(m.Mvid, token), RenderMethodSpec(m, (MethodSpecificationHandle)h)),
+                    (HandleSyntax.FormatMethod(m.Mvid, token),
+                     RenderMethodSpec(m, (MethodSpecificationHandle)h),
+                     IlSymbolKind.MethodSpec),
                 HandleKind.FieldDefinition =>
-                    (HandleSyntax.FormatField(m.Mvid, token), RenderFieldDef(m, (FieldDefinitionHandle)h)),
+                    (HandleSyntax.FormatField(m.Mvid, token),
+                     RenderFieldDef(m, (FieldDefinitionHandle)h),
+                     IlSymbolKind.FieldDef),
                 HandleKind.TypeDefinition =>
-                    (HandleSyntax.FormatType(m.Mvid, token), RenderTypeDef(m, (TypeDefinitionHandle)h)),
+                    (HandleSyntax.FormatType(m.Mvid, token),
+                     RenderTypeDef(m, (TypeDefinitionHandle)h),
+                     IlSymbolKind.TypeDef),
                 HandleKind.TypeReference =>
-                    (HandleSyntax.FormatType(m.Mvid, token), RenderTypeRef(m, (TypeReferenceHandle)h)),
+                    (HandleSyntax.FormatType(m.Mvid, token),
+                     RenderTypeRef(m, (TypeReferenceHandle)h),
+                     IlSymbolKind.TypeRef),
                 HandleKind.TypeSpecification =>
-                    (HandleSyntax.FormatType(m.Mvid, token), RenderTypeSpec(m, (TypeSpecificationHandle)h)),
-                _ => (HandleSyntax.FormatMethod(m.Mvid, token), IlSymbolRef.UnresolvedDisplay),
+                    (HandleSyntax.FormatType(m.Mvid, token),
+                     RenderTypeSpec(m, (TypeSpecificationHandle)h),
+                     IlSymbolKind.TypeSpec),
+                _ => (HandleSyntax.FormatMethod(m.Mvid, token), IlSymbolRef.UnresolvedDisplay, IlSymbolKind.Unknown),
             };
         }
         catch (BadImageFormatException)
         {
             handleStr = HandleSyntax.FormatMethod(m.Mvid, token);
             display = IlSymbolRef.UnresolvedDisplay;
+            kind = IlSymbolKind.Unknown;
         }
         catch (InvalidCastException)
         {
             handleStr = HandleSyntax.FormatMethod(m.Mvid, token);
             display = IlSymbolRef.UnresolvedDisplay;
+            kind = IlSymbolKind.Unknown;
         }
-        return new IlSymbolRef(token, handleStr, display);
+        return new IlSymbolRef(token, handleStr, display, kind);
+    }
+
+    // MemberReference rows (table 0x0A) carry either a method or a field signature; the
+    // metadata reader exposes this via MemberReferenceKind. We use it to bucket the symbol
+    // correctly downstream (issue #86 — pre-fix, field MemberRefs leaked into the calls bucket).
+    private static (string Handle, string Display, IlSymbolKind Kind) RenderMemberRefWithKind(
+        ModuleHandle m, MemberReferenceHandle h, int token)
+    {
+        var display = RenderMemberRef(m, h);
+        IlSymbolKind kind;
+        try
+        {
+            kind = m.MD.GetMemberReference(h).GetKind() switch
+            {
+                MemberReferenceKind.Field => IlSymbolKind.FieldMemberRef,
+                MemberReferenceKind.Method => IlSymbolKind.MethodMemberRef,
+                _ => IlSymbolKind.Unknown,
+            };
+        }
+        catch (BadImageFormatException)
+        {
+            kind = IlSymbolKind.Unknown;
+        }
+
+        // The wire grammar formally addresses MethodDef (m:) and FieldDef (f:) — neither
+        // strictly covers a MemberRef token. We keep the m: carrier shape for backward
+        // compatibility (pre-#86 every MemberRef shipped as m:); Kind is the source of truth
+        // for consumers that need to distinguish method MemberRefs from field MemberRefs and
+        // for tooling that may later introduce a dedicated MemberRef wire prefix.
+        return (HandleSyntax.FormatMethod(m.Mvid, token), display, kind);
     }
 
     public static MethodIdentity BuildMethodIdentity(ModuleHandle module, MethodDefinitionHandle h) =>
