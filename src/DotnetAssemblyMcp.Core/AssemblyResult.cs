@@ -10,8 +10,8 @@ namespace DotnetAssemblyMcp.Core;
 /// <typeparam name="T">Type of the underlying payload.</typeparam>
 public sealed record AssemblyResult<T>(
     string Summary,
-    T? Data,
-    IReadOnlyList<NextActionHint> Hints,
+    T? Data = default,
+    IReadOnlyList<NextActionHint>? Hints = null,
     AssemblyError? Error = null)
 {
     /// <summary>True when the call failed and <see cref="Error"/> is populated.</summary>
