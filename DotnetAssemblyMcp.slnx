@@ -7,5 +7,6 @@
     <Project Path="tests/DotnetAssemblyMcp.Core.Tests/DotnetAssemblyMcp.Core.Tests.csproj" />
     <Project Path="tests/fixtures/SampleLib/SampleLib.csproj" />
     <Project Path="tests/fixtures/SampleConsumer/SampleConsumer.csproj" />
+    <Project Path="tests/fixtures/SampleLibR2R/SampleLibR2R.csproj" />
   </Folder>
 </Solution>

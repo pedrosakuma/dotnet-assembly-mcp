@@ -23,6 +23,22 @@
     <ProjectReference Include="..\fixtures\SampleConsumer\SampleConsumer.csproj" />
   </ItemGroup>
 
+  <!-- SampleLibR2R is intentionally NOT referenced as a ProjectReference: it would
+       drag a second copy of SampleLib's types into the test bin and produce
+       duplicate-MVID confusion. We only need its published .dll on disk for
+       MetadataIndex.Load(), so we just trigger its build (which runs Publish via
+       its AfterTargets hook) before the test project compiles. The project is
+       listed in DotnetAssemblyMcp.slnx so `dotnet restore` at the solution level
+       hydrates its project.assets.json before this target runs. We still pass
+       Restore explicitly so direct `dotnet build` on this csproj (without a prior
+       solution-level restore) still works. -->
+  <Target Name="BuildSampleLibR2RFixture" BeforeTargets="BeforeBuild">
+    <MSBuild
+      Projects="..\fixtures\SampleLibR2R\SampleLibR2R.csproj"
+      Targets="Restore;Build"
+      Properties="Configuration=$(Configuration)" />
+  </Target>
+
   <!-- Build the counterpart CoreClrSample fixture (git submodule) before tests run, so
        integration tests can load it via MetadataIndex. The submodule may be absent in
        lightweight clones; the target is a no-op in that case and the integration tests
