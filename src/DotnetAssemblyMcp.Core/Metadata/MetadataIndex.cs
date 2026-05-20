@@ -22,16 +22,10 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 /// </remarks>
 public sealed class MetadataIndex : IMetadataIndex, IDisposable
 {
-    /// <summary>Debounce window applied to <see cref="FileSystemWatcher"/> events.</summary>
-    public static readonly TimeSpan WatchDebounce = TimeSpan.FromMilliseconds(250);
+    /// <summary>Debounce window applied to <see cref="FileSystemWatcher"/> events. Mirrors <see cref="ModuleStore.WatchDebounce"/>.</summary>
+    public static readonly TimeSpan WatchDebounce = ModuleStore.WatchDebounce;
 
-    private readonly ConcurrentDictionary<Guid, Module> _modules = new();
-    private readonly ConcurrentDictionary<Guid, string> _pathHints = new();
-    private readonly ConcurrentDictionary<string, FileSystemWatcher> _watchers =
-        new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, DateTime> _pendingReloads =
-        new(StringComparer.OrdinalIgnoreCase);
-    private readonly bool _watch;
+    private readonly ModuleStore _store;
     private int _disposed;
 
     private readonly ConcurrentDictionary<Guid, XrefData> _xrefCache = new();
@@ -39,20 +33,6 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private readonly ConcurrentDictionary<Guid, AttributeIndexData> _attributeIndexCache = new();
     private readonly ConcurrentDictionary<Guid, FieldAccessIndexData> _fieldAccessCache = new();
     private readonly ConcurrentDictionary<Guid, R2R.R2RReader?> _r2rCache = new();
-    // PEReader graveyard: holds readers we logically evicted (same-MVID reload, MVID change)
-    // but cannot dispose immediately because in-flight requests on other threads may still
-    // hold a reference to the old Module. The queue is drained on index Dispose.
-    //
-    // Trade-off (audit #78): this graveyard is *intentionally unbounded* during the index's
-    // lifetime — a request that's still walking an old `PEReader` cannot be detected from
-    // outside without true reader ref-counting. Memory cost is bounded by the number of
-    // distinct reloads in a session and by the PE size (file is fully read into a
-    // MemoryStream on Load); for typical dev workflows this is < a few hundred MB. The
-    // complete fix (per-reader lease + active-reader tracking) is tracked under the
-    // ModuleStore extraction (#79) where the access surface is small enough to make the
-    // refactor safe. Bounding the queue here would re-introduce the dispose-while-reading
-    // race for high-churn reload bursts, which defeats the purpose of the graveyard.
-    private readonly ConcurrentQueue<PEReader> _evictedPe = new();
     private readonly string _xrefCacheDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".cache", "dotnet-assembly-mcp");
@@ -65,231 +45,48 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     /// <summary>Creates an index, optionally installing per-directory file watchers.</summary>
     /// <param name="watchForChanges">When true, reloads modules on disk changes and invalidates the old MVID.</param>
-    public MetadataIndex(bool watchForChanges) => _watch = watchForChanges;
-
-    /// <inheritdoc />
-    public LoadResult Load(string path)
+    public MetadataIndex(bool watchForChanges)
     {
-        if (string.IsNullOrWhiteSpace(path))
-            return LoadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "path is required."));
-        if (!File.Exists(path))
-            return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, $"file not found: {path}"));
-
-        var fullPath = Path.GetFullPath(path);
-        var loaded = OpenAndRegister(fullPath);
-        if (!loaded.IsSuccess) return loaded;
-
-        if (_watch) EnsureWatcher(fullPath);
-        return loaded;
+        _store = new ModuleStore(watchForChanges);
+        // Forward lifecycle events: fan out to cache invalidation, then re-raise to subscribers
+        // of the public MetadataIndex.ModuleReloaded event. This keeps the public API stable
+        // while letting ModuleStore own the actual file-watch + load loop.
+        _store.ModuleReloaded += OnStoreModuleReloaded;
     }
 
-    private LoadResult OpenAndRegister(string fullPath)
+    private void OnStoreModuleReloaded(object? sender, ModuleReloadedEventArgs e)
     {
-        var opened = OpenModule(fullPath);
-        if (opened.Error is not null) return LoadResult.Fail(opened.Error);
-        var mvid = opened.Module!.Mvid;
-
-        if (_modules.TryGetValue(mvid, out var existing))
-        {
-            // Same-MVID reload: atomically install the freshly-read PE and dispose the old one
-            // so subsequent queries don't keep returning the stale byte buffer. Without this
-            // swap, deterministic rebuilds that preserve the MVID would silently serve stale IL.
-            if (string.Equals(existing.Path, fullPath, StringComparison.OrdinalIgnoreCase))
-            {
-                var replacement = new Module(mvid, fullPath, opened.PE!, opened.MD!);
-                if (_modules.TryUpdate(mvid, replacement, existing))
-                {
-                    // Defer disposal of the old PE — in-flight requests on other threads
-                    // may still be reading through `existing.PE`. The graveyard is drained
-                    // on index Dispose. See _evictedPe declaration for the bounding trade-off.
-                    _evictedPe.Enqueue(existing.PE);
-                    // Even when the MVID hasn't changed, the IL we just opened may differ from
-                    // what built the xref / source caches (deterministic rebuild, manual file
-                    // swap). Drop those caches and fan the event out so subscribers (e.g. the
-                    // decompiler engine cache) can refresh too.
-                    InvalidateXref(mvid);
-                    ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, mvid, mvid, null));
-                    return LoadResult.Ok(SummarizeModule(replacement));
-                }
-            }
-            // Different path with the same MVID (e.g. file copy) — keep the first registration
-            // and dispose our duplicate to avoid leaking the PEReader.
-            opened.PE!.Dispose();
-            return LoadResult.Ok(SummarizeModule(existing));
-        }
-
-        var added = _modules.GetOrAdd(mvid, _ => opened.Module!);
-        if (!ReferenceEquals(added.PE, opened.PE))
-        {
-            // Lost a race; another thread loaded the same MVID first. Dispose our duplicate.
-            opened.PE!.Dispose();
-        }
-        return LoadResult.Ok(SummarizeModule(added));
-    }
-
-    private readonly record struct OpenedModule(
-        Module? Module, PEReader? PE, MetadataReader? MD, AssemblyError? Error);
-
-    private static OpenedModule OpenModule(string fullPath)
-    {
-        try
-        {
-            // Read the bytes once and back the PEReader with a MemoryStream so the file on disk
-            // stays unlocked. Required for the Tier-1 watcher to be able to observe rewrites on
-            // Windows, where File.Move(overwrite: true) needs the destination to be free of
-            // open writable handles. Per the spike, fixture-sized assemblies cost ~tens of KB
-            // resident — well within the Tier-1 budget.
-            var bytes = File.ReadAllBytes(fullPath);
-            var pe = new PEReader(new MemoryStream(bytes, writable: false));
-            if (!pe.HasMetadata)
-            {
-                pe.Dispose();
-                return new OpenedModule(null, null, null,
-                    new AssemblyError(ErrorKinds.ModuleLoadFailed, $"not a managed PE: {fullPath}"));
-            }
-            var md = pe.GetMetadataReader();
-            var mvid = md.GetGuid(md.GetModuleDefinition().Mvid);
-            return new OpenedModule(new Module(mvid, fullPath, pe, md), pe, md, null);
-        }
-        catch (BadImageFormatException ex)
-        {
-            return new OpenedModule(null, null, null,
-                new AssemblyError(ErrorKinds.ModuleLoadFailed, "invalid PE/CLI image.", ex.Message));
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            return new OpenedModule(null, null, null,
-                new AssemblyError(ErrorKinds.ModuleLoadFailed, "permission denied.", ex.Message));
-        }
-        catch (IOException ex)
-        {
-            return new OpenedModule(null, null, null,
-                new AssemblyError(ErrorKinds.ModuleLoadFailed, "i/o error opening assembly.", ex.Message));
-        }
-    }
-
-    private void EnsureWatcher(string fullPath)
-    {
-        var dir = Path.GetDirectoryName(fullPath);
-        if (string.IsNullOrEmpty(dir)) return;
-        _watchers.GetOrAdd(dir, d =>
-        {
-            var w = new FileSystemWatcher(d)
-            {
-                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime
-                               | NotifyFilters.FileName,
-                IncludeSubdirectories = false,
-                EnableRaisingEvents = true,
-            };
-            w.Changed += OnWatcherEvent;
-            w.Created += OnWatcherEvent;
-            w.Renamed += OnWatcherRenamed;
-            return w;
-        });
-    }
-
-    private void OnWatcherEvent(object sender, FileSystemEventArgs e) => ScheduleReload(e.FullPath);
-    private void OnWatcherRenamed(object sender, RenamedEventArgs e) => ScheduleReload(e.FullPath);
-
-    private void ScheduleReload(string fullPath)
-    {
-        if (_disposed != 0) return;
-        // Only react to paths we actually loaded. Avoids storms on bin/obj rebuilds.
-        if (!_modules.Values.Any(m => string.Equals(m.Path, fullPath, StringComparison.OrdinalIgnoreCase)))
-            return;
-
-        var now = DateTime.UtcNow;
-        _pendingReloads[fullPath] = now;
-        _ = Task.Delay(WatchDebounce).ContinueWith(_ => TryReload(fullPath, now), TaskScheduler.Default);
-    }
-
-    private void TryReload(string fullPath, DateTime scheduledAt)
-    {
-        if (_disposed != 0) return;
-        // Drop stale debounce timers — only the most recent scheduling wins.
-        if (!_pendingReloads.TryGetValue(fullPath, out var latest) || latest != scheduledAt) return;
-        _pendingReloads.TryRemove(fullPath, out _);
-
-        var oldEntry = _modules.Values
-            .FirstOrDefault(m => string.Equals(m.Path, fullPath, StringComparison.OrdinalIgnoreCase));
-        var oldMvid = oldEntry?.Mvid;
-
-        // Tolerate transient ShareViolation/Empty mid-write by skipping; the next event will retry.
-        if (!File.Exists(fullPath)) return;
-
-        var result = OpenAndRegister(fullPath);
-        if (!result.IsSuccess)
-        {
-            ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, oldMvid, null, result.Error));
-            return;
-        }
-
-        var newMvid = result.Module!.ModuleVersionId;
-        if (oldMvid is { } prev && prev != newMvid && _modules.TryRemove(prev, out var stale))
-        {
-            // Defer disposal — see _evictedPe declaration.
-            _evictedPe.Enqueue(stale.PE);
-            InvalidateXref(prev);
-        }
-        else if (oldMvid is { } same && same == newMvid)
-        {
-            InvalidateXref(same);
-        }
-
-        ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, oldMvid, newMvid, null));
+        // Drop downstream caches keyed by the affected MVID. Same-MVID rebuilds (oldMvid ==
+        // newMvid) still need invalidation because the IL may have changed. Failed reloads
+        // (Error != null) leave the still-loaded module's caches intact — the public event
+        // shape is preserved, but the cache fan-out matches pre-extraction behaviour where
+        // InvalidateXref was only called on the success path inside TryReload.
+        if (e.Error is null && e.OldMvid is { } prev) InvalidateXref(prev);
+        ModuleReloaded?.Invoke(this, e);
     }
 
     /// <inheritdoc />
-    public IReadOnlyList<ModuleSummary> List()
-    {
-        var list = new List<ModuleSummary>(_modules.Count);
-        foreach (var m in _modules.Values)
-            list.Add(SummarizeModule(m));
-        return list;
-    }
+    public LoadResult Load(string path) => _store.Load(path);
 
     /// <inheritdoc />
-    public ProbeResult Probe(string path)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-            return ProbeResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "path is required."));
-        if (!File.Exists(path))
-            return ProbeResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, $"file not found: {path}"));
-        var fullPath = Path.GetFullPath(path);
-        var opened = OpenModule(fullPath);
-        if (opened.Error is not null) return ProbeResult.Fail(opened.Error);
-        try { return ProbeResult.Ok(opened.Module!.Mvid); }
-        finally { opened.PE!.Dispose(); }
-    }
+    public IReadOnlyList<ModuleSummary> List() => _store.List();
 
     /// <inheritdoc />
-    public void RegisterPathHint(Guid moduleVersionId, string path)
-    {
-        if (moduleVersionId == Guid.Empty || string.IsNullOrWhiteSpace(path)) return;
-        _pathHints[moduleVersionId] = Path.GetFullPath(path);
-    }
+    public ProbeResult Probe(string path) => _store.Probe(path);
 
     /// <inheritdoc />
-    public bool TryGetPathHint(Guid moduleVersionId, out string? path)
-    {
-        if (_pathHints.TryGetValue(moduleVersionId, out var p))
-        {
-            path = p;
-            return true;
-        }
-        path = null;
-        return false;
-    }
+    public void RegisterPathHint(Guid moduleVersionId, string path) =>
+        _store.RegisterPathHint(moduleVersionId, path);
 
     /// <inheritdoc />
-    public IReadOnlyDictionary<Guid, string> PathHints => _pathHints;
+    public bool TryGetPathHint(Guid moduleVersionId, out string? path) =>
+        _store.TryGetPathHint(moduleVersionId, out path);
 
     /// <inheritdoc />
-    public void WatchPath(string path)
-    {
-        if (!_watch || string.IsNullOrWhiteSpace(path)) return;
-        EnsureWatcher(Path.GetFullPath(path));
-    }
+    public IReadOnlyDictionary<Guid, string> PathHints => _store.PathHints;
+
+    /// <inheritdoc />
+    public void WatchPath(string path) => _store.WatchPath(path);
 
     /// <inheritdoc />
     public ListTypesResult ListTypes(Guid moduleVersionId, ListTypesQuery query)
@@ -297,7 +94,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         query ??= new ListTypesQuery();
         if (moduleVersionId == Guid.Empty)
             return ListTypesResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return ListTypesResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {moduleVersionId}."));
 
@@ -345,7 +142,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         query ??= new ListMethodsQuery();
         if (moduleVersionId == Guid.Empty)
             return ListMethodsResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return ListMethodsResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {moduleVersionId}."));
 
@@ -425,7 +222,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             return FindMethodResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "namePattern is required."));
         if (moduleVersionId == Guid.Empty)
             return FindMethodResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return FindMethodResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {moduleVersionId}."));
 
@@ -503,7 +300,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return ns.Length == nsPrefix.Length || ns[nsPrefix.Length] == '.';
     }
 
-    private static TypeSummary? TrySummarizeType(Module module, int row)
+    private static TypeSummary? TrySummarizeType(ModuleHandle module, int row)
     {
         var handle = MetadataTokens.TypeDefinitionHandle(row);
         var td = module.MD.GetTypeDefinition(handle);
@@ -523,7 +320,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             fullName, kind, methodCount, isPublic, baseType, interfaces);
     }
 
-    private static TypeReferenceSummary? TryRenderTypeReferenceSummary(Module module, EntityHandle handle)
+    private static TypeReferenceSummary? TryRenderTypeReferenceSummary(ModuleHandle module, EntityHandle handle)
     {
         if (handle.IsNil) return null;
         try
@@ -549,7 +346,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         catch (BadImageFormatException) { return null; }
     }
 
-    private static IReadOnlyList<TypeReferenceSummary> ReadInterfaceImplementations(Module module, TypeDefinition td)
+    private static IReadOnlyList<TypeReferenceSummary> ReadInterfaceImplementations(ModuleHandle module, TypeDefinition td)
     {
         var impls = td.GetInterfaceImplementations();
         if (impls.Count == 0) return Array.Empty<TypeReferenceSummary>();
@@ -567,7 +364,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return list;
     }
 
-    private static TypeKind ClassifyTypeKind(Module module, TypeDefinition td)
+    private static TypeKind ClassifyTypeKind(ModuleHandle module, TypeDefinition td)
     {
         if ((td.Attributes & TypeAttributes.Interface) != 0) return TypeKind.Interface;
 
@@ -599,7 +396,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         if (identity.MetadataToken == 0)
             return ResolveResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "metadataToken is required."));
 
-        if (!_modules.TryGetValue(identity.ModuleVersionId, out var module))
+        if (!_store.TryGet(identity.ModuleVersionId, out var module))
         {
             return ResolveResult.Fail(new AssemblyError(
                 ErrorKinds.ModuleNotFound,
@@ -755,7 +552,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     /// </summary>
     private MethodSpecDecodeResult TryDecodeMethodSpec(MethodSpecHandle specRef, bool allowMissingModule)
     {
-        if (!_modules.TryGetValue(specRef.ModuleVersionId, out var specModule))
+        if (!_store.TryGet(specRef.ModuleVersionId, out var specModule))
         {
             if (allowMissingModule) return default;
             return new MethodSpecDecodeResult(null, null, null, null, new AssemblyError(
@@ -825,7 +622,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private readonly record struct MethodSpecDecodeResult(
-        Module? SpecModule,
+        ModuleHandle? SpecModule,
         MethodSpecification? SpecRow,
         IReadOnlyList<string>? TypeRendered,
         IReadOnlyList<string>? MethodRendered,
@@ -838,7 +635,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     /// authored against a different MethodDef.
     /// </summary>
     private bool MethodSpecTargetsMethodDef(
-        Module specModule, MethodSpecification specRow,
+        ModuleHandle specModule, MethodSpecification specRow,
         Guid targetMvid, int targetMethodDefToken,
         out AssemblyError? validationError)
     {
@@ -864,7 +661,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
                 return true;
 
             case HandleKind.MemberReference:
-                if (!_modules.TryGetValue(targetMvid, out var targetMod))
+                if (!_store.TryGet(targetMvid, out var targetMod))
                 {
                     validationError = new AssemblyError(
                         ErrorKinds.ModuleNotFound,
@@ -910,16 +707,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private Dictionary<Guid, Func<MetadataReader>> SnapshotReaders()
-    {
-        var dict = new Dictionary<Guid, Func<MetadataReader>>(_modules.Count);
-        foreach (var (mvid, mod) in _modules)
-        {
-            var local = mod; // capture
-            dict[mvid] = () => local.MD;
-        }
-        return dict;
-    }
+    private Dictionary<Guid, Func<MetadataReader>> SnapshotReaders() => _store.SnapshotReaders();
 
     /// <inheritdoc />
     public IlBodyResult GetIlBody(MethodIdentity identity, int maxBytes = 0, CancellationToken cancellationToken = default)
@@ -1102,7 +890,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         // Cross-module: compute the callee's signature key once and probe every other loaded module.
         var calleeKey = BuildCalleeKey(module, methodHandle);
         var modulesSearched = 1;
-        foreach (var other in _modules.Values)
+        foreach (var other in _store.Modules)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (other.Mvid == module.Mvid) continue;
@@ -1184,7 +972,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             var filtered = new List<CallerRef>(callers.Count);
             foreach (var c in callers)
             {
-                if (!_modules.TryGetValue(c.ModuleVersionId, out var callerMod)) continue;
+                if (!_store.TryGet(c.ModuleVersionId, out var callerMod)) continue;
                 if (CallerHasMatchingInstantiation(
                         callerMod, c.MetadataToken, module, methodHandle, calleeKey,
                         expectedTypeArgs, expectedMethodArgs))
@@ -1237,10 +1025,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             }
         }
 
-        IEnumerable<Module> targets;
+        IEnumerable<ModuleHandle> targets;
         if (moduleVersionIdFilter != Guid.Empty)
         {
-            if (!_modules.TryGetValue(moduleVersionIdFilter, out var only))
+            if (!_store.TryGet(moduleVersionIdFilter, out var only))
             {
                 return FindStringReferencesReadResult.Fail(new AssemblyError(
                     ErrorKinds.ModuleNotFound,
@@ -1250,7 +1038,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
         else
         {
-            targets = _modules.Values;
+            targets = _store.Modules;
         }
 
         var hits = new List<StringReferenceRef>();
@@ -1330,7 +1118,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             query, matchMode, hits, modulesSearched, FromCache: fromCache, Truncated: truncated));
     }
 
-    private static bool AppendHits(Module module, string literal, List<(int MethodToken, int IlOffset)> sites,
+    private static bool AppendHits(ModuleHandle module, string literal, List<(int MethodToken, int IlOffset)> sites,
         List<StringReferenceRef> output, int maxHits)
     {
         foreach (var (token, offset) in sites)
@@ -1345,7 +1133,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return true;
     }
 
-    private static StringIndexData BuildStringIndex(Module module, CancellationToken cancellationToken)
+    private static StringIndexData BuildStringIndex(ModuleHandle module, CancellationToken cancellationToken)
     {
         var dict = new Dictionary<string, List<(int MethodToken, int IlOffset)>>(StringComparer.Ordinal);
 
@@ -1429,10 +1217,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         if (maxHits <= 0) maxHits = DefaultMaxHits;
         if (maxHits > HardMaxHits) maxHits = HardMaxHits;
 
-        IEnumerable<Module> targets;
+        IEnumerable<ModuleHandle> targets;
         if (moduleVersionIdFilter != Guid.Empty)
         {
-            if (!_modules.TryGetValue(moduleVersionIdFilter, out var only))
+            if (!_store.TryGet(moduleVersionIdFilter, out var only))
             {
                 return FindAttributeTargetsReadResult.Fail(new AssemblyError(
                     ErrorKinds.ModuleNotFound,
@@ -1442,7 +1230,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
         else
         {
-            targets = _modules.Values;
+            targets = _store.Modules;
         }
 
         HashSet<AttributeTargetKind>? kindFilter = null;
@@ -1493,7 +1281,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         if (moduleVersionId == Guid.Empty)
             return FindFieldReferencesReadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return FindFieldReferencesReadResult.Fail(new AssemblyError(
                 ErrorKinds.ModuleNotFound, $"no loaded module has MVID {moduleVersionId:D}."));
 
@@ -1552,7 +1340,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         // Cross-module hits.
         if (fieldKey is { } key)
         {
-            foreach (var other in _modules.Values)
+            foreach (var other in _store.Modules)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (other.Mvid == module.Mvid) continue;
@@ -1594,7 +1382,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         if (moduleVersionId == Guid.Empty)
             return FindPropertyReferencesReadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return FindPropertyReferencesReadResult.Fail(new AssemblyError(
                 ErrorKinds.ModuleNotFound, $"no loaded module has MVID {moduleVersionId:D}."));
 
@@ -1680,7 +1468,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         if (moduleVersionId == Guid.Empty)
             return FindEventReferencesReadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return FindEventReferencesReadResult.Fail(new AssemblyError(
                 ErrorKinds.ModuleNotFound, $"no loaded module has MVID {moduleVersionId:D}."));
 
@@ -1763,7 +1551,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         if (moduleVersionId == Guid.Empty)
             return NativeBodyResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return NativeBodyResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound, $"Module {moduleVersionId:D} is not loaded."));
 
         const int MethodDefTable = 0x06;
@@ -1826,7 +1614,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private static MethodIdentity BuildMethodIdentity(Module module, MethodDefinitionHandle h) =>
+    private static MethodIdentity BuildMethodIdentity(ModuleHandle module, MethodDefinitionHandle h) =>
         new(module.Mvid, MetadataTokens.GetToken(h));
 
     private static bool ModeMatches(FieldAccessMode mode, FieldAccessKind kind) => mode switch
@@ -1837,7 +1625,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         _ => true,
     };
 
-    private static FieldKey? BuildFieldKey(Module module, FieldDefinition fieldDef)
+    private static FieldKey? BuildFieldKey(ModuleHandle module, FieldDefinition fieldDef)
     {
         try
         {
@@ -1853,7 +1641,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         catch (BadImageFormatException) { return null; }
     }
 
-    private static FieldAccessIndexData BuildFieldAccessIndex(Module module, CancellationToken cancellationToken)
+    private static FieldAccessIndexData BuildFieldAccessIndex(ModuleHandle module, CancellationToken cancellationToken)
     {
         var intra = new Dictionary<int, List<(int, int, FieldAccessKind)>>();
         var outbound = new List<FieldOutboundRef>();
@@ -1924,7 +1712,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return new FieldAccessIndexData(intra, outbound);
     }
 
-    private static void ClassifyFieldToken(Module module, int token, int callerToken, int ilOffset,
+    private static void ClassifyFieldToken(ModuleHandle module, int token, int callerToken, int ilOffset,
         FieldAccessKind kind,
         Dictionary<int, List<(int, int, FieldAccessKind)>> intra,
         List<FieldOutboundRef> outbound)
@@ -1980,7 +1768,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         list.Add((callerToken, ilOffset, kind));
     }
 
-    private static int? TryFindLocalField(Module module, TypeDefinitionHandle parentType, MemberReference mr)
+    private static int? TryFindLocalField(ModuleHandle module, TypeDefinitionHandle parentType, MemberReference mr)
     {
         var fieldName = module.MD.GetString(mr.Name);
         var td = module.MD.GetTypeDefinition(parentType);
@@ -1994,7 +1782,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private static (string Handle, string Display) RenderAttributeTarget(
-        Module module, AttributeTargetKind kind, int targetToken, int paramSeq)
+        ModuleHandle module, AttributeTargetKind kind, int targetToken, int paramSeq)
     {
         try
         {
@@ -2050,7 +1838,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return ($"<{kind} 0x{targetToken:X8}>", $"<{kind} 0x{targetToken:X8}>");
     }
 
-    private static AttributeIndexData BuildAttributeIndex(Module module, CancellationToken cancellationToken)
+    private static AttributeIndexData BuildAttributeIndex(ModuleHandle module, CancellationToken cancellationToken)
     {
         var dict = new Dictionary<string, List<(AttributeTargetKind Kind, int TargetToken, int ParameterSequence, int AttributeToken)>>(StringComparer.Ordinal);
         var md = module.MD;
@@ -2134,7 +1922,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return new AttributeIndexData(dict);
     }
 
-    private static string? TryReadAttributeTypeFullName(Module module, CustomAttributeHandle handle)
+    private static string? TryReadAttributeTypeFullName(ModuleHandle module, CustomAttributeHandle handle)
     {
         var ca = module.MD.GetCustomAttribute(handle);
         switch (ca.Constructor.Kind)
@@ -2160,7 +1948,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         if (moduleVersionId == Guid.Empty)
             return FindTypeReferencesReadResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return FindTypeReferencesReadResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {moduleVersionId:D}."));
 
@@ -2207,7 +1995,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var modulesSearched = 1;
         if (targetAssemblyName is not null)
         {
-            foreach (var other in _modules.Values)
+            foreach (var other in _store.Modules)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (other.Mvid == module.Mvid) continue;
@@ -2230,7 +2018,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             references, modulesSearched, FromCache: fromCache));
     }
 
-    private static TypeReferenceRef RenderTypeReferenceSite(Module module, TypeReferenceSite site)
+    private static TypeReferenceRef RenderTypeReferenceSite(ModuleHandle module, TypeReferenceSite site)
     {
         string handle;
         string display;
@@ -2281,7 +2069,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return new TypeReferenceRef(module.Mvid, site.SiteToken, site.SiteKind, site.ReferenceKind, handle, display);
     }
 
-    private static string RenderPropertyDef(Module module, PropertyDefinitionHandle h)
+    private static string RenderPropertyDef(ModuleHandle module, PropertyDefinitionHandle h)
     {
         try
         {
@@ -2294,7 +2082,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         catch (BadImageFormatException) { return $"<property 0x{MetadataTokens.GetToken(h):X8}>"; }
     }
 
-    private static string RenderEventDef(Module module, EventDefinitionHandle h)
+    private static string RenderEventDef(ModuleHandle module, EventDefinitionHandle h)
     {
         try
         {
@@ -2314,8 +2102,8 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     /// either expected arg list is non-empty.
     /// </summary>
     private static bool CallerHasMatchingInstantiation(
-        Module callerModule, int callerToken,
-        Module calleeModule, MethodDefinitionHandle calleeHandle,
+        ModuleHandle callerModule, int callerToken,
+        ModuleHandle calleeModule, MethodDefinitionHandle calleeHandle,
         CalleeKey calleeKey,
         IReadOnlyList<string>? expectedTypeArgs,
         IReadOnlyList<string>? expectedMethodArgs)
@@ -2385,7 +2173,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private static bool TryMatchInstantiatedCall(
-        Module callerModule, int token,
+        ModuleHandle callerModule, int token,
         bool calleeIsSameModule, int calleeIntraToken, CalleeKey calleeKey,
         IReadOnlyList<string>? expectedTypeArgs,
         IReadOnlyList<string>? expectedMethodArgs,
@@ -2424,7 +2212,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private static bool TryMatchMethodSpecCall(
-        Module callerModule, MethodSpecificationHandle handle,
+        ModuleHandle callerModule, MethodSpecificationHandle handle,
         bool calleeIsSameModule, int calleeIntraToken, CalleeKey calleeKey,
         IReadOnlyList<string>? expectedTypeArgs,
         IReadOnlyList<string>? expectedMethodArgs,
@@ -2477,7 +2265,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private static bool TryMatchMemberRefCall(
-        Module callerModule, MemberReferenceHandle handle,
+        ModuleHandle callerModule, MemberReferenceHandle handle,
         CalleeKey calleeKey,
         IReadOnlyList<string> expectedTypeArgs,
         WireFormatSignatureProvider provider)
@@ -2493,7 +2281,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private static bool TypeSpecMatchesTypeArgs(
-        Module callerModule, TypeSpecificationHandle handle,
+        ModuleHandle callerModule, TypeSpecificationHandle handle,
         IReadOnlyList<string> expectedTypeArgs,
         WireFormatSignatureProvider provider)
     {
@@ -2516,7 +2304,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         catch (BadImageFormatException) { return false; }
     }
 
-    private static bool MemberRefMatchesCalleeKey(Module callerModule, MemberReference mr, CalleeKey key)
+    private static bool MemberRefMatchesCalleeKey(ModuleHandle callerModule, MemberReference mr, CalleeKey key)
     {
         try
         {
@@ -2654,7 +2442,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             Found: false, File: null, StartLine: null, EndLine: null, SourceLink: null,
             PdbKind: pdb.Kind, PdbAge: pdb.Age, Reason: reason);
 
-    private static PdbHandle? TryOpenPdb(Module module)
+    private static PdbHandle? TryOpenPdb(ModuleHandle module)
     {
         // 1) Embedded portable PDB.
         try
@@ -2697,7 +2485,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private static string? TryBuildSourceLink(MetadataReader reader, string sourceFile)
     {
         // SourceLink JSON lives in a module-level CustomDebugInformation row keyed by the
-        // ModuleDefinition handle (token 0x00000001 from the Module table).
+        // ModuleDefinition handle (token 0x00000001 from the ModuleHandle table).
         var moduleHandle = (EntityHandle)MetadataTokens.Handle(0x00000001);
         string? json = null;
         foreach (var cdiHandle in reader.GetCustomDebugInformation(moduleHandle))
@@ -2757,7 +2545,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     private string XrefCachePath(Guid mvid) => Path.Combine(_xrefCacheDir, $"{mvid:N}.xref");
 
-    private XrefData LoadOrBuildXref(Module module, CancellationToken cancellationToken = default)
+    private XrefData LoadOrBuildXref(ModuleHandle module, CancellationToken cancellationToken = default)
     {
         var cachePath = XrefCachePath(module.Mvid);
         if (TryReadXrefCache(cachePath, module, out var cached))
@@ -2768,7 +2556,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return built;
     }
 
-    private static XrefData BuildXref(Module module, CancellationToken cancellationToken = default)
+    private static XrefData BuildXref(ModuleHandle module, CancellationToken cancellationToken = default)
     {
         var data = new XrefData(
             new Dictionary<int, List<int>>(),
@@ -2909,7 +2697,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return data;
     }
 
-    private static void EmitCollectedTypes(Module module, TypeTokenCollectorProvider collector,
+    private static void EmitCollectedTypes(ModuleHandle module, TypeTokenCollectorProvider collector,
         int siteToken, MemberKind siteKind, TypeReferenceKind refKind,
         XrefData data, HashSet<long>? perSiteSeen, HashSet<OutboundTypeRef> outboundSeen)
     {
@@ -2919,7 +2707,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private static void ClassifyTypeReferenceHandle(Module module, EntityHandle handle,
+    private static void ClassifyTypeReferenceHandle(ModuleHandle module, EntityHandle handle,
         int siteToken, MemberKind siteKind, TypeReferenceKind refKind,
         XrefData data, HashSet<long>? perSiteSeen, HashSet<OutboundTypeRef> outboundSeen)
     {
@@ -3004,7 +2792,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         list.Add(site);
     }
 
-    private static void ScanTypesFromIl(Module module, byte[] il, int methodToken,
+    private static void ScanTypesFromIl(ModuleHandle module, byte[] il, int methodToken,
         XrefData data, HashSet<long> intraSeen, HashSet<OutboundTypeRef> outboundSeen)
     {
         var span = il.AsSpan();
@@ -3044,7 +2832,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private static void ClassifyTypeBearingToken(Module module, int token, int methodToken,
+    private static void ClassifyTypeBearingToken(ModuleHandle module, int token, int methodToken,
         XrefData data, HashSet<long> intraSeen, HashSet<OutboundTypeRef> outboundSeen)
     {
         EntityHandle h;
@@ -3081,7 +2869,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
     /// <inheritdoc />
 
-    private static void ScanCallsFromIl(Module module, byte[] il, int callerToken, XrefData data,
+    private static void ScanCallsFromIl(ModuleHandle module, byte[] il, int callerToken, XrefData data,
         HashSet<long> intraSeen, HashSet<OutboundCallRef> outboundSeen)
     {
         var span = il.AsSpan();
@@ -3123,7 +2911,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private static void ClassifyCallToken(Module module, int token, int callerToken, XrefData data,
+    private static void ClassifyCallToken(ModuleHandle module, int token, int callerToken, XrefData data,
         HashSet<long> intraSeen, HashSet<OutboundCallRef> outboundSeen)
     {
         EntityHandle h;
@@ -3161,7 +2949,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private static void ClassifyMemberRef(Module module, MemberReferenceHandle mrh,
+    private static void ClassifyMemberRef(ModuleHandle module, MemberReferenceHandle mrh,
         int callerToken, XrefData data,
         HashSet<long> intraSeen, HashSet<OutboundCallRef> outboundSeen)
     {
@@ -3205,7 +2993,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             list.Add(callerToken);
     }
 
-    private static void TryAddOutbound(Module module, MemberReference mr,
+    private static void TryAddOutbound(ModuleHandle module, MemberReference mr,
         int callerToken, List<OutboundCallRef> outbound, HashSet<OutboundCallRef> seen)
     {
         try
@@ -3240,7 +3028,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     /// Returns null when the parent points outside this assembly (handled as outbound) or
     /// cannot be resolved.
     /// </summary>
-    private static TypeDefinitionHandle? ResolveLocalParentType(Module module, EntityHandle parent)
+    private static TypeDefinitionHandle? ResolveLocalParentType(ModuleHandle module, EntityHandle parent)
     {
         try
         {
@@ -3280,7 +3068,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         catch (BadImageFormatException) { return null; }
     }
 
-    private static TypeDefinitionHandle? FindTypeDefByName(Module module, TypeReference tr)
+    private static TypeDefinitionHandle? FindTypeDefByName(ModuleHandle module, TypeReference tr)
     {
         // Only handles the AssemblyReference/ModuleDefinition shape — nested TypeRef chains
         // for same-module references are vanishingly rare and skipped intentionally.
@@ -3298,7 +3086,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return null;
     }
 
-    private static int? TryFindLocalMethod(Module module, TypeDefinitionHandle parentType,
+    private static int? TryFindLocalMethod(ModuleHandle module, TypeDefinitionHandle parentType,
         MemberReference mr)
     {
         var methodName = module.MD.GetString(mr.Name);
@@ -3335,7 +3123,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return null;
     }
 
-    private static string? ResolveOutboundTypeName(Module module, EntityHandle parent,
+    private static string? ResolveOutboundTypeName(ModuleHandle module, EntityHandle parent,
         out string? assemblyName)
     {
         assemblyName = null;
@@ -3384,7 +3172,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         };
     }
 
-    private static string? ResolveTypeRefName(Module module, TypeReferenceHandle trh,
+    private static string? ResolveTypeRefName(ModuleHandle module, TypeReferenceHandle trh,
         out string? assemblyName)
     {
         assemblyName = null;
@@ -3416,7 +3204,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         catch (BadImageFormatException) { return null; }
     }
 
-    private static CalleeKey BuildCalleeKey(Module module, MethodDefinitionHandle handle)
+    private static CalleeKey BuildCalleeKey(ModuleHandle module, MethodDefinitionHandle handle)
     {
         var asmName = module.MD.GetString(module.MD.GetAssemblyDefinition().Name);
         var def = module.MD.GetMethodDefinition(handle);
@@ -3453,7 +3241,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private const int MaxOutboundCount = 10_000_000;
     private const int MaxIntraCallersPerCallee = 1_000_000;
 
-    private static bool TryReadXrefCache(string path, Module module, out XrefData data)
+    private static bool TryReadXrefCache(string path, ModuleHandle module, out XrefData data)
     {
         data = null!;
         if (!File.Exists(path)) return false;
@@ -3546,7 +3334,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         catch (OutOfMemoryException) { return false; }
     }
 
-    private void TryWriteXrefCache(string path, Module module, XrefData data)
+    private void TryWriteXrefCache(string path, ModuleHandle module, XrefData data)
     {
         try
         {
@@ -3647,7 +3435,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return n;
     }
 
-    private static void AddTokenRef(Module m, int token, List<IlSymbolRef> calls,
+    private static void AddTokenRef(ModuleHandle m, int token, List<IlSymbolRef> calls,
         List<IlSymbolRef> fields, List<IlSymbolRef> types)
     {
         try
@@ -3665,7 +3453,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         catch (BadImageFormatException) { /* ignore malformed token */ }
     }
 
-    private static IlSymbolRef BuildSymbolRef(Module m, int token)
+    private static IlSymbolRef BuildSymbolRef(ModuleHandle m, int token)
     {
         var handleStr = HandleFormat.Format(m.Mvid, token);
         string display;
@@ -3689,36 +3477,36 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return new IlSymbolRef(token, handleStr, display);
     }
 
-    private static string RenderMethodDef(Module m, MethodDefinitionHandle h)
+    private static string RenderMethodDef(ModuleHandle m, MethodDefinitionHandle h)
     {
         var def = m.MD.GetMethodDefinition(h);
         var type = m.MD.GetTypeDefinition(def.GetDeclaringType());
         return $"{TypeName(m, type)}.{m.MD.GetString(def.Name)}";
     }
 
-    private static string RenderMemberRef(Module m, MemberReferenceHandle h)
+    private static string RenderMemberRef(ModuleHandle m, MemberReferenceHandle h)
     {
         var r = m.MD.GetMemberReference(h);
         var parent = RenderParent(m, r.Parent);
         return $"{parent}.{m.MD.GetString(r.Name)}";
     }
 
-    private static string RenderMethodSpec(Module m, MethodSpecificationHandle h)
+    private static string RenderMethodSpec(ModuleHandle m, MethodSpecificationHandle h)
     {
         var spec = m.MD.GetMethodSpecification(h);
         return BuildSymbolRef(m, MetadataTokens.GetToken(spec.Method)).Display + "<…>";
     }
 
-    private static string RenderFieldDef(Module m, FieldDefinitionHandle h)
+    private static string RenderFieldDef(ModuleHandle m, FieldDefinitionHandle h)
     {
         var f = m.MD.GetFieldDefinition(h);
         var type = m.MD.GetTypeDefinition(f.GetDeclaringType());
         return $"{TypeName(m, type)}.{m.MD.GetString(f.Name)}";
     }
 
-    private static string RenderTypeDef(Module m, TypeDefinitionHandle h) => TypeName(m, m.MD.GetTypeDefinition(h));
+    private static string RenderTypeDef(ModuleHandle m, TypeDefinitionHandle h) => TypeName(m, m.MD.GetTypeDefinition(h));
 
-    private static string RenderTypeRef(Module m, TypeReferenceHandle h)
+    private static string RenderTypeRef(ModuleHandle m, TypeReferenceHandle h)
     {
         var r = m.MD.GetTypeReference(h);
         var ns = m.MD.GetString(r.Namespace);
@@ -3726,7 +3514,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return string.IsNullOrEmpty(ns) ? n : $"{ns}.{n}";
     }
 
-    private static string RenderTypeSpec(Module m, TypeSpecificationHandle h)
+    private static string RenderTypeSpec(ModuleHandle m, TypeSpecificationHandle h)
     {
         try
         {
@@ -3735,7 +3523,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         catch (BadImageFormatException) { return IlSymbolRef.UnresolvedDisplay; }
     }
 
-    private static string RenderParent(Module m, EntityHandle parent) => parent.Kind switch
+    private static string RenderParent(ModuleHandle m, EntityHandle parent) => parent.Kind switch
     {
         HandleKind.TypeReference => RenderTypeRef(m, (TypeReferenceHandle)parent),
         HandleKind.TypeDefinition => RenderTypeDef(m, (TypeDefinitionHandle)parent),
@@ -3743,7 +3531,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         _ => IlSymbolRef.UnresolvedDisplay,
     };
 
-    private static string TypeName(Module m, TypeDefinition t)
+    private static string TypeName(ModuleHandle m, TypeDefinition t)
     {
         var name = m.MD.GetString(t.Name);
         var declaring = t.GetDeclaringType();
@@ -3756,7 +3544,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return string.IsNullOrEmpty(ns) ? name : $"{ns}.{name}";
     }
 
-    private static string? TryReadUserString(Module m, int token)
+    private static string? TryReadUserString(ModuleHandle m, int token)
     {
         try
         {
@@ -3776,7 +3564,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         if (identity.MetadataToken == 0)
             return new ResolvedMethod(null, default, new AssemblyError(ErrorKinds.IdentityMalformed, "metadataToken is required."));
 
-        if (!_modules.TryGetValue(identity.ModuleVersionId, out var module))
+        if (!_store.TryGet(identity.ModuleVersionId, out var module))
         {
             return new ResolvedMethod(null, default, new AssemblyError(
                 ErrorKinds.ModuleNotFound,
@@ -3807,12 +3595,12 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         return new ResolvedMethod(module, mh, null);
     }
 
-    private readonly record struct ResolvedMethod(Module? Module, MethodDefinitionHandle Handle, AssemblyError? Error);
+    private readonly record struct ResolvedMethod(ModuleHandle? Module, MethodDefinitionHandle Handle, AssemblyError? Error);
 
-    private static ModuleSummary SummarizeModule(Module m) =>
+    private static ModuleSummary SummarizeModule(ModuleHandle m) =>
         new(m.Mvid, Path.GetFileName(m.Path), m.Path, m.MD.MethodDefinitions.Count);
 
-    private static MethodSummary SummarizeMethod(Module m, MethodDefinitionHandle h, int token)
+    private static MethodSummary SummarizeMethod(ModuleHandle m, MethodDefinitionHandle h, int token)
     {
         var def = m.MD.GetMethodDefinition(h);
         var typeDef = m.MD.GetTypeDefinition(def.GetDeclaringType());
@@ -3871,17 +3659,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        foreach (var w in _watchers.Values)
-        {
-            w.EnableRaisingEvents = false;
-            w.Dispose();
-        }
-        _watchers.Clear();
-        foreach (var m in _modules.Values)
-            m.PE.Dispose();
-        _modules.Clear();
-        while (_evictedPe.TryDequeue(out var pe))
-            pe.Dispose();
+        _store.Dispose();
         foreach (var pdb in _sourceCache.Values)
         {
             // Embedded portable PDB providers pin native memory; releasing them is mandatory.
@@ -3890,14 +3668,12 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         _sourceCache.Clear();
     }
 
-    private sealed record Module(Guid Mvid, string Path, PEReader PE, MetadataReader MD);
-
     /// <inheritdoc />
     public GetTypeResult GetTypeDefinition(Guid moduleVersionId, int typeMetadataToken)
     {
         if (moduleVersionId == Guid.Empty)
             return GetTypeResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return GetTypeResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {moduleVersionId:D}."));
 
@@ -3938,7 +3714,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         query ??= new ListDerivedTypesQuery();
         if (moduleVersionId == Guid.Empty)
             return ListDerivedTypesResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return ListDerivedTypesResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {moduleVersionId:D}."));
 
@@ -3983,10 +3759,9 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var localParents = new Dictionary<(Guid, int), List<(Guid mvid, int token, IReadOnlyList<string>? args)>>();
         var crossParents = new Dictionary<(Guid, int), List<(string asm, string full, IReadOnlyList<string>? args)>>();
 
-        foreach (var kv in _modules)
+        foreach (var m in _store.Modules)
         {
-            var childMvid = kv.Key;
-            var m = kv.Value;
+            var childMvid = m.Mvid;
             var md = m.MD;
             int n;
             try { n = md.TypeDefinitions.Count; }
@@ -4131,7 +3906,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             {
                 var node = queue.Dequeue();
                 // Each descendant's own (asm, full) lets other modules' TypeRefs reach it.
-                if (!_modules.TryGetValue(node.Item1, out var nodeModule)) continue;
+                if (!_store.TryGet(node.Item1, out var nodeModule)) continue;
                 string nodeAsm;
                 string nodeFull;
                 try
@@ -4154,7 +3929,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         // Stable order: by module path, then by token within the module.
         var ordered = hits
-            .Select(h => (Hit: h, Path: _modules.TryGetValue(h.Item1, out var mm) ? mm.Path : string.Empty))
+            .Select(h => (Hit: h, Path: _store.TryGet(h.Item1, out var mm) ? mm.Path : string.Empty))
             .OrderBy(t => t.Path, StringComparer.OrdinalIgnoreCase)
             .ThenBy(t => t.Hit.Item2)
             .Select(t => t.Hit)
@@ -4167,7 +3942,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         for (int i = startOffset; i < ordered.Count; i++)
         {
             var (hitMvid, hitToken) = ordered[i];
-            if (!_modules.TryGetValue(hitMvid, out var hitModule)) continue;
+            if (!_store.TryGet(hitMvid, out var hitModule)) continue;
             int hitRow;
             try { hitRow = MetadataTokens.GetRowNumber((EntityHandle)MetadataTokens.Handle(hitToken)); }
             catch (ArgumentException) { continue; }
@@ -4197,7 +3972,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private static void AddParentEdge(
-        Module childModule,
+        ModuleHandle childModule,
         Guid childMvid,
         (Guid, int) childKey,
         EntityHandle parentHandle,
@@ -4237,7 +4012,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     /// args in CLR wire format. Non-GENERICINST specs (rare for base types) are skipped.
     /// </summary>
     private static void AddSpecParentEdge(
-        Module childModule,
+        ModuleHandle childModule,
         Guid childMvid,
         (Guid, int) childKey,
         TypeSpecificationHandle handle,
@@ -4288,7 +4063,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     {
         if (moduleVersionId == Guid.Empty)
             return ListAssemblyReferencesResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return ListAssemblyReferencesResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {moduleVersionId:D}."));
 
@@ -4329,7 +4104,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         query ??= new ListMembersQuery();
         if (moduleVersionId == Guid.Empty)
             return ListMembersResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(moduleVersionId, out var module))
+        if (!_store.TryGet(moduleVersionId, out var module))
             return ListMembersResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {moduleVersionId:D}."));
 
@@ -4395,7 +4170,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             moduleVersionId, typeMetadataToken, fullName, results, nextCursor, truncated));
     }
 
-    private static void CollectFields(Module module, TypeDefinition td, StringSignatureProvider provider, List<MemberSummary> sink)
+    private static void CollectFields(ModuleHandle module, TypeDefinition td, StringSignatureProvider provider, List<MemberSummary> sink)
     {
         foreach (var fh in td.GetFields())
         {
@@ -4414,7 +4189,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private static void CollectProperties(Module module, TypeDefinition td, StringSignatureProvider provider, List<MemberSummary> sink)
+    private static void CollectProperties(ModuleHandle module, TypeDefinition td, StringSignatureProvider provider, List<MemberSummary> sink)
     {
         foreach (var ph in td.GetProperties())
         {
@@ -4448,7 +4223,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private static void CollectEvents(Module module, TypeDefinition td, StringSignatureProvider provider, List<MemberSummary> sink)
+    private static void CollectEvents(ModuleHandle module, TypeDefinition td, StringSignatureProvider provider, List<MemberSummary> sink)
     {
         foreach (var eh in td.GetEvents())
         {
@@ -4475,7 +4250,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         }
     }
 
-    private static string DecodeTypeSpec(Module module, TypeSpecificationHandle handle, StringSignatureProvider provider)
+    private static string DecodeTypeSpec(ModuleHandle module, TypeSpecificationHandle handle, StringSignatureProvider provider)
     {
         try
         {
@@ -4514,7 +4289,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
 
         if (target.ModuleVersionId == Guid.Empty)
             return ListAttributesResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed, "moduleVersionId is required."));
-        if (!_modules.TryGetValue(target.ModuleVersionId, out var module))
+        if (!_store.TryGet(target.ModuleVersionId, out var module))
             return ListAttributesResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {target.ModuleVersionId:D}."));
 
@@ -4574,7 +4349,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private static CustomAttributeHandleCollection GetAttributeHandles(
-        Module module, AttributeTarget target, out AssemblyError? error)
+        ModuleHandle module, AttributeTarget target, out AssemblyError? error)
     {
         error = null;
         switch (target.Kind)
@@ -4686,7 +4461,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     }
 
     private static AttributeSummary? TryDecodeAttribute(
-        Module module, CustomAttributeHandle handle, int token,
+        ModuleHandle module, CustomAttributeHandle handle, int token,
         StringCustomAttributeTypeProvider provider)
     {
         var ca = module.MD.GetCustomAttribute(handle);
