@@ -32,7 +32,7 @@ internal static class AssemblyToolDescriptions
     internal const string ImportAssemblyManifest_Mode = """'lazy' (default) records (mvid → path) hints without opening the PEs; 'tier1' eagerly loads every entry into the metadata index.""";
 
     // GetMethod.
-    internal const string GetMethod_Summary = """Implements the consumer side of the MethodIdentity handoff contract: given a moduleVersionId + metadataToken (typically copied from a dotnet-diagnostics-mcp response), returns the declaring type, method name, signature, IL size and method attributes. See docs/handoff-contract.md for the full semantics and error kinds.""";
+    internal const string GetMethod_Summary = """Implements the consumer side of the MethodIdentity handoff contract: given a moduleVersionId + metadataToken (typically copied from a dotnet-diagnostics-mcp response), returns the declaring type, method name, signature, IL size and method attributes. For methods carrying the PinvokeImpl bit, MethodSummary.PInvoke is populated with the decoded DllImport binding (module name, entry point, char set, calling convention, ExactSpelling / SetLastError / PreserveSig). See docs/handoff-contract.md for the full semantics and error kinds.""";
     internal const string GetMethod_TypeFullName = """Optional declaring type full name; used only as a sanity-check display label.""";
     internal const string GetMethod_MethodName = """Optional method name; used only as a sanity-check display label.""";
     internal const string GetMethod_GenericArity = """Optional generic arity from the producer payload. Defaults to 0.""";
