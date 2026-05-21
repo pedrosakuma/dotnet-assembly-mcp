@@ -34,19 +34,27 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
 {
     private readonly ConcurrentDictionary<Guid, Entry> _entries = new();
     private readonly Action<TData>? _onEvict;
+    private readonly Action<TData>? _onOrphan;
 
     /// <summary>
     /// Creates a new cache. When <paramref name="onEvict"/> is supplied it is invoked
-    /// for every entry removed from the cache, either by an explicit
+    /// for every <i>published</i> entry removed from the cache, either by an explicit
     /// <see cref="Invalidate"/> or because a fresh build replaces a stale entry on the
     /// same MVID slot. Use for entries that hold unmanaged or otherwise <see cref="IDisposable"/>
     /// state (e.g. <see cref="System.Reflection.Metadata.MetadataReaderProvider"/> instances
-    /// that pin native memory). Failures inside <paramref name="onEvict"/> are swallowed so
-    /// a misbehaving disposer cannot leak a stale entry back into the cache.
+    /// that pin native memory).
+    /// <para><paramref name="onOrphan"/> is invoked for build outputs that <b>lost the
+    /// publish race</b> in <see cref="GetOrBuild(ModuleHandle,Func{ModuleHandle,TData})"/>:
+    /// the orphan was never returned to a caller, so anything an <paramref name="onEvict"/>
+    /// implementation would defer for borrowed-reader safety (e.g. a graveyard) can be
+    /// disposed immediately. Defaults to <paramref name="onEvict"/> for back-compat.</para>
+    /// <para>Failures inside either callback are swallowed so a misbehaving disposer cannot
+    /// leak a stale entry back into the cache.</para>
     /// </summary>
-    public ModuleScopedCache(Action<TData>? onEvict = null)
+    public ModuleScopedCache(Action<TData>? onEvict = null, Action<TData>? onOrphan = null)
     {
         _onEvict = onEvict;
+        _onOrphan = onOrphan ?? onEvict;
     }
 
     /// <summary>
@@ -105,7 +113,7 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
             // Lost the publish race. Dispose the orphan we just built (its owner, this call,
             // never published it) and loop to either serve the winner's entry or rebuild
             // against a still-stale slot.
-            SafeEvict(data);
+            SafeOrphan(data);
         }
     }
 
@@ -134,6 +142,13 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
         if (_onEvict is null) return;
         try { _onEvict(data); }
         catch { /* swallow: a misbehaving disposer must not leave the entry pinned */ }
+    }
+
+    private void SafeOrphan(TData data)
+    {
+        if (_onOrphan is null) return;
+        try { _onOrphan(data); }
+        catch { /* swallow: see SafeEvict */ }
     }
 
     // Exposed for tests asserting cache state per the IModuleScopedCache contract.

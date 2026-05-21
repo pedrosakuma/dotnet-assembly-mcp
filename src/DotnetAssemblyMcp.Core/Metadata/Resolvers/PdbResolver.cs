@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
@@ -17,15 +18,37 @@ namespace DotnetAssemblyMcp.Core.Metadata.Resolvers;
 internal sealed class PdbResolver : IModuleScopedCache, IDisposable
 {
     // Cache one open MetadataReaderProvider per module so repeated get_method_source calls
-    // don't re-open the PDB. The eviction callback disposes the provider when an entry is
-    // invalidated or replaced on a same-MVID reload — the cache helper guarantees the
-    // callback fires before the slot is republished.
+    // don't re-open the PDB. Evicted providers are NOT disposed inline — see _graveyard.
     private readonly ModuleScopedCache<PdbBox> _sourceCache;
+
+    // Use-after-dispose deferral (issue #122). GetMethodSource borrows a PdbHandle.Reader
+    // and keeps reading from it across many calls (sequence points, SourceLink JSON,
+    // embedded source). If we disposed the MetadataReaderProvider inline on cache eviction
+    // (Invalidate or same-MVID replacement) we would yank native memory from under those
+    // in-flight reads. Instead, evicted boxes are parked on this graveyard and disposed
+    // only when the resolver itself is disposed — by that point no caller can still hold
+    // a reader. Module reloads are rare events so the bounded-by-reload-count memory
+    // footprint is acceptable.
+    private readonly ConcurrentBag<PdbHandle> _graveyard = new();
 
     public PdbResolver(MethodResolver methods)
     {
         _methods = methods;
-        _sourceCache = new ModuleScopedCache<PdbBox>(onEvict: static box => box.Handle?.Provider?.Dispose());
+        _sourceCache = new ModuleScopedCache<PdbBox>(
+            onEvict: box =>
+            {
+                // Published entry — a borrowed reader from a prior GetMethodSource call may
+                // still be in flight. Park the provider until Dispose so the borrow stays
+                // valid (issue #122).
+                if (box.Handle is { } handle) _graveyard.Add(handle);
+            },
+            onOrphan: static box =>
+            {
+                // Build lost the publish race — no caller ever saw this provider, so dispose
+                // immediately. Avoids unbounded graveyard growth under concurrent cold
+                // GetMethodSource calls for the same module.
+                box.Handle?.Provider?.Dispose();
+            });
     }
 
     private static readonly Guid SourceLinkCdiKind =
@@ -319,5 +342,12 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
     public void Invalidate(Guid mvid) => _sourceCache.Invalidate(mvid);
 
     /// <inheritdoc />
-    public void Dispose() => _sourceCache.Clear();
+    public void Dispose()
+    {
+        // Move any live entries into the graveyard via the eviction callback, then drain
+        // every parked provider. Single-shot — see ModuleScopedCache.Clear contract.
+        _sourceCache.Clear();
+        while (_graveyard.TryTake(out var handle))
+            handle.Provider?.Dispose();
+    }
 }

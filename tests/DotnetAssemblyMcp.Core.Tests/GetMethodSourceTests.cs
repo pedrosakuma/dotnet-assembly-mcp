@@ -155,4 +155,93 @@ public sealed class GetMethodSourceTests
                 "OrderService.Process is declared in the same file");
         }
     }
+
+    [Fact]
+    public void Borrowed_pdb_reader_survives_concurrent_invalidate()
+    {
+        // Defense-in-depth contract test for issue #122. GetMethodSource borrows the cached
+        // PdbHandle.Reader and keeps reading from it (sequence points, SourceLink, embedded
+        // source). The old code disposed the MetadataReaderProvider eagerly on eviction,
+        // leaving any in-flight reader holding a disposed provider. The graveyard defers
+        // disposal until PdbResolver.Dispose so borrowed readers stay usable.
+        //
+        // NOTE: empirically, current System.Reflection.Metadata keeps the embedded-PDB
+        // reader storage alive after the provider's Dispose (Dispose is effectively a no-op
+        // for that path), so this test would PASS even without the fix on .NET 10. We keep
+        // the test anyway to pin the API contract — "borrowed reader must not raise
+        // ObjectDisposedException after Invalidate" — so any future runtime that enforces
+        // post-Dispose checks (or a code change that switches to a non-prefetched provider)
+        // is caught immediately rather than crashing in production.
+        var (index, mvid, _) = ResolveProcessToken();
+        using (index)
+        {
+            // Prime the cache.
+            var primed = AssemblyTools.GetMethodSource(index,
+                mvid.ToString("D"),
+                $"0x{ResolveProcessToken().Token:X8}");
+            primed.IsError.Should().BeFalse(primed.Summary);
+
+            // Borrow the cached MetadataReader before invalidating.
+            var borrowedReader = GetCachedPdbReader(index, mvid);
+            borrowedReader.Should().NotBeNull("the prime call must have populated the PDB cache");
+
+            // Pull the rug out from under the cache.
+            InvalidateAllCaches(index, mvid);
+
+            // The borrowed reader must STILL be usable — the graveyard parks the provider
+            // until PdbResolver.Dispose. Force blob-level reads (sequence points walk the
+            // SequencePointsBlob via the underlying provider's storage) to surface any
+            // use-after-dispose hazard the provider would expose post-Invalidate.
+            var act = () =>
+            {
+                foreach (var debugHandle in borrowedReader!.MethodDebugInformation)
+                {
+                    var info = borrowedReader.GetMethodDebugInformation(debugHandle);
+                    if (info.SequencePointsBlob.IsNil) continue;
+                    foreach (var _ in info.GetSequencePoints()) { /* drain */ }
+                }
+            };
+            act.Should().NotThrow<ObjectDisposedException>(
+                "the graveyard must defer MetadataReaderProvider disposal until PdbResolver.Dispose");
+        }
+    }
+
+    // MetadataIndex doesn't expose a public Invalidate; reach into _moduleScopedCaches the
+    // same way the ModuleScopedCacheContractTests does.
+    private static void InvalidateAllCaches(MetadataIndex index, Guid mvid)
+    {
+        var field = typeof(MetadataIndex).GetField(
+            "_moduleScopedCaches",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var subs = (System.Collections.IEnumerable)field.GetValue(index)!;
+        foreach (DotnetAssemblyMcp.Core.Metadata.IModuleScopedCache sub in subs)
+            sub.Invalidate(mvid);
+    }
+
+    // Reflect into PdbResolver._sourceCache._entries to grab the cached MetadataReader without
+    // going through GetMethodSource (which would not let the test outlive a subsequent Invalidate).
+    private static System.Reflection.Metadata.MetadataReader? GetCachedPdbReader(MetadataIndex index, Guid mvid)
+    {
+        const System.Reflection.BindingFlags F =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+
+        var pdbResolver = typeof(MetadataIndex).GetField("_pdbResolver", F)!.GetValue(index)!;
+        var sourceCache = pdbResolver.GetType().GetField("_sourceCache", F)!.GetValue(pdbResolver)!;
+        var entries = sourceCache.GetType().GetField("_entries", F)!.GetValue(sourceCache)!;
+
+        // ConcurrentDictionary<Guid, Entry> — fetch the Entry for our mvid via indexer.
+        var indexerProp = entries.GetType().GetProperty("Item",
+            new[] { typeof(Guid) })!;
+        object? entry;
+        try { entry = indexerProp.GetValue(entries, new object[] { mvid }); }
+        catch (System.Reflection.TargetInvocationException) { return null; }
+        if (entry is null) return null;
+
+        var box = entry.GetType().GetProperty("Data")!.GetValue(entry)!;
+        var handle = box.GetType().GetProperty("Handle")!.GetValue(box);
+        if (handle is null) return null;
+
+        return (System.Reflection.Metadata.MetadataReader?)
+            handle.GetType().GetProperty("Reader")!.GetValue(handle);
+    }
 }
