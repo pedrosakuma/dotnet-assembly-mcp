@@ -325,9 +325,60 @@ internal sealed class XrefIndex : IModuleScopedCache
                 var token = BitConverter.ToInt32(span.Slice(pos, 4));
                 ClassifyTypeBearingToken(module, token, methodToken, data, intraSeen, outboundSeen);
             }
+            else if (size == 4 && pos + 4 <= span.Length
+                && (op == IlOpcodeTable.Op.InlineMethod || op == IlOpcodeTable.Op.InlineField))
+            {
+                // Issue #69: a `newobj Box<int>::.ctor` (or `ldfld <generic-type>::field`)
+                // emits InlineMethod / InlineField whose operand is a MemberRef whose Parent
+                // is a TypeSpec wrapping the generic type. Without walking the parent here
+                // the open generic stays invisible to find_type_references.
+                var token = BitConverter.ToInt32(span.Slice(pos, 4));
+                ClassifyMemberBearingTokenForParentType(module, token, methodToken,
+                    data, intraSeen, outboundSeen);
+            }
 
             pos += Math.Max(0, size);
         }
+    }
+
+    private static void ClassifyMemberBearingTokenForParentType(ModuleHandle module, int token, int methodToken,
+        XrefData data, HashSet<long> intraSeen, HashSet<OutboundTypeRef> outboundSeen)
+    {
+        EntityHandle h;
+        try { h = (EntityHandle)MetadataTokens.Handle(token); }
+        catch (ArgumentOutOfRangeException) { return; }
+        catch (BadImageFormatException) { return; }
+
+        try
+        {
+            EntityHandle parent;
+            switch (h.Kind)
+            {
+                case HandleKind.MemberReference:
+                    parent = module.MD.GetMemberReference((MemberReferenceHandle)h).Parent;
+                    break;
+                case HandleKind.MethodSpecification:
+                    // MethodSpec → resolved Method (MethodDef or MemberRef); walk through.
+                    var spec = module.MD.GetMethodSpecification((MethodSpecificationHandle)h);
+                    var method = spec.Method;
+                    parent = method.Kind switch
+                    {
+                        HandleKind.MemberReference =>
+                            module.MD.GetMemberReference((MemberReferenceHandle)method).Parent,
+                        _ => default,
+                    };
+                    break;
+                default:
+                    // MethodDef / FieldDef parents are reachable via signature scans already
+                    // (intra-module TypeDef entries) — no extra walk needed here.
+                    return;
+            }
+
+            if (parent.IsNil) return;
+            ClassifyTypeReferenceHandle(module, parent, methodToken, MemberKind.Method,
+                TypeReferenceKind.IlOpcode, data, intraSeen, outboundSeen);
+        }
+        catch (BadImageFormatException) { /* skip malformed row */ }
     }
 
     private static void ClassifyTypeBearingToken(ModuleHandle module, int token, int methodToken,
@@ -534,7 +585,7 @@ internal sealed class XrefIndex : IModuleScopedCache
     }
 
     private const uint XrefMagic = 0x52584D41; // 'AMXR'
-    private const int XrefFormatVersion = 5;
+    private const int XrefFormatVersion = 6;
     private const int MaxIntraCount = 10_000_000;
     private const int MaxOutboundCount = 10_000_000;
     private const int MaxIntraCallersPerCallee = 1_000_000;
