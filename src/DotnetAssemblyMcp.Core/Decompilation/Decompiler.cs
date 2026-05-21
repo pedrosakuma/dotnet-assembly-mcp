@@ -61,8 +61,7 @@ public sealed class Decompiler : IDecompiler, IDisposable
         _now = clock ?? throw new ArgumentNullException(nameof(clock));
 
         // Drop cached engines + sources for any module that reloaded on disk.
-        if (_index is MetadataIndex mi)
-            mi.ModuleReloaded += OnModuleReloaded;
+        _index.ModuleReloaded += OnModuleReloaded;
     }
 
     /// <inheritdoc />
@@ -453,8 +452,7 @@ public sealed class Decompiler : IDecompiler, IDisposable
     /// <inheritdoc cref="IDisposable.Dispose"/>
     public void Dispose()
     {
-        if (_index is MetadataIndex mi)
-            mi.ModuleReloaded -= OnModuleReloaded;
+        _index.ModuleReloaded -= OnModuleReloaded;
         _engines.Clear();
         lock (_lruLock)
         {
