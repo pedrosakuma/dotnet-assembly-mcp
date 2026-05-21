@@ -140,6 +140,47 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
     /// <inheritdoc />
     public void WatchPath(string path) => _store.WatchPath(path);
 
+    /// <inheritdoc />
+    public void Invalidate(Guid moduleVersionId)
+    {
+        // Preferred path: when we know a path for the MVID, delegate to ModuleStore.Reload.
+        // It re-reads the PE from disk, atomically swaps the ModuleHandle (so derived caches
+        // rebuilt after this call see the FRESH MetadataReader, not the stale one), removes
+        // the old MVID entry if the on-disk MVID has drifted, and raises ModuleReloaded
+        // — even on failure — which OnStoreModuleReloaded fans out to _moduleScopedCaches
+        // and re-raises publicly (Decompiler / IlDisassembler then drop their LRU entries).
+        if (_store.TryGet(moduleVersionId, out var module))
+        {
+            InvalidateViaStoreReload(moduleVersionId, module.Path);
+            return;
+        }
+        if (_store.TryGetPathHint(moduleVersionId, out var hinted) && !string.IsNullOrEmpty(hinted))
+        {
+            InvalidateViaStoreReload(moduleVersionId, hinted!);
+            return;
+        }
+
+        // Fallback: MVID was never loaded and no path hint exists — there is no PE to re-read.
+        // Still fan out cache invalidation + a synthetic ModuleReloaded so any external
+        // subscriber holding stale state for this MVID can drop it. The cache rebuild
+        // contract isn't violated because there's no stale ModuleHandle to rebuild from
+        // in the first place.
+        foreach (var cache in _moduleScopedCaches) cache.Invalidate(moduleVersionId);
+        ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(string.Empty, moduleVersionId, moduleVersionId, null));
+    }
+
+    private void InvalidateViaStoreReload(Guid moduleVersionId, string path)
+    {
+        var result = _store.Reload(moduleVersionId, path);
+        if (result.IsSuccess) return;
+        // Reload failed (file vanished, IO error, corrupt PE). OnStoreModuleReloaded
+        // intentionally skips internal cache fan-out on errors so that transient
+        // file-watcher hiccups (ShareViolation mid-write) don't nuke valid caches.
+        // Explicit Invalidate has different semantics — the caller is asserting the MVID
+        // is known-stale — so we must clear our own per-module caches here too.
+        foreach (var cache in _moduleScopedCaches) cache.Invalidate(moduleVersionId);
+    }
+
 
     private const int MaxIntraCount = 10_000_000;
     private const int MaxOutboundCount = 10_000_000;

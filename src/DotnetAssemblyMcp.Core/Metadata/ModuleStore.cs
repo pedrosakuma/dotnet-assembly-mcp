@@ -73,6 +73,70 @@ internal sealed class ModuleStore : IDisposable
         return loaded;
     }
 
+    /// <summary>
+    /// Reload semantics for an explicit invalidation against a known <paramref name="oldMvid"/>.
+    /// Mirrors the file-watcher's flow (see <c>FlushReload</c>): re-reads <paramref name="path"/>,
+    /// swaps the <see cref="ModuleHandle"/>, evicts the old MVID entry when the on-disk MVID
+    /// has changed, and always raises <see cref="ModuleReloaded"/> with
+    /// <c>(oldMvid, newMvid, error?)</c> — including on failure, so subscribers can drop stale
+    /// state for the requested MVID even when the file vanished mid-call. Returns the
+    /// <see cref="LoadResult"/> for callers that want to inspect the outcome.
+    /// </summary>
+    public LoadResult Reload(Guid oldMvid, string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, "path is required.");
+            EvictStaleHandle(oldMvid);
+            ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(path ?? string.Empty, oldMvid, null, err));
+            return LoadResult.Fail(err);
+        }
+        var fullPath = Path.GetFullPath(path);
+        if (!File.Exists(fullPath))
+        {
+            var err = new AssemblyError(ErrorKinds.ModuleLoadFailed, $"file not found: {fullPath}");
+            EvictStaleHandle(oldMvid);
+            ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, oldMvid, null, err));
+            return LoadResult.Fail(err);
+        }
+
+        // Suppress OpenAndRegister's own same-MVID event — Reload owns event emission
+        // and raises exactly one ModuleReloaded at the end so the public Invalidate
+        // contract ("exactly once per call") holds.
+        var result = OpenAndRegister(fullPath, raiseSameMvidEvent: false);
+        if (!result.IsSuccess)
+        {
+            EvictStaleHandle(oldMvid);
+            ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, oldMvid, null, result.Error));
+            return result;
+        }
+
+        var newMvid = result.Module!.ModuleVersionId;
+        if (oldMvid != newMvid && _modules.TryRemove(oldMvid, out var stale))
+        {
+            // Defer disposal — in-flight readers on other threads may still hold `stale.PE`.
+            _evictedPe.Enqueue(stale.PE);
+        }
+
+        // Fan out unconditionally — subscribers handle duplicate (mvid, mvid) reloads
+        // idempotently (cache clear). Matches the watcher's behaviour at FlushReload.
+        ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, oldMvid, newMvid, null));
+        return result;
+    }
+
+    private void EvictStaleHandle(Guid mvid)
+    {
+        // Explicit Reload failure path: the caller asserts the MVID is known-stale, so we
+        // must drop the still-loaded ModuleHandle. Without this, follow-up queries would
+        // resolve `mvid` via TryGet, hit the in-memory PE, and immediately repopulate the
+        // very caches Invalidate just cleared. PE is queued on the graveyard for deferred
+        // disposal (in-flight readers on other threads may still hold the reference).
+        if (_modules.TryRemove(mvid, out var stale))
+        {
+            _evictedPe.Enqueue(stale.PE);
+        }
+    }
+
 #pragma warning disable CA1822 // Mark members as static — Probe is logically instance-scoped (lives next to Load).
     public ProbeResult Probe(string path)
     {
@@ -138,7 +202,7 @@ internal sealed class ModuleStore : IDisposable
     public static ModuleSummary SummarizeModule(ModuleHandle m) =>
         new(m.Mvid, Path.GetFileName(m.Path), m.Path, m.MD.MethodDefinitions.Count);
 
-    private LoadResult OpenAndRegister(string fullPath)
+    private LoadResult OpenAndRegister(string fullPath, bool raiseSameMvidEvent = true)
     {
         var opened = OpenModule(fullPath);
         if (opened.Error is not null) return LoadResult.Fail(opened.Error);
@@ -161,7 +225,11 @@ internal sealed class ModuleStore : IDisposable
                     // Even when the MVID hasn't changed, the IL we just opened may differ from
                     // what built downstream caches (deterministic rebuild, manual file swap).
                     // Fan out via the ModuleReloaded event so subscribers can invalidate.
-                    ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, mvid, mvid, null));
+                    // Callers that own their own event emission (e.g. Reload) suppress this.
+                    if (raiseSameMvidEvent)
+                    {
+                        ModuleReloaded?.Invoke(this, new ModuleReloadedEventArgs(fullPath, mvid, mvid, null));
+                    }
                     return LoadResult.Ok(SummarizeModule(replacement));
                 }
             }

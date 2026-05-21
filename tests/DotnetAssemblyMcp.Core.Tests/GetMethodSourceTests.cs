@@ -185,8 +185,8 @@ public sealed class GetMethodSourceTests
             var borrowedReader = GetCachedPdbReader(index, mvid);
             borrowedReader.Should().NotBeNull("the prime call must have populated the PDB cache");
 
-            // Pull the rug out from under the cache.
-            InvalidateAllCaches(index, mvid);
+            // Pull the rug out from under the cache via the public API (#127).
+            index.Invalidate(mvid);
 
             // The borrowed reader must STILL be usable — the graveyard parks the provider
             // until PdbResolver.Dispose. Force blob-level reads (sequence points walk the
@@ -204,18 +204,6 @@ public sealed class GetMethodSourceTests
             act.Should().NotThrow<ObjectDisposedException>(
                 "the graveyard must defer MetadataReaderProvider disposal until PdbResolver.Dispose");
         }
-    }
-
-    // MetadataIndex doesn't expose a public Invalidate; reach into _moduleScopedCaches the
-    // same way the ModuleScopedCacheContractTests does.
-    private static void InvalidateAllCaches(MetadataIndex index, Guid mvid)
-    {
-        var field = typeof(MetadataIndex).GetField(
-            "_moduleScopedCaches",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        var subs = (System.Collections.IEnumerable)field.GetValue(index)!;
-        foreach (DotnetAssemblyMcp.Core.Metadata.IModuleScopedCache sub in subs)
-            sub.Invalidate(mvid);
     }
 
     // Reflect into PdbResolver._sourceCache._entries to grab the cached MetadataReader without
