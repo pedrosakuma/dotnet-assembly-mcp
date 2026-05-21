@@ -35,6 +35,7 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
     private readonly ConcurrentDictionary<Guid, Entry> _entries = new();
     private readonly Action<TData>? _onEvict;
     private readonly Action<TData>? _onOrphan;
+    private int _disposed;
 
     /// <summary>
     /// Creates a new cache. When <paramref name="onEvict"/> is supplied it is invoked
@@ -73,6 +74,7 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
     /// </summary>
     public TData GetOrBuild(ModuleHandle module, Func<ModuleHandle, TData> build, out bool wasCached)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, typeof(ModuleScopedCache<TData>));
         var stamp = ModuleCacheStamp.TryCapture(module);
         while (true)
         {
@@ -80,6 +82,11 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
                 && ReferenceEquals(existing.Module, module)
                 && existing.Stamp.Equals(stamp))
             {
+                // Re-read the sentinel before returning the borrowed reference. A Clear()
+                // landing between our TryGetValue and this point would already have drained
+                // (or be about to drain) existing.Data — surface the disposal instead of
+                // handing the caller a soon-to-be-evicted entry.
+                ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, typeof(ModuleScopedCache<TData>));
                 wasCached = true;
                 return existing.Data;
             }
@@ -90,10 +97,31 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
             var data = build(module);
             var fresh = new Entry(module, data, stamp);
 
+            // Pre-publish disposal check is necessary but not sufficient — Clear() can still
+            // race between this read and the TryAdd/TryUpdate below. The post-publish
+            // back-out below is the linearization point.
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                SafeOrphan(data);
+                ObjectDisposedException.ThrowIf(true, typeof(ModuleScopedCache<TData>));
+            }
+
             if (existing is null)
             {
                 if (_entries.TryAdd(module.Mvid, fresh))
                 {
+                    // Post-publish disposal back-out: if Clear() landed between our pre-check
+                    // and the TryAdd, our entry may now be sitting in a "disposed" cache.
+                    // The KeyValuePair Remove ensures we only release what WE published AND
+                    // only when Clear hasn't already drained it (avoiding a double-dispose
+                    // when SafeEvict + SafeOrphan would both fire on the same data).
+                    if (Volatile.Read(ref _disposed) != 0)
+                    {
+                        var ours = new KeyValuePair<Guid, Entry>(module.Mvid, fresh);
+                        if (((ICollection<KeyValuePair<Guid, Entry>>)_entries).Remove(ours))
+                            SafeOrphan(data);
+                        ObjectDisposedException.ThrowIf(true, typeof(ModuleScopedCache<TData>));
+                    }
                     wasCached = false;
                     return data;
                 }
@@ -105,6 +133,14 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
                 if (_entries.TryUpdate(module.Mvid, fresh, existing))
                 {
                     SafeEvict(existing.Data);
+                    // Same post-publish back-out as above; only orphan if Clear hasn't beaten us.
+                    if (Volatile.Read(ref _disposed) != 0)
+                    {
+                        var ours = new KeyValuePair<Guid, Entry>(module.Mvid, fresh);
+                        if (((ICollection<KeyValuePair<Guid, Entry>>)_entries).Remove(ours))
+                            SafeOrphan(data);
+                        ObjectDisposedException.ThrowIf(true, typeof(ModuleScopedCache<TData>));
+                    }
                     wasCached = false;
                     return data;
                 }
@@ -117,9 +153,10 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
         }
     }
 
-    /// <summary>Drops the cached entry for <paramref name="mvid"/>, if any.</summary>
+    /// <summary>Drops the cached entry for <paramref name="mvid"/>, if any. No-op once disposed.</summary>
     public void Invalidate(Guid mvid)
     {
+        if (Volatile.Read(ref _disposed) != 0) return;
         if (_entries.TryRemove(mvid, out var entry))
             SafeEvict(entry.Data);
     }
@@ -127,14 +164,22 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
     /// <summary>
     /// Drops every cached entry and invokes the eviction callback on each, if any. Use from
     /// the owning component's <see cref="IDisposable.Dispose"/> implementation to release
-    /// pinned resources alongside the component itself. Not safe to race with
-    /// <see cref="GetOrBuild(ModuleHandle,Func{ModuleHandle,TData})"/>; the owner is responsible
-    /// for ensuring no new lookups happen after <c>Clear</c>.
+    /// pinned resources alongside the component itself. After <c>Clear</c> returns,
+    /// subsequent <see cref="GetOrBuild(ModuleHandle,Func{ModuleHandle,TData})"/> calls throw
+    /// <see cref="ObjectDisposedException"/> (fail-fast against stray async continuations);
+    /// <see cref="Invalidate"/> becomes a no-op. Idempotent.
     /// </summary>
     public void Clear()
     {
+        // Flip the sentinel BEFORE draining so any in-flight GetOrBuild that finishes its
+        // build() between our TryRemove calls sees _disposed and throws instead of publishing
+        // a stray entry whose onEvict will never be called.
+        Interlocked.Exchange(ref _disposed, 1);
         foreach (var mvid in _entries.Keys.ToArray())
-            Invalidate(mvid);
+        {
+            if (_entries.TryRemove(mvid, out var entry))
+                SafeEvict(entry.Data);
+        }
     }
 
     private void SafeEvict(TData data)

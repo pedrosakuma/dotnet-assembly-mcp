@@ -151,6 +151,82 @@ public sealed class ModuleScopedCacheTests
         evicted.Should().Contain(42, "the orphan built by the losing call must be evicted exactly once");
     }
 
+    [Fact]
+    public void Clear_makes_subsequent_GetOrBuild_throw_ObjectDisposedException()
+    {
+        // Defense-in-depth contract (#128): once the owner has Cleared, stray async
+        // continuations that survive past Dispose must fail-fast instead of silently
+        // repopulating a cache whose onEvict / graveyard wiring is gone.
+        using var holder = ModuleHandleHolder.Open(SampleLibPath);
+        var cache = new ModuleScopedCache<Box>();
+        cache.GetOrBuild(holder.Handle, _ => new Box(1));
+
+        cache.Clear();
+
+        Action useAfterDispose = () => cache.GetOrBuild(holder.Handle, _ => new Box(2));
+        useAfterDispose.Should().Throw<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public void Invalidate_is_no_op_after_Clear()
+    {
+        using var holder = ModuleHandleHolder.Open(SampleLibPath);
+        var evicted = new List<int>();
+        var cache = new ModuleScopedCache<Box>(onEvict: box => evicted.Add(box.Value));
+        cache.GetOrBuild(holder.Handle, _ => new Box(7));
+
+        cache.Clear();
+        evicted.Should().Contain(7, "Clear evicts every entry exactly once");
+        evicted.Clear();
+
+        cache.Invalidate(holder.Handle.Mvid);
+        evicted.Should().BeEmpty("Invalidate must be a no-op once the cache has been disposed");
+
+        Action clearAgain = () => cache.Clear();
+        clearAgain.Should().NotThrow("Clear is idempotent");
+    }
+
+    [Fact]
+    public void Clear_during_GetOrBuild_orphans_the_in_flight_build_and_throws()
+    {
+        // Race contract: a GetOrBuild whose build() is still running when Clear() flips
+        // the disposed sentinel must NOT publish its orphan into the now-disposed cache.
+        // The orphan is routed through onOrphan so any pinned resources release.
+        using var holder = ModuleHandleHolder.Open(SampleLibPath);
+        var orphaned = new List<int>();
+        var cache = new ModuleScopedCache<Box>(
+            onEvict: _ => { },
+            onOrphan: box => orphaned.Add(box.Value));
+
+        Action raceCall = () => cache.GetOrBuild(holder.Handle, _ =>
+        {
+            // Simulate Clear() landing mid-build (e.g. another thread / stray continuation).
+            cache.Clear();
+            return new Box(42);
+        });
+
+        raceCall.Should().Throw<ObjectDisposedException>();
+        orphaned.Should().Contain(42, "the orphan must be released through onOrphan even when racing Clear");
+        cache.HasEntry(holder.Handle.Mvid).Should().BeFalse("nothing must be published into the disposed cache");
+    }
+
+    [Fact]
+    public void GetOrBuild_cached_hit_throws_when_disposed_races_in()
+    {
+        // Pins the gpt-5.5 #128 v2 secondary finding: the cached-hit path must re-read
+        // _disposed before handing the caller a borrowed reference to data that Clear
+        // is about to (or has just) evicted.
+        using var holder = ModuleHandleHolder.Open(SampleLibPath);
+        var cache = new ModuleScopedCache<Box>();
+        cache.GetOrBuild(holder.Handle, _ => new Box(7));
+
+        cache.Clear();
+
+        Action cachedHit = () => cache.GetOrBuild(holder.Handle, _ => new Box(99));
+        cachedHit.Should().Throw<ObjectDisposedException>(
+            "disposed must be checked at the cached-hit return path too, not just on entry");
+    }
+
     private sealed record Box(int Value);
 
     /// <summary>Opens a managed PE and exposes a <see cref="ModuleHandle"/> record; disposes the
