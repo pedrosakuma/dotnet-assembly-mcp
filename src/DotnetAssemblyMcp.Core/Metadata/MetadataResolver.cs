@@ -82,7 +82,7 @@ internal static class MetadataResolver
         try
         {
             var decoder = new SignatureDecoder<string, object?>(
-                new StringSignatureProvider(module.MD), module.MD, genericContext: null);
+                StringSignatureProvider.WithoutModifiers(module.MD), module.MD, genericContext: null);
             var blob = module.MD.GetBlobReader(mr.Signature);
             mrSig = decoder.DecodeMethodSignature(ref blob);
         }
@@ -99,7 +99,7 @@ internal static class MetadataResolver
             try
             {
                 var dec = new SignatureDecoder<string, object?>(
-                    new StringSignatureProvider(module.MD), module.MD, genericContext: null);
+                    StringSignatureProvider.WithoutModifiers(module.MD), module.MD, genericContext: null);
                 var defBlob = module.MD.GetBlobReader(def.Signature);
                 defSig = dec.DecodeMethodSignature(ref defBlob);
             }

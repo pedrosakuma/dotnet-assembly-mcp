@@ -233,6 +233,29 @@ public interface IVariantPipe<in TIn, out TOut>
 }
 
 /// <summary>
+/// Fixture for custom-modifier (modreq / modopt) decoding on signatures (#101). Exercises:
+/// - <c>in</c> parameter → emits <c>modreq(InAttribute)</c> on a byref.
+/// - <c>ref readonly</c> return → emits the same modreq on the return byref.
+/// - <c>init</c>-only setter → emits <c>modreq(IsExternalInit)</c> on the setter's return type.
+/// - <c>volatile</c> field → emits <c>modreq(IsVolatile)</c> on the field type.
+/// </summary>
+public sealed class ModifierFixture
+{
+#pragma warning disable CA1051 // public field intentional — fixture exercises volatile modreq
+    public volatile int VolatileCounter;
+#pragma warning restore CA1051
+
+    public int InitOnly { get; init; }
+
+    public ref readonly int FirstByIn(in int needle, int[] haystack)
+    {
+        for (int i = 0; i < haystack.Length; i++)
+            if (haystack[i] == needle) return ref haystack[i];
+        return ref haystack[0];
+    }
+}
+
+/// <summary>
 /// Fixture for PInvoke metadata coverage on <see cref="MethodSummary.PInvoke"/> (#104).
 /// Uses libc / kernel32 entrypoints that exist on the build agent without runtime
 /// dispatching — we only need the metadata, the methods are never invoked.

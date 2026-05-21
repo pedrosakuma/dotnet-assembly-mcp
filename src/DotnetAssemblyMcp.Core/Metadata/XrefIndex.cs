@@ -538,7 +538,7 @@ internal sealed class XrefIndex : IModuleScopedCache
 
             var methodName = module.MD.GetString(mr.Name);
             var decoder = new SignatureDecoder<string, object?>(
-                new StringSignatureProvider(module.MD), module.MD, genericContext: null);
+                StringSignatureProvider.WithoutModifiers(module.MD), module.MD, genericContext: null);
             var blob = module.MD.GetBlobReader(mr.Signature);
             var sig = decoder.DecodeMethodSignature(ref blob);
             var paramCount = sig.RequiredParameterCount;
@@ -570,7 +570,7 @@ internal sealed class XrefIndex : IModuleScopedCache
         try
         {
             var decoder = new SignatureDecoder<string, object?>(
-                new StringSignatureProvider(module.MD), module.MD, genericContext: null);
+                StringSignatureProvider.WithoutModifiers(module.MD), module.MD, genericContext: null);
             var blob = module.MD.GetBlobReader(def.Signature);
             var sig = decoder.DecodeMethodSignature(ref blob);
             paramCount = sig.RequiredParameterCount;
@@ -585,7 +585,7 @@ internal sealed class XrefIndex : IModuleScopedCache
     }
 
     private const uint XrefMagic = 0x52584D41; // 'AMXR'
-    private const int XrefFormatVersion = 6;
+    private const int XrefFormatVersion = 7;
     private const int MaxIntraCount = 10_000_000;
     private const int MaxOutboundCount = 10_000_000;
     private const int MaxIntraCallersPerCallee = 1_000_000;
