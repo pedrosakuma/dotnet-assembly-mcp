@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using DotnetAssemblyMcp.Core.Handles;
@@ -10,7 +9,7 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 
 /// <summary>
 /// Per-module call + type-reference xref index. Extracted from MetadataIndex (#82). Owns
-/// the in-memory <see cref="ConcurrentDictionary{TKey,TValue}"/> cache and the on-disk
+/// the in-memory <see cref="ModuleScopedCache{TData}"/> and the on-disk
 /// <c>~/.cache/dotnet-assembly-mcp/&lt;mvid&gt;.xref</c> persistence, including the
 /// format-version + (mtime, length) staleness header.
 /// </summary>
@@ -22,7 +21,7 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 /// </remarks>
 internal sealed class XrefIndex : IModuleScopedCache
 {
-    private readonly ConcurrentDictionary<Guid, XrefData> _cache = new();
+    private readonly ModuleScopedCache<XrefData> _cache = new();
     private readonly string _xrefCacheDir;
 
     public XrefIndex(string xrefCacheDir)
@@ -32,7 +31,7 @@ internal sealed class XrefIndex : IModuleScopedCache
 
     public void Invalidate(Guid mvid)
     {
-        _cache.TryRemove(mvid, out _);
+        _cache.Invalidate(mvid);
         try
         {
             var path = XrefCachePath(mvid);
@@ -42,7 +41,7 @@ internal sealed class XrefIndex : IModuleScopedCache
         catch (UnauthorizedAccessException) { /* best-effort */ }
     }
 
-    internal bool HasCacheEntry(Guid mvid) => _cache.ContainsKey(mvid);
+    internal bool HasCacheEntry(Guid mvid) => _cache.HasEntry(mvid);
 
     /// <summary>
     /// Returns the cached <see cref="XrefData"/> for <paramref name="module"/>, building
@@ -51,16 +50,14 @@ internal sealed class XrefIndex : IModuleScopedCache
     /// </summary>
     public XrefData LoadOrBuildXref(ModuleHandle module, ref bool fromCache, CancellationToken cancellationToken = default)
     {
-        if (_cache.TryGetValue(module.Mvid, out var existing)) return existing;
-        fromCache = false;
-        return _cache.GetOrAdd(module.Mvid, _ => LoadOrBuild(module, cancellationToken));
+        var data = _cache.GetOrBuild(module, m => LoadOrBuild(m, cancellationToken), out var wasCached);
+        if (!wasCached) fromCache = false;
+        return data;
     }
 
     /// <summary>Convenience overload for the cross-module probe path that doesn't track fromCache.</summary>
-    public XrefData LoadOrBuildXref(ModuleHandle module, CancellationToken cancellationToken = default)
-    {
-        return _cache.GetOrAdd(module.Mvid, _ => LoadOrBuild(module, cancellationToken));
-    }
+    public XrefData LoadOrBuildXref(ModuleHandle module, CancellationToken cancellationToken = default) =>
+        _cache.GetOrBuild(module, m => LoadOrBuild(m, cancellationToken));
 
     private XrefData LoadOrBuild(ModuleHandle module, CancellationToken cancellationToken)
     {

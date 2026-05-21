@@ -33,6 +33,21 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData : class
 {
     private readonly ConcurrentDictionary<Guid, Entry> _entries = new();
+    private readonly Action<TData>? _onEvict;
+
+    /// <summary>
+    /// Creates a new cache. When <paramref name="onEvict"/> is supplied it is invoked
+    /// for every entry removed from the cache, either by an explicit
+    /// <see cref="Invalidate"/> or because a fresh build replaces a stale entry on the
+    /// same MVID slot. Use for entries that hold unmanaged or otherwise <see cref="IDisposable"/>
+    /// state (e.g. <see cref="System.Reflection.Metadata.MetadataReaderProvider"/> instances
+    /// that pin native memory). Failures inside <paramref name="onEvict"/> are swallowed so
+    /// a misbehaving disposer cannot leak a stale entry back into the cache.
+    /// </summary>
+    public ModuleScopedCache(Action<TData>? onEvict = null)
+    {
+        _onEvict = onEvict;
+    }
 
     /// <summary>
     /// Returns the cached <typeparamref name="TData"/> for <paramref name="module"/>, building
@@ -51,25 +66,95 @@ internal sealed class ModuleScopedCache<TData> : IModuleScopedCache where TData 
     public TData GetOrBuild(ModuleHandle module, Func<ModuleHandle, TData> build, out bool wasCached)
     {
         var stamp = ModuleCacheStamp.TryCapture(module);
-        if (_entries.TryGetValue(module.Mvid, out var entry)
-            && ReferenceEquals(entry.Module, module)
-            && entry.Stamp.Equals(stamp))
+        while (true)
         {
-            wasCached = true;
-            return entry.Data;
-        }
+            if (_entries.TryGetValue(module.Mvid, out var existing)
+                && ReferenceEquals(existing.Module, module)
+                && existing.Stamp.Equals(stamp))
+            {
+                wasCached = true;
+                return existing.Data;
+            }
 
-        wasCached = false;
-        var data = build(module);
-        _entries[module.Mvid] = new Entry(module, data, stamp);
-        return data;
+            // Build outside the dictionary so concurrent callers don't deadlock waiting on
+            // each other; the loser of the publish race evicts its orphan and retries (next
+            // iteration will hit the fresh entry the winner published).
+            var data = build(module);
+            var fresh = new Entry(module, data, stamp);
+
+            if (existing is null)
+            {
+                if (_entries.TryAdd(module.Mvid, fresh))
+                {
+                    wasCached = false;
+                    return data;
+                }
+            }
+            else
+            {
+                // CAS replace: only swap when no other publisher has touched the slot since
+                // our TryGetValue, so SafeEvict fires exactly once per evicted entry.
+                if (_entries.TryUpdate(module.Mvid, fresh, existing))
+                {
+                    SafeEvict(existing.Data);
+                    wasCached = false;
+                    return data;
+                }
+            }
+
+            // Lost the publish race. Dispose the orphan we just built (its owner, this call,
+            // never published it) and loop to either serve the winner's entry or rebuild
+            // against a still-stale slot.
+            SafeEvict(data);
+        }
     }
 
     /// <summary>Drops the cached entry for <paramref name="mvid"/>, if any.</summary>
-    public void Invalidate(Guid mvid) => _entries.TryRemove(mvid, out _);
+    public void Invalidate(Guid mvid)
+    {
+        if (_entries.TryRemove(mvid, out var entry))
+            SafeEvict(entry.Data);
+    }
+
+    /// <summary>
+    /// Drops every cached entry and invokes the eviction callback on each, if any. Use from
+    /// the owning component's <see cref="IDisposable.Dispose"/> implementation to release
+    /// pinned resources alongside the component itself. Not safe to race with
+    /// <see cref="GetOrBuild(ModuleHandle,Func{ModuleHandle,TData})"/>; the owner is responsible
+    /// for ensuring no new lookups happen after <c>Clear</c>.
+    /// </summary>
+    public void Clear()
+    {
+        foreach (var mvid in _entries.Keys.ToArray())
+            Invalidate(mvid);
+    }
+
+    private void SafeEvict(TData data)
+    {
+        if (_onEvict is null) return;
+        try { _onEvict(data); }
+        catch { /* swallow: a misbehaving disposer must not leave the entry pinned */ }
+    }
 
     // Exposed for tests asserting cache state per the IModuleScopedCache contract.
     internal bool HasEntry(Guid mvid) => _entries.ContainsKey(mvid);
 
-    private sealed record Entry(ModuleHandle Module, TData Data, ModuleCacheStamp Stamp);
+    // Plain sealed class — not a record — because TryUpdate uses EqualityComparer<Entry>.Default
+    // as its CAS predicate. We rely on reference identity ("did anyone touch this slot since
+    // our TryGetValue?"), so structural / record equality would be a correctness hazard: a
+    // structurally-equal Entry published by a racing thread could spuriously satisfy the CAS
+    // and let SafeEvict fire against the wrong (already-displaced) payload.
+    private sealed class Entry
+    {
+        public Entry(ModuleHandle module, TData data, ModuleCacheStamp stamp)
+        {
+            Module = module;
+            Data = data;
+            Stamp = stamp;
+        }
+
+        public ModuleHandle Module { get; }
+        public TData Data { get; }
+        public ModuleCacheStamp Stamp { get; }
+    }
 }
