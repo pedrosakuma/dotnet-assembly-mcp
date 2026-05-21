@@ -25,6 +25,23 @@ public interface IDecompiler
     /// <param name="cancellationToken">Cancels the call cooperatively. Checked before invoking the decompiler engine.</param>
     DecompileResult Decompile(MethodIdentity identity, int maxChars = 0, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Returns the C# source for the type identified by <paramref name="moduleVersionId"/> +
+    /// <paramref name="typeMetadataToken"/> (TypeDef row, table 0x02). Members are emitted in
+    /// declaration order with attributes, properties, events, and nested types — equivalent to
+    /// the per-type panel ILSpy renders for a TypeDef. Replaces N <c>decompile_method</c> calls
+    /// when the user wants a whole-class audit.
+    /// </summary>
+    /// <param name="moduleVersionId">MVID of the module that owns the TypeDef.</param>
+    /// <param name="typeMetadataToken">TypeDef metadata token (table 0x02).</param>
+    /// <param name="maxChars">
+    /// Hard upper bound on the source length returned. Output longer than this is truncated and
+    /// <see cref="DecompiledType.Truncated"/> is set. Pass 0 to use the implementation default
+    /// (64 KiB — four times <c>decompile_method</c>'s default since a whole type is naturally larger).
+    /// </param>
+    /// <param name="cancellationToken">Cancels the call cooperatively. Checked before invoking the decompiler engine.</param>
+    DecompileTypeResult DecompileType(Guid moduleVersionId, int typeMetadataToken, int maxChars = 0, CancellationToken cancellationToken = default);
+
     /// <summary>Number of entries currently cached. Exposed for diagnostics/tests.</summary>
     int CachedEntries { get; }
 }
@@ -35,4 +52,12 @@ public readonly record struct DecompileResult(DecompiledMethod? Source, Assembly
     public bool IsSuccess => Source is not null;
     public static DecompileResult Ok(DecompiledMethod s) => new(s, null);
     public static DecompileResult Fail(AssemblyError e) => new(null, e);
+}
+
+/// <summary>Result of <see cref="IDecompiler.DecompileType"/>.</summary>
+public readonly record struct DecompileTypeResult(DecompiledType? Source, AssemblyError? Error)
+{
+    public bool IsSuccess => Source is not null;
+    public static DecompileTypeResult Ok(DecompiledType s) => new(s, null);
+    public static DecompileTypeResult Fail(AssemblyError e) => new(null, e);
 }

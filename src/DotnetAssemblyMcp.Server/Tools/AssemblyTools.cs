@@ -360,6 +360,63 @@ public sealed class AssemblyTools
                 new Dictionary<string, object?> { ["moduleVersionId"] = d.ModuleVersionId.ToString("D") }));
     }
 
+    [McpServerTool(
+        Name = "decompile_type",
+        Title = "Decompile a whole type (declarations + members + nested types) to C# source",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(AssemblyToolDescriptions.DecompileType_Summary)]
+    public static AssemblyResult<DecompiledType> DecompileType(
+        IDecompiler decompiler,
+        IMetadataIndex index,
+        [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
+        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.DecompileType_MaxChars)] int maxChars = 0,
+        [Description(AssemblyToolDescriptions.Common_AssemblyPathHint)] string? assemblyPathHint = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Guid.TryParse(moduleVersionId, out var mvid))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{moduleVersionId}' as a GUID.");
+            return AssemblyResult.Fail<DecompiledType>(
+                "moduleVersionId is not a valid GUID.",
+                err,
+                AssemblyErrorRecovery.For(err));
+        }
+        if (!TryParseToken(metadataToken, out var token))
+        {
+            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{metadataToken}' as a 32-bit metadata token.");
+            return AssemblyResult.Fail<DecompiledType>(
+                "metadataToken is not a valid integer.",
+                err,
+                AssemblyErrorRecovery.For(err));
+        }
+
+        if (index.EnsureLoaded(mvid, assemblyPathHint) is { } loadErr)
+            return AssemblyResult.Fail<DecompiledType>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
+
+        var result = decompiler.DecompileType(mvid, token, maxChars, cancellationToken);
+        if (!result.IsSuccess)
+        {
+            return AssemblyResult.Fail<DecompiledType>(result.Error!.Message, result.Error, AssemblyErrorRecovery.For(result.Error));
+        }
+
+        var d = result.Source!;
+        var prefix = d.CacheHit ? "[cache hit] " : string.Empty;
+        var suffix = d.Truncated ? $" — truncated at {d.SourceLengthChars} chars" : string.Empty;
+        return AssemblyResult.Ok(
+            d,
+            $"{prefix}{d.TypeFullName} — {d.SourceLengthChars} chars of C#{suffix}.",
+            new NextActionHint("list_methods", "Drill into a single member of this type after reading the whole-class view.",
+                new Dictionary<string, object?>
+                {
+                    ["mvidOrPath"] = d.ModuleVersionId.ToString("D"),
+                    ["typeHandle"] = d.Handle,
+                }));
+    }
+
 
     [McpServerTool(
         Name = "get_method_il",
