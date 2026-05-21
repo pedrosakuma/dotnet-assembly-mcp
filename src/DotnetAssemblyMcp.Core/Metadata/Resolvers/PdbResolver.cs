@@ -31,6 +31,16 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
     // footprint is acceptable.
     private readonly ConcurrentBag<PdbHandle> _graveyard = new();
 
+    // Test-only observability for the eviction-parking wiring (issue #125). Each entry
+    // evicted from the cache via onEvict adds exactly one element here; onOrphan disposes
+    // inline and does NOT add. Reading this count is the deterministic way to prove that
+    // a cache eviction took the park path rather than the orphan-dispose path — the
+    // sensitivity gap noted on Borrowed_pdb_reader_survives_concurrent_invalidate is that
+    // System.Reflection.Metadata's MetadataReaderProvider.Dispose is effectively a no-op
+    // on .NET 10 for embedded PDBs, so verifying "borrowed reader is still readable"
+    // cannot distinguish "parked" from "disposed but still usable".
+    internal int GraveyardCount => _graveyard.Count;
+
     public PdbResolver(MethodResolver methods)
     {
         _methods = methods;

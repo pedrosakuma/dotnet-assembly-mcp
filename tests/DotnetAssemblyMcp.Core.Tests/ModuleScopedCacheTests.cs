@@ -229,6 +229,73 @@ public sealed class ModuleScopedCacheTests
 
     private sealed record Box(int Value);
 
+    [Fact]
+    public void Eviction_via_Invalidate_routes_published_entries_to_onEvict_without_disposing_inline()
+    {
+        // Issue #125 sensitivity check. PdbResolver wires onEvict → graveyard.Add (defer
+        // disposal until owner Dispose so borrowed readers stay alive) and onOrphan →
+        // Provider.Dispose (immediate, no caller ever saw the orphan). This test
+        // exercises the SAME ModuleScopedCache wiring with a TrackedDisposable whose
+        // .Disposed flag is observable, proving:
+        //   (1) Invalidate of a published entry routes through onEvict (park) and does
+        //       NOT dispose the underlying resource inline;
+        //   (2) draining the test-side "graveyard" later disposes the parked entry.
+        // Without the fix (onEvict directly disposing) step 1 would flip Disposed=true on
+        // a still-borrowed resource — which is exactly what issues #122/#125 guard
+        // against. The orphan-dispose path is independently covered by
+        // OnEvict_disposes_the_orphan_when_a_concurrent_publisher_wins_the_slot above.
+        using var holder = ModuleHandleHolder.Open(typeof(SampleLib.OrderService).Assembly.Location);
+
+        var graveyard = new System.Collections.Concurrent.ConcurrentBag<TrackedDisposable>();
+        var cache = new ModuleScopedCache<TrackedDisposable>(
+            onEvict: box => graveyard.Add(box),
+            onOrphan: static box => box.Dispose());
+
+        var published = cache.GetOrBuild(holder.Handle, _ => new TrackedDisposable());
+        published.Disposed.Should().BeFalse();
+        graveyard.Should().BeEmpty();
+
+        cache.Invalidate(holder.Handle.Mvid);
+        graveyard.Should().HaveCount(1,
+            "Invalidate must route the evicted entry through onEvict (park) — if it took " +
+            "onOrphan-dispose, any borrowed handle from a prior cache hit would be unusable");
+        graveyard.Single().Should().BeSameAs(published);
+        published.Disposed.Should().BeFalse(
+            "the parked entry must NOT be disposed inline — that's the entire point of the graveyard pattern");
+
+        while (graveyard.TryTake(out var parked)) parked.Dispose();
+        published.Disposed.Should().BeTrue("owner-side drain must dispose every parked entry");
+    }
+
+    [Fact]
+    public void Inline_dispose_onEvict_wiring_demonstrates_the_bug_the_graveyard_pattern_prevents()
+    {
+        // Sensitivity twin of the above: when onEvict disposes inline (the BUG the fix
+        // replaces), Invalidate flips Disposed=true on the published entry immediately.
+        // A borrowed reference to that entry would now be use-after-dispose. This test
+        // exists so a future change that accidentally re-introduces "dispose on evict"
+        // is caught by an obvious failing test rather than a flaky integration crash.
+        using var holder = ModuleHandleHolder.Open(typeof(SampleLib.OrderService).Assembly.Location);
+
+        var buggy = new ModuleScopedCache<TrackedDisposable>(
+            onEvict: static box => box.Dispose(),
+            onOrphan: static box => box.Dispose());
+
+        var published = buggy.GetOrBuild(holder.Handle, _ => new TrackedDisposable());
+        published.Disposed.Should().BeFalse();
+
+        buggy.Invalidate(holder.Handle.Mvid);
+        published.Disposed.Should().BeTrue(
+            "this is the failure mode #125 guards against: with inline dispose, eviction " +
+            "yanks the resource out from under any in-flight borrow");
+    }
+
+    private sealed class TrackedDisposable : IDisposable
+    {
+        public bool Disposed { get; private set; }
+        public void Dispose() => Disposed = true;
+    }
+
     /// <summary>Opens a managed PE and exposes a <see cref="ModuleHandle"/> record; disposes the
     /// underlying <see cref="PEReader"/> when the test ends.</summary>
     private sealed class ModuleHandleHolder : IDisposable

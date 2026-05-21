@@ -232,4 +232,57 @@ public sealed class GetMethodSourceTests
         return (System.Reflection.Metadata.MetadataReader?)
             handle.GetType().GetProperty("Reader")!.GetValue(handle);
     }
+
+    [Fact]
+    public void Invalidate_parks_evicted_pdb_box_in_graveyard_rather_than_disposing_inline()
+    {
+        // Real regression test for issue #125. The defense-in-depth smoke test above cannot
+        // distinguish "parked" from "disposed but reader still readable" because
+        // MetadataReaderProvider.Dispose is effectively a no-op for embedded PDBs on
+        // .NET 10. This test instead verifies the WIRING directly: a cache eviction must
+        // route through PdbResolver's onEvict (which adds to _graveyard), not onOrphan
+        // (which disposes the provider inline). The graveyard count is the only
+        // deterministic, runtime-independent signal that the fix is in place.
+        var (index, mvid, _) = ResolveProcessToken();
+        using (index)
+        {
+            var primed = AssemblyTools.GetMethodSource(index,
+                mvid.ToString("D"),
+                $"0x{ResolveProcessToken().Token:X8}");
+            primed.IsError.Should().BeFalse(primed.Summary);
+
+            var resolver = GetPdbResolver(index);
+            GetGraveyardCount(resolver).Should().Be(0,
+                "no eviction has occurred yet — the primed entry is still live in the cache");
+
+            index.Invalidate(mvid);
+            GetGraveyardCount(resolver).Should().Be(1,
+                "Invalidate must park the evicted PdbHandle in the graveyard via onEvict; " +
+                "if this drops to 0 it means the box took the onOrphan-dispose path and any " +
+                "borrowed reader from a prior GetMethodSource call has had its provider freed");
+
+            // Re-prime and re-invalidate — graveyard should accumulate (single-shot until
+            // owner Dispose drains it).
+            var reprimed = AssemblyTools.GetMethodSource(index,
+                mvid.ToString("D"),
+                $"0x{ResolveProcessToken().Token:X8}");
+            reprimed.IsError.Should().BeFalse(reprimed.Summary);
+            index.Invalidate(mvid);
+            GetGraveyardCount(resolver).Should().Be(2,
+                "every eviction of a published entry must park, regardless of how many " +
+                "prior evictions have already been parked");
+        }
+    }
+
+    private static object GetPdbResolver(MetadataIndex index)
+    {
+        const System.Reflection.BindingFlags F =
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        return typeof(MetadataIndex).GetField("_pdbResolver", F)!.GetValue(index)!;
+    }
+
+    private static int GetGraveyardCount(object resolver)
+        => (int)resolver.GetType().GetProperty("GraveyardCount",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(resolver)!;
 }
