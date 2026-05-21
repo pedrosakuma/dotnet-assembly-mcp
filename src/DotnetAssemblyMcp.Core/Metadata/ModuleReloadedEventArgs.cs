@@ -13,7 +13,11 @@ public sealed class ModuleReloadedEventArgs : EventArgs
         Error = error;
     }
 
-    /// <summary>Absolute path of the file that was reloaded.</summary>
+    /// <summary>
+    /// Absolute path of the file that was reloaded. Empty string for synthetic events
+    /// raised by <see cref="IMetadataIndex.Invalidate"/> against an MVID that was never
+    /// loaded and has no path hint.
+    /// </summary>
     public string Path { get; }
     /// <summary>MVID that was loaded before the change (null if first load).</summary>
     public Guid? OldMvid { get; }

@@ -55,6 +55,39 @@ public interface IMetadataIndex
     void WatchPath(string path);
 
     /// <summary>
+    /// Pushes an out-of-band "this MVID is now stale" signal through the index. Three
+    /// outcomes are possible, all of which raise <see cref="ModuleReloaded"/> exactly once
+    /// per call:
+    /// <list type="bullet">
+    /// <item><description>
+    /// <b>Same-MVID reload</b> (file on disk has the same MVID — typical hot-rebuild):
+    /// the underlying <see cref="ModuleStore"/> handle is atomically swapped against the
+    /// fresh PE. Event args: <c>OldMvid == NewMvid == moduleVersionId, Error == null</c>.
+    /// </description></item>
+    /// <item><description>
+    /// <b>Different-MVID reload</b> (file rebuilt with a new MVID since the producer's
+    /// observation): the old MVID entry is evicted from the store; the new MVID is
+    /// registered. Event args: <c>OldMvid == moduleVersionId, NewMvid == new on-disk MVID,
+    /// Error == null</c>.
+    /// </description></item>
+    /// <item><description>
+    /// <b>Reload failure</b> (file vanished, I/O error, corrupt PE, or the MVID was never
+    /// loaded and no path hint exists): the stale handle (if any) is evicted from the
+    /// store so subsequent queries don't repopulate caches from the in-memory PE, and the
+    /// per-module caches are cleared. Event args: <c>OldMvid == moduleVersionId,
+    /// NewMvid == null, Error != null</c> in the I/O case; <c>OldMvid == NewMvid ==
+    /// moduleVersionId, Error == null, Path == ""</c> in the unknown-MVID case.
+    /// </description></item>
+    /// </list>
+    /// Downstream subscribers (Decompiler, IlDisassembler) listen on this event for their
+    /// own cache invalidation, so the explicit signal travels through the same channel as
+    /// file-watcher reloads. Idempotent. Intended for producers (e.g.
+    /// <c>dotnet-diagnostics-mcp</c> over the handoff contract) that observe a reload
+    /// independently of the file watcher and want to push staleness through this API.
+    /// </summary>
+    void Invalidate(Guid moduleVersionId);
+
+    /// <summary>
     /// Resolves a method identity to a <see cref="MethodSummary"/>. Implements the resolution
     /// algorithm from <c>docs/handoff-contract.md §3</c>.
     /// </summary>
