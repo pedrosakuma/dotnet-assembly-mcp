@@ -210,6 +210,29 @@ public sealed class IntRepository : Repository<int>
 }
 
 /// <summary>
+/// Fixture for generic-constraints metadata coverage (#103). Combines reference-type, value-type,
+/// default-constructor, base-type and interface constraints plus method-level constraints so the
+/// decoder can be exercised against every <see cref="System.Reflection.GenericParameterAttributes"/>
+/// special flag in a single TypeDef.
+/// </summary>
+public sealed class ConstrainedRepository<T, TKey>
+    where T : class, IDisposable, new()
+    where TKey : struct
+{
+    public T? Find(TKey id) => null;
+
+    public TItem Echo<TItem>(TItem value)
+        where TItem : notnull, System.IEquatable<TItem>
+        => value;
+}
+
+/// <summary>Variance fixture — covariant + contravariant generic parameters on an interface.</summary>
+public interface IVariantPipe<in TIn, out TOut>
+{
+    TOut Transform(TIn input);
+}
+
+/// <summary>
 /// Fixture for PInvoke metadata coverage on <see cref="MethodSummary.PInvoke"/> (#104).
 /// Uses libc / kernel32 entrypoints that exist on the build agent without runtime
 /// dispatching — we only need the metadata, the methods are never invoked.

@@ -27,7 +27,8 @@ public sealed record MethodSummary(
     int GenericArity,
     IReadOnlyList<string> Attributes,
     NativeBodyRef? NativeBody = null,
-    PInvokeInfo? PInvoke = null)
+    PInvokeInfo? PInvoke = null,
+    IReadOnlyList<GenericParameterSummary>? GenericParameters = null)
 {
     // Binary-compat overload: preserves the 10-arg constructor signature that shipped before
     // the PInvoke discriminator was added (issue #104). Existing compiled consumers calling
@@ -44,7 +45,7 @@ public sealed record MethodSummary(
         IReadOnlyList<string> attributes,
         NativeBodyRef? nativeBody)
         : this(moduleVersionId, metadataToken, handle, typeFullName, methodName, signature,
-               ilSize, genericArity, attributes, nativeBody, PInvoke: null) { }
+               ilSize, genericArity, attributes, nativeBody, PInvoke: null, GenericParameters: null) { }
 
     // Binary-compat overload: preserves the 10-out Deconstruct signature that records
     // synthesise from a 10-param primary constructor (issue #104). Existing consumers using
@@ -116,6 +117,23 @@ public sealed record TypeReferenceSummary(
     string? AssemblyName = null);
 
 /// <summary>
+/// Per-generic-parameter constraint summary (#103). Surfaces what a caller would write as
+/// <c>where T : class, IDisposable, new()</c> without forcing a decompile. <see cref="Variance"/>
+/// is decoded from <see cref="System.Reflection.GenericParameterAttributes.VarianceMask"/>;
+/// the boolean flags decode <see cref="System.Reflection.GenericParameterAttributes.SpecialConstraintMask"/>;
+/// <see cref="TypeConstraints"/> carries the base-type / interface constraints from the
+/// <c>GenericParamConstraint</c> table.
+/// </summary>
+public sealed record GenericParameterSummary(
+    int Index,
+    string Name,
+    string Variance,
+    bool IsReferenceType = false,
+    bool IsValueType = false,
+    bool HasDefaultConstructor = false,
+    IReadOnlyList<TypeReferenceSummary>? TypeConstraints = null);
+
+/// <summary>
 /// Tier-1 summary of a type definition. Returned by <c>list_types</c>.
 /// </summary>
 public sealed record TypeSummary(
@@ -128,7 +146,52 @@ public sealed record TypeSummary(
     bool IsPublic,
     TypeReferenceSummary? BaseType = null,
     IReadOnlyList<TypeReferenceSummary>? Interfaces = null,
-    IReadOnlyList<string>? Instantiation = null);
+    IReadOnlyList<string>? Instantiation = null,
+    IReadOnlyList<GenericParameterSummary>? GenericParameters = null)
+{
+    // Binary-compat overload: preserves the 10-arg constructor signature that shipped before
+    // the GenericParameters field was added (issue #103). Mirrors the IlSymbolRef / MethodSummary
+    // pattern from #86 / #104.
+    public TypeSummary(
+        Guid moduleVersionId,
+        int metadataToken,
+        string handle,
+        string fullName,
+        TypeKind kind,
+        int methodCount,
+        bool isPublic,
+        TypeReferenceSummary? baseType,
+        IReadOnlyList<TypeReferenceSummary>? interfaces,
+        IReadOnlyList<string>? instantiation)
+        : this(moduleVersionId, metadataToken, handle, fullName, kind, methodCount, isPublic,
+               baseType, interfaces, instantiation, GenericParameters: null) { }
+
+    // Binary-compat overload: preserves the 10-out Deconstruct signature synthesised from the
+    // pre-#103 primary constructor.
+    public void Deconstruct(
+        out Guid moduleVersionId,
+        out int metadataToken,
+        out string handle,
+        out string fullName,
+        out TypeKind kind,
+        out int methodCount,
+        out bool isPublic,
+        out TypeReferenceSummary? baseType,
+        out IReadOnlyList<TypeReferenceSummary>? interfaces,
+        out IReadOnlyList<string>? instantiation)
+    {
+        moduleVersionId = ModuleVersionId;
+        metadataToken = MetadataToken;
+        handle = Handle;
+        fullName = FullName;
+        kind = Kind;
+        methodCount = MethodCount;
+        isPublic = IsPublic;
+        baseType = BaseType;
+        interfaces = Interfaces;
+        instantiation = Instantiation;
+    }
+}
 
 /// <summary>
 /// Filter / paging knobs accepted by <see cref="IMetadataIndex.ListTypes"/>. All fields are
