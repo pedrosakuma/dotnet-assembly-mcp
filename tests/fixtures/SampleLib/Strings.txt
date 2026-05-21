@@ -1,0 +1,2 @@
+SampleLib embedded-resource fixture for issue #102.
+Line two — used by ListResourcesTests to verify Length > 0.

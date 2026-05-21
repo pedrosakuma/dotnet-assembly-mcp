@@ -563,6 +563,33 @@ public sealed class AssemblyTools
     }
 
     [McpServerTool(
+        Name = "list_resources",
+        Title = "List ManifestResource rows (embedded resources) of a module",
+        Destructive = false,
+        ReadOnly = true,
+        Idempotent = true,
+        UseStructuredContent = true)]
+    [Description(AssemblyToolDescriptions.ListResources_Summary)]
+    public static AssemblyResult<ListResourcesPage> ListResources(
+        IMetadataIndex index,
+        [Description(AssemblyToolDescriptions.Common_MvidOrPathAssembly)] string mvidOrPath)
+    {
+        if (!TryResolveModuleId(index, mvidOrPath, out var mvid, out var loadErr))
+            return AssemblyResult.Fail<ListResourcesPage>(loadErr!.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
+
+        var result = index.ListResources(mvid);
+        if (!result.IsSuccess)
+            return AssemblyResult.Fail<ListResourcesPage>(result.Error!.Message, result.Error,
+                AssemblyErrorRecovery.For(result.Error));
+
+        var p = result.Page!;
+        var summary = p.Resources.Count == 0
+            ? "Module declares no ManifestResource rows."
+            : $"{p.Resources.Count} resource(s).";
+        return AssemblyResult.Ok(p, summary);
+    }
+
+    [McpServerTool(
         Name = "find_string_references",
         Title = "Find every method that emits a given string literal",
         Destructive = false,

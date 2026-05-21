@@ -181,6 +181,16 @@ public interface IMetadataIndex
     ListAssemblyReferencesResult ListAssemblyReferences(Guid moduleVersionId);
 
     /// <summary>
+    /// Enumerates the ManifestResource rows of a single loaded module: every embedded resource
+    /// (in-PE, linked external file, or forwarded to a satellite assembly) with name, visibility,
+    /// implementation kind, and — for in-PE resources — payload offset and decoded length.
+    /// One-shot; not paginated — ManifestResource tables are typically &lt; 100 entries.
+    /// Reading the resource bytes themselves is intentionally out of scope; this tool stays
+    /// metadata-only.
+    /// </summary>
+    ListResourcesResult ListResources(Guid moduleVersionId);
+
+    /// <summary>
     /// Reverse string-literal lookup: returns every method that emits an <c>ldstr</c> opcode
     /// whose decoded user-string matches <paramref name="query"/>. The match semantics depend
     /// on <paramref name="matchMode"/> (exact / contains / regex). The per-module string index
