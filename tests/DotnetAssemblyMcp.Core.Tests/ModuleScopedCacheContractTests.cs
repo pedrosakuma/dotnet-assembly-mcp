@@ -27,8 +27,8 @@ public sealed class ModuleScopedCacheContractTests
         using var index = new MetadataIndex();
         var subscribers = GetSubscribers(index);
 
-        subscribers.Should().HaveCountGreaterThanOrEqualTo(6,
-            "XrefIndex, StringIndex, AttributeIndex, FieldAccessIndex, R2RCacheAdapter, PdbCacheAdapter are mandatory");
+        subscribers.Should().HaveCountGreaterThanOrEqualTo(7,
+            "XrefIndex, StringIndex, AttributeIndex, FieldAccessIndex, R2RCacheAdapter, PdbCacheAdapter, TypeNavigationIndex are mandatory");
 
         var typeNames = subscribers.Select(c => c.GetType().Name).ToList();
         typeNames.Should().Contain(new[]
@@ -37,6 +37,7 @@ public sealed class ModuleScopedCacheContractTests
             nameof(StringIndex),
             nameof(AttributeIndex),
             nameof(FieldAccessIndex),
+            nameof(TypeNavigationIndex),
         });
         typeNames.Should().Contain(n => n.Contains("R2R", StringComparison.Ordinal));
         typeNames.Should().Contain(n => n.Contains("Pdb", StringComparison.Ordinal));
@@ -54,6 +55,7 @@ public sealed class ModuleScopedCacheContractTests
         var attrIdx = GetField<AttributeIndex>(index, "_attributeIndex");
         var fieldIdx = GetField<FieldAccessIndex>(index, "_fieldAccessIndex");
         var xrefIdx = GetField<XrefIndex>(index, "_xrefIndex");
+        var typeNavIdx = GetField<TypeNavigationIndex>(index, "_typeNavigation");
 
         // Populate every extracted cache by issuing one query that the index handles internally.
         index.FindStringReferences("does-not-exist-xyz", StringMatchMode.Contains, mvid);
@@ -63,11 +65,16 @@ public sealed class ModuleScopedCacheContractTests
         // FindTypeReferences forces the xref index to build for the module.
         // TypeDef table row 1 is always the <Module> pseudo-type; works for triggering the build.
         index.FindTypeReferences(mvid, typeMetadataToken: 0x02000002);
+        // FindTypeByFullName + ListDerivedTypes populate the type-navigation caches.
+        index.FindTypeByFullName(mvid, "SampleLib.OrderService");
+        index.ListDerivedTypes(mvid, baseTypeMetadataToken: 0x02000002, new ListDerivedTypesQuery());
 
         stringIdx.HasCacheEntry(mvid).Should().BeTrue();
         attrIdx.HasCacheEntry(mvid).Should().BeTrue();
         fieldIdx.HasCacheEntry(mvid).Should().BeTrue();
         xrefIdx.HasCacheEntry(mvid).Should().BeTrue();
+        typeNavIdx.HasNameCacheEntry(mvid).Should().BeTrue();
+        typeNavIdx.HasParentMapsEntry.Should().BeTrue();
 
         // Fan out invalidation as OnStoreModuleReloaded would.
         var subscribers = GetSubscribers(index);
@@ -77,6 +84,8 @@ public sealed class ModuleScopedCacheContractTests
         stringIdx.HasCacheEntry(mvid).Should().BeFalse();
         attrIdx.HasCacheEntry(mvid).Should().BeFalse();
         fieldIdx.HasCacheEntry(mvid).Should().BeFalse();
+        typeNavIdx.HasNameCacheEntry(mvid).Should().BeFalse();
+        typeNavIdx.HasParentMapsEntry.Should().BeFalse();
     }
 
     private static List<IModuleScopedCache> GetSubscribers(MetadataIndex index)

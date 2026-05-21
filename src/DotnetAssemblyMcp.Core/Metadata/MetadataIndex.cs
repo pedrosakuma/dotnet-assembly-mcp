@@ -44,6 +44,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     private readonly MethodResolver _methodResolver;
     private readonly IlBodyReader _ilBodyReader;
     private readonly PdbResolver _pdbResolver;
+    private readonly TypeNavigationIndex _typeNavigation;
     private readonly List<IModuleScopedCache> _moduleScopedCaches;
 
     private readonly ConcurrentDictionary<Guid, R2R.R2RReader?> _r2rCache = new();
@@ -70,6 +71,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         _methodResolver = new MethodResolver(_store);
         _ilBodyReader = new IlBodyReader(_methodResolver);
         _pdbResolver = new PdbResolver(_methodResolver);
+        _typeNavigation = new TypeNavigationIndex(_store);
 
         // Subscriber list for module-reload fan-out (#82). Each entry is invalidated when a
         // module's MVID is replaced on disk. The R2R cache adapter wraps the runtime cache
@@ -82,6 +84,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             _attributeIndex,
             _fieldAccessIndex,
             _pdbResolver,
+            _typeNavigation,
             new R2RCacheAdapter(_r2rCache),
         };
 
@@ -887,7 +890,7 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             : Math.Min(query.PageSize, ListDerivedTypesQuery.MaxPageSize);
         var startOffset = query.Cursor is { } c && c > 0 ? c : 0;
 
-        // Build the parent relation across every loaded module:
+        // Build the parent relation across every loaded module (or reuse the cached one):
         //  - localParents: (childMvid, childToken) -> [(parentMvid, parentToken, args?)] (same module
         //    via TypeDef, or via TypeSpec whose CLASS token resolves to a same-module TypeDef).
         //  - crossParents: (childMvid, childToken) -> [(parentAsm, parentFull, args?)] (TypeRef or
@@ -898,40 +901,46 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         // instantiation in CLR wire format ([ "System.Int32", "System.String" ]); non-spec edges
         // carry null args. Per issue #67 the `args` payload feeds both the MatchInstantiation
         // filter and the TypeSummary.Instantiation stamp on the returned page.
-        var localParents = new Dictionary<(Guid, int), List<(Guid mvid, int token, IReadOnlyList<string>? args)>>();
-        var crossParents = new Dictionary<(Guid, int), List<(string asm, string full, IReadOnlyList<string>? args)>>();
-
-        foreach (var m in _store.Modules)
+        //
+        // The walk visits every TypeDef in every loaded module, so we cache the resulting maps
+        // in TypeNavigationIndex. The cache is invalidated when a module is reloaded (via
+        // IModuleScopedCache fan-out) and rebuilt when the loaded-module set changes (new
+        // load), so repeated ListDerivedTypes calls against a stable set pay the O(N·M) walk
+        // only once.
+        var (localParents, crossParents) = _typeNavigation.GetParentMaps(builder =>
         {
-            var childMvid = m.Mvid;
-            var md = m.MD;
-            int n;
-            try { n = md.TypeDefinitions.Count; }
-            catch (BadImageFormatException) { continue; }
-
-            for (int row = 1; row <= n; row++)
+            foreach (var m in _store.Modules)
             {
-                TypeDefinition td;
-                try { td = md.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(row)); }
+                var childMvid = m.Mvid;
+                var md = m.MD;
+                int n;
+                try { n = md.TypeDefinitions.Count; }
                 catch (BadImageFormatException) { continue; }
 
-                int childToken = MetadataTokens.GetToken(MetadataTokens.TypeDefinitionHandle(row));
-                var childKey = (childMvid, childToken);
-
-                AddParentEdge(m, childMvid, childKey, td.BaseType, localParents, crossParents);
-
-                InterfaceImplementationHandleCollection iis;
-                try { iis = td.GetInterfaceImplementations(); }
-                catch (BadImageFormatException) { continue; }
-                foreach (var iih in iis)
+                for (int row = 1; row <= n; row++)
                 {
-                    EntityHandle ih;
-                    try { ih = md.GetInterfaceImplementation(iih).Interface; }
+                    TypeDefinition td;
+                    try { td = md.GetTypeDefinition(MetadataTokens.TypeDefinitionHandle(row)); }
                     catch (BadImageFormatException) { continue; }
-                    AddParentEdge(m, childMvid, childKey, ih, localParents, crossParents);
+
+                    int childToken = MetadataTokens.GetToken(MetadataTokens.TypeDefinitionHandle(row));
+                    var childKey = (childMvid, childToken);
+
+                    AddParentEdge(m, childMvid, childKey, td.BaseType, builder.Local, builder.Cross);
+
+                    InterfaceImplementationHandleCollection iis;
+                    try { iis = td.GetInterfaceImplementations(); }
+                    catch (BadImageFormatException) { continue; }
+                    foreach (var iih in iis)
+                    {
+                        EntityHandle ih;
+                        try { ih = md.GetInterfaceImplementation(iih).Interface; }
+                        catch (BadImageFormatException) { continue; }
+                        AddParentEdge(m, childMvid, childKey, ih, builder.Local, builder.Cross);
+                    }
                 }
             }
-        }
+        });
 
         // Pre-render the MatchInstantiation filter into CLR wire-format strings so per-edge
         // comparison is a flat string equality check. Null/empty => open match.
@@ -1798,18 +1807,25 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
             return FindTypeByNameResult.Fail(new AssemblyError(ErrorKinds.ModuleNotFound,
                 $"no loaded module has MVID {moduleVersionId:D}."));
 
-        var total = module.MD.TypeDefinitions.Count;
-        for (int row = 1; row <= total; row++)
+        var token = _typeNavigation.TryFindTypeToken(module, typeFullName);
+        if (token is null)
+            return FindTypeByNameResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
+                $"type '{typeFullName}' not found in module {moduleVersionId:D}."));
+
+        int row;
+        try { row = MetadataTokens.GetRowNumber((EntityHandle)MetadataTokens.Handle(token.Value)); }
+        catch (ArgumentException)
         {
-            TypeSummary? summary;
-            try { summary = TrySummarizeType(module, row); }
-            catch (BadImageFormatException) { continue; }
-            if (summary is null) continue;
-            if (string.Equals(summary.FullName, typeFullName, StringComparison.Ordinal))
-                return FindTypeByNameResult.Ok(summary);
+            return FindTypeByNameResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
+                $"type '{typeFullName}' not found in module {moduleVersionId:D}."));
         }
-        return FindTypeByNameResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
-            $"type '{typeFullName}' not found in module {moduleVersionId:D}."));
+        TypeSummary? summary;
+        try { summary = TrySummarizeType(module, row); }
+        catch (BadImageFormatException) { summary = null; }
+        return summary is not null
+            ? FindTypeByNameResult.Ok(summary)
+            : FindTypeByNameResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
+                $"type '{typeFullName}' not found in module {moduleVersionId:D}."));
     }
 }
 
