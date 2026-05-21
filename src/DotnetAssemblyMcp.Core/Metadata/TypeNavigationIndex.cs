@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
@@ -14,16 +13,17 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 /// </summary>
 /// <remarks>
 /// Both caches are built lazily on first read. Per-module invalidation is wired through
-/// <see cref="IModuleScopedCache.Invalidate"/>: the name map for that MVID is dropped and the
-/// global parent maps are reset (any parent map could mention the reloaded module). New-load
-/// detection (no reload event fires for a first-time load) piggy-backs on a snapshot of the
-/// captured MVID set: <see cref="GetParentMaps"/> rebuilds when the current
-/// <see cref="ModuleStore.Modules"/> set differs from the cached snapshot.
+/// <see cref="IModuleScopedCache.Invalidate"/>: the name map for that MVID is dropped (via the
+/// shared <see cref="ModuleScopedCache{TData}"/>) and the global parent maps are reset (any
+/// parent map could mention the reloaded module). New-load detection (no reload event fires
+/// for a first-time load) piggy-backs on a snapshot of the captured MVID set:
+/// <see cref="GetParentMaps"/> rebuilds when the current <see cref="ModuleStore.Modules"/> set
+/// differs from the cached snapshot.
 /// </remarks>
 internal sealed class TypeNavigationIndex : IModuleScopedCache
 {
     private readonly ModuleStore _store;
-    private readonly ConcurrentDictionary<Guid, NameCacheEntry> _nameToToken = new();
+    private readonly ModuleScopedCache<FrozenDictionary<string, int>> _nameToToken = new();
 
     // Global cache of the parent-edge graph. Null when invalidated.
     private ParentMapCacheEntry? _parentMaps;
@@ -33,37 +33,22 @@ internal sealed class TypeNavigationIndex : IModuleScopedCache
 
     public void Invalidate(Guid mvid)
     {
-        _nameToToken.TryRemove(mvid, out _);
+        _nameToToken.Invalidate(mvid);
         lock (_parentMapsLock) _parentMaps = null;
     }
 
     // Exposed for tests asserting cache state per the IModuleScopedCache contract.
-    internal bool HasNameCacheEntry(Guid mvid) => _nameToToken.ContainsKey(mvid);
+    internal bool HasNameCacheEntry(Guid mvid) => _nameToToken.HasEntry(mvid);
     internal bool HasParentMapsEntry => _parentMaps is not null;
 
     /// <summary>
     /// Returns the metadata token of the TypeDef whose full name matches <paramref name="typeFullName"/>,
-    /// or <c>null</c> if no match is found. Builds and caches the per-module name map on first call.
+    /// or <c>null</c> if no match is found. Builds and caches the per-module name map on first call
+    /// via the shared <see cref="ModuleScopedCache{TData}"/> (handle-pinned + stamp-validated).
     /// </summary>
-    /// <remarks>
-    /// Entries are pinned to the exact <see cref="ModuleHandle"/> reference they were built from
-    /// AND stamped with <see cref="ModuleCacheStamp"/>. The handle-identity check defeats the
-    /// publish-after-invalidate race on any reload (new <see cref="ModuleHandle"/> instance is
-    /// produced even when MVID is unchanged); the file stamp catches silent file changes between
-    /// explicit reloads. Lookup is a hit only when both still match the current store entry.
-    /// </remarks>
     public int? TryFindTypeToken(ModuleHandle module, string typeFullName)
     {
-        var stamp = ModuleCacheStamp.TryCapture(module);
-        if (_nameToToken.TryGetValue(module.Mvid, out var entry)
-            && ReferenceEquals(entry.Module, module)
-            && entry.Stamp.Equals(stamp))
-        {
-            return entry.Map.TryGetValue(typeFullName, out var cachedToken) ? cachedToken : null;
-        }
-
-        var map = BuildNameMap(module);
-        _nameToToken[module.Mvid] = new NameCacheEntry(module, map, stamp);
+        var map = _nameToToken.GetOrBuild(module, BuildNameMap);
         return map.TryGetValue(typeFullName, out var token) ? token : null;
     }
 
@@ -126,8 +111,6 @@ internal sealed class TypeNavigationIndex : IModuleScopedCache
         foreach (var m in _store.Modules) set.Add(m.Mvid);
         return set;
     }
-
-    private sealed record NameCacheEntry(ModuleHandle Module, FrozenDictionary<string, int> Map, ModuleCacheStamp Stamp);
 
     private sealed record ParentMapCacheEntry(
         HashSet<Guid> Mvids,

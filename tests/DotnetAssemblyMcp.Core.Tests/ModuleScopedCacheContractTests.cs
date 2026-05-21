@@ -30,7 +30,16 @@ public sealed class ModuleScopedCacheContractTests
         subscribers.Should().HaveCountGreaterThanOrEqualTo(7,
             "XrefIndex, StringIndex, AttributeIndex, FieldAccessIndex, R2RCacheAdapter, PdbCacheAdapter, TypeNavigationIndex are mandatory");
 
-        var typeNames = subscribers.Select(c => c.GetType().Name).ToList();
+        var typeNames = subscribers
+            .Select(c =>
+            {
+                var t = c.GetType();
+                // Include generic arg names so ModuleScopedCache<R2RReaderBox> surfaces "R2RReaderBox".
+                return t.IsGenericType
+                    ? $"{t.Name}<{string.Join(",", t.GetGenericArguments().Select(a => a.Name))}>"
+                    : t.Name;
+            })
+            .ToList();
         typeNames.Should().Contain(new[]
         {
             nameof(XrefIndex),
@@ -39,7 +48,8 @@ public sealed class ModuleScopedCacheContractTests
             nameof(FieldAccessIndex),
             nameof(TypeNavigationIndex),
         });
-        typeNames.Should().Contain(n => n.Contains("R2R", StringComparison.Ordinal));
+        typeNames.Should().Contain(n => n.Contains("R2R", StringComparison.Ordinal),
+            "the R2R cache (now a ModuleScopedCache<R2RReaderBox>) is identified by its generic argument's name");
         typeNames.Should().Contain(n => n.Contains("Pdb", StringComparison.Ordinal));
     }
 

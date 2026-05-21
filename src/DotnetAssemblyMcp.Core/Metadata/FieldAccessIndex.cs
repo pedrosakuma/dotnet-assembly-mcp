@@ -22,7 +22,7 @@ internal sealed class FieldAccessIndex : IModuleScopedCache
 {
     private readonly ModuleStore _store;
     private readonly Func<MethodIdentity, CancellationToken, FindCallersReadResult> _findCallers;
-    private readonly ConcurrentDictionary<Guid, CacheEntry> _cache = new();
+    private readonly ModuleScopedCache<FieldAccessIndexData> _cache = new();
 
     public FieldAccessIndex(
         ModuleStore store,
@@ -32,9 +32,9 @@ internal sealed class FieldAccessIndex : IModuleScopedCache
         _findCallers = findCallers;
     }
 
-    public void Invalidate(Guid mvid) => _cache.TryRemove(mvid, out _);
+    public void Invalidate(Guid mvid) => _cache.Invalidate(mvid);
 
-    internal bool HasCacheEntry(Guid mvid) => _cache.ContainsKey(mvid);
+    internal bool HasCacheEntry(Guid mvid) => _cache.HasEntry(mvid);
 
     public FindFieldReferencesReadResult FindFieldReferences(
         Guid moduleVersionId,
@@ -303,19 +303,8 @@ internal sealed class FieldAccessIndex : IModuleScopedCache
             hits, modulesSearchedMax, fromCacheAll));
     }
 
-    private FieldAccessIndexData GetOrBuild(ModuleHandle module, CancellationToken cancellationToken, out bool wasCached)
-    {
-        var stamp = ModuleCacheStamp.TryCapture(module);
-        if (_cache.TryGetValue(module.Mvid, out var entry) && entry.Stamp.Equals(stamp))
-        {
-            wasCached = true;
-            return entry.Data;
-        }
-        wasCached = false;
-        var data = BuildFieldAccessIndex(module, cancellationToken);
-        _cache[module.Mvid] = new CacheEntry(data, stamp);
-        return data;
-    }
+    private FieldAccessIndexData GetOrBuild(ModuleHandle module, CancellationToken cancellationToken, out bool wasCached) =>
+        _cache.GetOrBuild(module, m => BuildFieldAccessIndex(m, cancellationToken), out wasCached);
 
     private static bool ModeMatches(FieldAccessMode mode, FieldAccessKind kind) => mode switch
     {
@@ -468,5 +457,4 @@ internal sealed class FieldAccessIndex : IModuleScopedCache
         list.Add((callerToken, ilOffset, kind));
     }
 
-    private sealed record CacheEntry(FieldAccessIndexData Data, ModuleCacheStamp Stamp);
 }

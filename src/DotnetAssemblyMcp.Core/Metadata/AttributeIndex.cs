@@ -18,13 +18,13 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 internal sealed class AttributeIndex : IModuleScopedCache
 {
     private readonly ModuleStore _store;
-    private readonly ConcurrentDictionary<Guid, CacheEntry> _cache = new();
+    private readonly ModuleScopedCache<AttributeIndexData> _cache = new();
 
     public AttributeIndex(ModuleStore store) { _store = store; }
 
-    public void Invalidate(Guid mvid) => _cache.TryRemove(mvid, out _);
+    public void Invalidate(Guid mvid) => _cache.Invalidate(mvid);
 
-    internal bool HasCacheEntry(Guid mvid) => _cache.ContainsKey(mvid);
+    internal bool HasCacheEntry(Guid mvid) => _cache.HasEntry(mvid);
 
     public FindAttributeTargetsReadResult FindAttributeTargets(
         string attributeTypeFullName,
@@ -92,19 +92,8 @@ internal sealed class AttributeIndex : IModuleScopedCache
             attributeTypeFullName, hits, modulesSearched, fromCache, truncated));
     }
 
-    private AttributeIndexData GetOrBuild(ModuleHandle module, CancellationToken cancellationToken, out bool wasCached)
-    {
-        var stamp = ModuleCacheStamp.TryCapture(module);
-        if (_cache.TryGetValue(module.Mvid, out var entry) && entry.Stamp.Equals(stamp))
-        {
-            wasCached = true;
-            return entry.Data;
-        }
-        wasCached = false;
-        var data = BuildAttributeIndex(module, cancellationToken);
-        _cache[module.Mvid] = new CacheEntry(data, stamp);
-        return data;
-    }
+    private AttributeIndexData GetOrBuild(ModuleHandle module, CancellationToken cancellationToken, out bool wasCached) =>
+        _cache.GetOrBuild(module, m => BuildAttributeIndex(m, cancellationToken), out wasCached);
 
     private static (string Handle, string Display) RenderAttributeTarget(
         ModuleHandle module, AttributeTargetKind kind, int targetToken, int paramSeq)
@@ -268,5 +257,4 @@ internal sealed class AttributeIndex : IModuleScopedCache
         }
     }
 
-    private sealed record CacheEntry(AttributeIndexData Data, ModuleCacheStamp Stamp);
 }
