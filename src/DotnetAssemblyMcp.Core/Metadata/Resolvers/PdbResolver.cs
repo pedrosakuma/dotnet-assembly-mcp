@@ -24,6 +24,10 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
     private static readonly Guid SourceLinkCdiKind =
         new("CC110556-A091-4D38-9FEC-25AB9A351A6A");
 
+    // Portable PDB CDI kind for embedded source text (per Portable PDB spec §13).
+    private static readonly Guid EmbeddedSourceCdiKind =
+        new("0E8A571B-6926-466E-B4AD-8AB04611F5FE");
+
     private readonly MethodResolver _methods;
 
     public PdbResolver(MethodResolver methods) => _methods = methods;
@@ -101,12 +105,13 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
         }
 
         string? sourceLink = TryBuildSourceLink(pdb.Reader, file);
+        var embedded = TryReadEmbeddedSource(pdb.Reader, docHandle, file);
 
         return MethodSourceResult.Ok(new MethodSourceLocation(
             module.Mvid, identity.MetadataToken, handleStr,
             Found: true, File: file, StartLine: startLine, EndLine: endLine,
             SourceLink: sourceLink, PdbKind: pdb.Kind, PdbAge: pdb.Age,
-            Reason: null));
+            Reason: null, EmbeddedSource: embedded));
     }
 
     private static MethodSourceLocation NoSeqPoints(
@@ -215,6 +220,91 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
     }
 
     private static string NormalizeSlashes(string s) => s.Replace('\\', '/');
+
+    // Cap embedded-source content at 4 MiB. Any single source file larger than this is almost
+    // certainly malformed / adversarial — Roslyn's own embedded-source pipeline targets typical
+    // .cs/.fs files which are < 100 KB. The cap protects against zip-bomb PDBs (a tiny CDI blob
+    // claiming a multi-GB uncompressed size).
+    private const int MaxEmbeddedSourceBytes = 4 * 1024 * 1024;
+
+    private static EmbeddedSourceText? TryReadEmbeddedSource(
+        MetadataReader reader, DocumentHandle docHandle, string filePath)
+    {
+        if (docHandle.IsNil) return null;
+        try
+        {
+            byte[]? blob = null;
+            foreach (var cdiHandle in reader.GetCustomDebugInformation(docHandle))
+            {
+                var cdi = reader.GetCustomDebugInformation(cdiHandle);
+                if (reader.GetGuid(cdi.Kind) != EmbeddedSourceCdiKind) continue;
+                blob = reader.GetBlobBytes(cdi.Value);
+                break;
+            }
+            if (blob is null || blob.Length < 4) return null;
+
+            int format = BitConverter.ToInt32(blob, 0);
+            byte[] content;
+            if (format == 0)
+            {
+                // Uncompressed: remaining bytes are the source text.
+                int len = blob.Length - 4;
+                if (len > MaxEmbeddedSourceBytes) return null;
+                content = new byte[len];
+                Buffer.BlockCopy(blob, 4, content, 0, len);
+            }
+            else if (format > 0)
+            {
+                // DEFLATE-compressed: 'format' is the uncompressed size in bytes. Reject before
+                // allocating to defend against attacker-controlled values; bound the actual
+                // decompressed read to avoid zip-bomb expansion past the declared size.
+                if (format > MaxEmbeddedSourceBytes) return null;
+                using var compressed = new MemoryStream(blob, 4, blob.Length - 4, writable: false);
+                using var deflate = new System.IO.Compression.DeflateStream(
+                    compressed, System.IO.Compression.CompressionMode.Decompress);
+                content = new byte[format];
+                int read = 0;
+                while (read < format)
+                {
+                    int n = deflate.Read(content, read, format - read);
+                    if (n <= 0) break;
+                    read += n;
+                }
+                if (read != format) return null;
+                // Confirm the stream produced exactly 'format' bytes (no trailing data).
+                if (deflate.ReadByte() != -1) return null;
+            }
+            else
+            {
+                // Negative format value is unspecified; treat as malformed.
+                return null;
+            }
+
+            // Decode through StreamReader with BOM detection. Roslyn writes the source text using
+            // its original encoding, so UTF-8 / UTF-16 (LE/BE) / UTF-32 with BOM all round-trip;
+            // UTF-8 without BOM is the unambiguous fallback.
+            string text;
+            using (var ms = new MemoryStream(content, writable: false))
+            using (var sr = new StreamReader(ms, System.Text.Encoding.UTF8,
+                       detectEncodingFromByteOrderMarks: true))
+            {
+                text = sr.ReadToEnd();
+            }
+
+            // Hash + algorithm come from the Document row itself, not the CDI.
+            var doc = reader.GetDocument(docHandle);
+            string hashAlg = doc.HashAlgorithm.IsNil
+                ? string.Empty
+                : reader.GetGuid(doc.HashAlgorithm).ToString("D");
+            string hashHex = doc.Hash.IsNil
+                ? string.Empty
+                : Convert.ToHexString(reader.GetBlobBytes(doc.Hash));
+
+            return new EmbeddedSourceText(filePath, hashAlg, hashHex, content.Length, text);
+        }
+        catch (BadImageFormatException) { return null; }
+        catch (System.IO.InvalidDataException) { return null; }
+    }
 
     /// <inheritdoc />
     public void Invalidate(Guid mvid)

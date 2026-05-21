@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <DebugType>portable</DebugType>
+    <EmbedAllSources>true</EmbedAllSources>
     <AssemblyName>SampleLib</AssemblyName>
     <RootNamespace>SampleLib</RootNamespace>
     <!-- Fixture: a deliberately varied DLL for the metadata index to read. Skip docs/warnings strictness. -->
