@@ -90,7 +90,21 @@ internal sealed class StringCustomAttributeTypeProvider : ICustomAttributeTypePr
 internal sealed class StringSignatureProvider : ISignatureTypeProvider<string, object?>
 {
     private readonly MetadataReader _md;
-    public StringSignatureProvider(MetadataReader md) => _md = md;
+    private readonly bool _renderModifiers;
+    public StringSignatureProvider(MetadataReader md) : this(md, renderModifiers: true) { }
+    internal StringSignatureProvider(MetadataReader md, bool renderModifiers)
+    {
+        _md = md;
+        _renderModifiers = renderModifiers;
+    }
+    /// <summary>
+    /// Variant that suppresses modreq / modopt rendering. Used by xref / cross-module match
+    /// keys so that custom modifiers do not gate caller-callee matching (a callsite encoding
+    /// 'in T' must match a MethodDef whose parameter is the same byref-with-InAttribute, and
+    /// the comparison is done on the unmodified type identity, not on the modreq decoration).
+    /// </summary>
+    internal static StringSignatureProvider WithoutModifiers(MetadataReader md) =>
+        new(md, renderModifiers: false);
 
     public string GetPrimitiveType(PrimitiveTypeCode typeCode) => typeCode switch
     {
@@ -125,7 +139,10 @@ internal sealed class StringSignatureProvider : ISignatureTypeProvider<string, o
         genericType + "<" + string.Join(",", typeArguments) + ">";
     public string GetGenericMethodParameter(object? genericContext, int index) => "!!" + index;
     public string GetGenericTypeParameter(object? genericContext, int index) => "!" + index;
-    public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) => unmodifiedType;
+    public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) =>
+        _renderModifiers
+            ? unmodifiedType + " " + (isRequired ? "modreq" : "modopt") + "(" + modifier + ")"
+            : unmodifiedType;
     public string GetFunctionPointerType(MethodSignature<string> signature) => "fnptr";
 
     public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind)

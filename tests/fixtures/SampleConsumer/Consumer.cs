@@ -136,3 +136,15 @@ public sealed class UserRepo : Repository<string>
 {
     public override string? GetById(int id) => null;
 }
+
+/// <summary>
+/// Cross-module xref fixture for the modreq / modopt path (#101). Calls
+/// <see cref="ModifierFixture.FirstByIn"/> through a MemberRef whose signature carries the
+/// InAttribute modreq on both the parameter and the return byref, so the xref matcher must
+/// recognise the call site even though the consumer-facing renderer now surfaces modifiers.
+/// </summary>
+public static class CrossModuleModifierConsumer
+{
+    public static int CallFirstByIn(ModifierFixture fixture, int needle, int[] haystack)
+        => fixture.FirstByIn(in needle, haystack);
+}

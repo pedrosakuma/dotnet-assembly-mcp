@@ -210,7 +210,8 @@ internal sealed class SubstitutingStringSignatureProvider : System.Reflection.Me
     public string GetGenericTypeParameter(object? genericContext, int index) =>
         index < _typeArgs.Length ? _typeArgs[index] : $"!{index}";
 
-    public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) => unmodifiedType;
+    public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) =>
+        unmodifiedType + " " + (isRequired ? "modreq" : "modopt") + "(" + modifier + ")";
     public string GetFunctionPointerType(MethodSignature<string> signature) => "fnptr";
 
     public string GetTypeFromDefinition(MetadataReader reader, TypeDefinitionHandle handle, byte rawTypeKind)
