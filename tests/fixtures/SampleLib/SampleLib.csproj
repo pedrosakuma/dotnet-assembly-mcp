@@ -15,4 +15,12 @@
     <NoWarn>$(NoWarn);CA1822;CA1812;CA2211;IDE0290;CS1591</NoWarn>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+
+  <!-- #102: an embedded resource so list_resources has something to enumerate against the
+       SampleLib fixture. Plain .txt embedded as a public manifest resource. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Strings.txt">
+      <LogicalName>SampleLib.Strings.txt</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
 </Project>
