@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Reflection.PortableExecutable;
@@ -18,8 +17,16 @@ namespace DotnetAssemblyMcp.Core.Metadata.Resolvers;
 internal sealed class PdbResolver : IModuleScopedCache, IDisposable
 {
     // Cache one open MetadataReaderProvider per module so repeated get_method_source calls
-    // don't re-open the PDB. Disposed alongside the resolver.
-    private readonly ConcurrentDictionary<Guid, PdbHandle?> _sourceCache = new();
+    // don't re-open the PDB. The eviction callback disposes the provider when an entry is
+    // invalidated or replaced on a same-MVID reload — the cache helper guarantees the
+    // callback fires before the slot is republished.
+    private readonly ModuleScopedCache<PdbBox> _sourceCache;
+
+    public PdbResolver(MethodResolver methods)
+    {
+        _methods = methods;
+        _sourceCache = new ModuleScopedCache<PdbBox>(onEvict: static box => box.Handle?.Provider?.Dispose());
+    }
 
     private static readonly Guid SourceLinkCdiKind =
         new("CC110556-A091-4D38-9FEC-25AB9A351A6A");
@@ -30,7 +37,9 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
 
     private readonly MethodResolver _methods;
 
-    public PdbResolver(MethodResolver methods) => _methods = methods;
+    // Wrapper so we can cache the "no PDB found" negative result alongside successful hits
+    // without conflating it with a cache miss (the helper requires a reference-type payload).
+    private sealed record PdbBox(PdbHandle? Handle);
 
     private sealed record PdbHandle(MetadataReaderProvider? Provider, MetadataReader? Reader, PdbKind Kind, int Age);
 
@@ -42,7 +51,7 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
         var methodHandle = common.Handle;
         var handleStr = HandleSyntax.FormatMethod(module.Mvid, identity.MetadataToken);
 
-        var pdb = _sourceCache.GetOrAdd(module.Mvid, _ => TryOpenPdb(module));
+        var pdb = _sourceCache.GetOrBuild(module, m => new PdbBox(TryOpenPdb(m))).Handle;
         if (pdb is null)
         {
             return MethodSourceResult.Ok(new MethodSourceLocation(
@@ -307,20 +316,8 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
     }
 
     /// <inheritdoc />
-    public void Invalidate(Guid mvid)
-    {
-        if (_sourceCache.TryRemove(mvid, out var pdb))
-            pdb?.Provider?.Dispose();
-    }
+    public void Invalidate(Guid mvid) => _sourceCache.Invalidate(mvid);
 
     /// <inheritdoc />
-    public void Dispose()
-    {
-        foreach (var pdb in _sourceCache.Values)
-        {
-            // Embedded portable PDB providers pin native memory; releasing them is mandatory.
-            pdb?.Provider?.Dispose();
-        }
-        _sourceCache.Clear();
-    }
+    public void Dispose() => _sourceCache.Clear();
 }
