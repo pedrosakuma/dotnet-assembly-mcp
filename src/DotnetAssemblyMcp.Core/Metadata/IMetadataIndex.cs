@@ -299,6 +299,15 @@ public interface IMetadataIndex
     /// <see cref="EnsureLoaded"/> when starting from an (mvid, path) pair.
     /// </summary>
     FindTypeByNameResult FindTypeByFullName(Guid moduleVersionId, string typeFullName);
+
+    /// <summary>
+    /// Raised after a module reload (file-on-disk MVID changed, or an explicit
+    /// re-<see cref="Load"/> with the same MVID) so downstream caches (decompilation, IL
+    /// disassembly, xref) can invalidate entries keyed by the affected MVID. Subscribers
+    /// must be idempotent — the event also fires for reload failures (with
+    /// <see cref="ModuleReloadedEventArgs.Error"/> non-null) so they can drop stale state.
+    /// </summary>
+    event EventHandler<ModuleReloadedEventArgs>? ModuleReloaded;
 }
 
 /// <summary>Result of <see cref="IMetadataIndex.Load"/>.</summary>

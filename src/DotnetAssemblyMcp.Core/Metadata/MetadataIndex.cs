@@ -795,13 +795,6 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
     /// <summary>Default cap on raw IL bytes encoded by <see cref="GetIlBody"/>. 4 KiB.</summary>
     public const int DefaultIlMaxBytes = Resolvers.IlBodyReader.DefaultIlMaxBytes;
 
-    private const int MaxIntraCount = 10_000_000;
-    private const int MaxOutboundCount = 10_000_000;
-    private const int MaxIntraCallersPerCallee = 1_000_000;
-
-    private static ModuleSummary SummarizeModule(ModuleHandle m) =>
-        new(m.Mvid, Path.GetFileName(m.Path), m.Path, m.MD.MethodDefinitions.Count);
-
     /// <inheritdoc />
     public void Dispose()
     {
@@ -1746,16 +1739,10 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         // and ImmutableArray<CustomAttributeTypedArgument<string>> for arrays. Flatten arrays
         // recursively so the response is plain JSON-friendly objects.
         if (raw is null) return null;
-        var t = raw.GetType();
-        if (!t.IsGenericType || t.GetGenericTypeDefinition() != typeof(ImmutableArray<>))
-            return raw;
-        var list = new List<object?>();
-        foreach (var element in (System.Collections.IEnumerable)raw)
-        {
-            // Each element is CustomAttributeTypedArgument<string>; reflect into its Value.
-            var valueProp = element?.GetType().GetProperty("Value");
-            list.Add(RenderAttributeValue(valueProp?.GetValue(element)));
-        }
+        if (raw is not ImmutableArray<CustomAttributeTypedArgument<string>> array) return raw;
+        var list = new List<object?>(array.Length);
+        foreach (var element in array)
+            list.Add(RenderAttributeValue(element.Value));
         return list;
     }
 

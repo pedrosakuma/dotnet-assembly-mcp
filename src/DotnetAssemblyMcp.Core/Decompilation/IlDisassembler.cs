@@ -43,8 +43,7 @@ public sealed class IlDisassembler : IIlDisassembler, IDisposable
     {
         _index = index ?? throw new ArgumentNullException(nameof(index));
         _now = clock ?? throw new ArgumentNullException(nameof(clock));
-        if (_index is MetadataIndex mi)
-            mi.ModuleReloaded += OnModuleReloaded;
+        _index.ModuleReloaded += OnModuleReloaded;
     }
 
     /// <inheritdoc />
@@ -278,8 +277,7 @@ public sealed class IlDisassembler : IIlDisassembler, IDisposable
 
     public void Dispose()
     {
-        if (_index is MetadataIndex mi)
-            mi.ModuleReloaded -= OnModuleReloaded;
+        _index.ModuleReloaded -= OnModuleReloaded;
         foreach (var f in _files.Values)
             f.File.Dispose();
         _files.Clear();
