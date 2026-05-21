@@ -130,4 +130,29 @@ public sealed class GetMethodSourceTests
             second.PdbKind.Should().Be(first.PdbKind);
         }
     }
+
+    [Fact]
+    public void Embedded_source_text_is_surfaced_when_pdb_carries_EmbedAllSources()
+    {
+        // SampleLib is built with <DebugType>embedded</DebugType> + <EmbedAllSources>true</EmbedAllSources>
+        // (#105) so the portable PDB carries the embedded-source CDI for every Document.
+        var (index, mvid, token) = ResolveProcessToken();
+        using (index)
+        {
+            var result = AssemblyTools.GetMethodSource(index, mvid.ToString("D"), $"0x{token:X8}");
+            result.IsError.Should().BeFalse(result.Summary);
+
+            var loc = result.Data!;
+            loc.Found.Should().BeTrue($"reason={loc.Reason}, pdb={loc.PdbKind}");
+            loc.PdbKind.Should().BeOneOf(PdbKind.Portable, PdbKind.Embedded);
+            loc.EmbeddedSource.Should().NotBeNull(
+                "EmbedAllSources=true must surface the embedded-source CDI on every Document");
+            loc.EmbeddedSource!.Path.Should().NotBeNullOrEmpty();
+            loc.EmbeddedSource.Length.Should().BeGreaterThan(0);
+            loc.EmbeddedSource.Content.Should().Contain("namespace SampleLib",
+                "the embedded source must round-trip the original Sample.cs text");
+            loc.EmbeddedSource.Content.Should().Contain("class OrderService",
+                "OrderService.Process is declared in the same file");
+        }
+    }
 }
