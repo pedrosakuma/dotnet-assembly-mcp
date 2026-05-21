@@ -244,10 +244,95 @@ internal static class MetadataDisplay
         var pinvoke = (def.Attributes & MethodAttributes.PinvokeImpl) != 0
             ? DecodePInvoke(m, def, h)
             : null;
+        var generics = DecodeGenericParameters(m, def.GetGenericParameters());
 
         return new MethodSummary(
             m.Mvid, token, handle, fullType, methodName, signature,
-            ilSize, def.GetGenericParameters().Count, attrs, NativeBody: null, PInvoke: pinvoke);
+            ilSize, def.GetGenericParameters().Count, attrs,
+            NativeBody: null, PInvoke: pinvoke, GenericParameters: generics);
+    }
+
+    /// <summary>
+    /// Decodes the <c>GenericParam</c> + <c>GenericParamConstraint</c> rows for a type or method
+    /// (#103). Returns null when there are no generic parameters so non-generic summaries cost
+    /// nothing on the wire. Variance + special constraints come from <see cref="GenericParameterAttributes"/>;
+    /// base/interface constraints come from <see cref="GenericParameter.GetConstraints"/>.
+    /// </summary>
+    public static IReadOnlyList<GenericParameterSummary>? DecodeGenericParameters(
+        ModuleHandle m, GenericParameterHandleCollection handles)
+    {
+        if (handles.Count == 0) return null;
+        var list = new List<GenericParameterSummary>(handles.Count);
+        foreach (var gph in handles)
+        {
+            GenericParameter gp;
+            try { gp = m.MD.GetGenericParameter(gph); }
+            catch (BadImageFormatException) { continue; }
+
+            string name = m.MD.GetString(gp.Name);
+            string variance = (gp.Attributes & GenericParameterAttributes.VarianceMask) switch
+            {
+                GenericParameterAttributes.Covariant => "Covariant",
+                GenericParameterAttributes.Contravariant => "Contravariant",
+                _ => "None",
+            };
+            bool isRef = (gp.Attributes & GenericParameterAttributes.ReferenceTypeConstraint) != 0;
+            bool isVal = (gp.Attributes & GenericParameterAttributes.NotNullableValueTypeConstraint) != 0;
+            bool hasCtor = (gp.Attributes & GenericParameterAttributes.DefaultConstructorConstraint) != 0;
+
+            List<TypeReferenceSummary>? typeConstraints = null;
+            try
+            {
+                var consHandles = gp.GetConstraints();
+                if (consHandles.Count > 0)
+                {
+                    typeConstraints = new List<TypeReferenceSummary>(consHandles.Count);
+                    foreach (var ch in consHandles)
+                    {
+                        GenericParameterConstraint c;
+                        try { c = m.MD.GetGenericParameterConstraint(ch); }
+                        catch (BadImageFormatException) { continue; }
+                        var rendered = TryRenderGenericConstraintType(m, c.Type);
+                        if (rendered is not null) typeConstraints.Add(rendered);
+                    }
+                    if (typeConstraints.Count == 0) typeConstraints = null;
+                }
+            }
+            catch (BadImageFormatException) { /* skip */ }
+
+            list.Add(new GenericParameterSummary(
+                gp.Index, name, variance, isRef, isVal, hasCtor, typeConstraints));
+        }
+        return list.Count == 0 ? null : list;
+    }
+
+    private static TypeReferenceSummary? TryRenderGenericConstraintType(ModuleHandle m, EntityHandle h)
+        => TryRenderTypeReferenceSummary(m, h);
+
+    internal static TypeReferenceSummary? TryRenderTypeReferenceSummary(ModuleHandle module, EntityHandle handle)
+    {
+        if (handle.IsNil) return null;
+        try
+        {
+            switch (handle.Kind)
+            {
+                case HandleKind.TypeReference:
+                {
+                    var name = MetadataResolver.ResolveTypeRefName(module, (TypeReferenceHandle)handle, out var asmName);
+                    return name is null ? null : new TypeReferenceSummary(name, asmName);
+                }
+                case HandleKind.TypeDefinition:
+                    return new TypeReferenceSummary(RenderTypeDef(module, (TypeDefinitionHandle)handle));
+                case HandleKind.TypeSpecification:
+                {
+                    var name = MetadataResolver.ResolveOutboundTypeName(module, handle, out var asmName);
+                    return name is null ? null : new TypeReferenceSummary(name, asmName);
+                }
+                default:
+                    return null;
+            }
+        }
+        catch (BadImageFormatException) { return null; }
     }
 
     private static PInvokeInfo? DecodePInvoke(ModuleHandle m, MethodDefinition def, MethodDefinitionHandle h)

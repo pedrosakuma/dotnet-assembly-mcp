@@ -363,35 +363,14 @@ public sealed class MetadataIndex : IMetadataIndex, IDisposable
         var isPublic = vis == TypeAttributes.Public || vis == TypeAttributes.NestedPublic;
         var baseType = TryRenderTypeReferenceSummary(module, td.BaseType);
         var interfaces = ReadInterfaceImplementations(module, td);
+        var generics = MetadataDisplay.DecodeGenericParameters(module, td.GetGenericParameters());
         return new TypeSummary(module.Mvid, token, HandleSyntax.FormatType(module.Mvid, token),
-            fullName, kind, methodCount, isPublic, baseType, interfaces);
+            fullName, kind, methodCount, isPublic, baseType, interfaces,
+            Instantiation: null, GenericParameters: generics);
     }
 
     private static TypeReferenceSummary? TryRenderTypeReferenceSummary(ModuleHandle module, EntityHandle handle)
-    {
-        if (handle.IsNil) return null;
-        try
-        {
-            switch (handle.Kind)
-            {
-                case HandleKind.TypeReference:
-                {
-                    var name = ResolveTypeRefName(module, (TypeReferenceHandle)handle, out var asmName);
-                    return name is null ? null : new TypeReferenceSummary(name, asmName);
-                }
-                case HandleKind.TypeDefinition:
-                    return new TypeReferenceSummary(RenderTypeDef(module, (TypeDefinitionHandle)handle));
-                case HandleKind.TypeSpecification:
-                {
-                    var name = ResolveOutboundTypeName(module, handle, out var asmName);
-                    return name is null ? null : new TypeReferenceSummary(name, asmName);
-                }
-                default:
-                    return null;
-            }
-        }
-        catch (BadImageFormatException) { return null; }
-    }
+        => MetadataDisplay.TryRenderTypeReferenceSummary(module, handle);
 
     private static IReadOnlyList<TypeReferenceSummary> ReadInterfaceImplementations(ModuleHandle module, TypeDefinition td)
     {

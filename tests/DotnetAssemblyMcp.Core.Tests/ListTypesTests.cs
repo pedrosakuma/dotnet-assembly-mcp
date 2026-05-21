@@ -106,7 +106,7 @@ public sealed class ListTypesTests
 
         var collected = new List<TypeSummary>(first.Page.Types);
         int? cursor = first.Page.NextCursor;
-        int guard = 10;
+        int guard = 100;
         while (cursor is not null && guard-- > 0)
         {
             var next = index.ListTypes(mvid, new ListTypesQuery(PageSize: 2, Cursor: cursor));
