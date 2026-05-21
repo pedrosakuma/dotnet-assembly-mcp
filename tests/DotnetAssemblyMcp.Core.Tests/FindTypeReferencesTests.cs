@@ -257,4 +257,62 @@ public sealed class FindTypeReferencesTests
             typeSite.Display.Should().Contain("Repository"); // either IntRepository's TypeName render
         }
     }
+
+    [Fact]
+    public void Finds_cross_module_newobj_of_generic_via_TypeSpec_parent()
+    {
+        // SampleConsumer.RunBox does `new Box<int>(value)`. The IL is `newobj` (InlineMethod)
+        // with operand = MemberRef whose Parent is a TypeSpec wrapping TypeRef(Box`1).
+        // Pre-#69 fix, ScanTypesFromIl only inspected InlineType/InlineTok operands, so the
+        // type-reference edge to Box`1 was lost — the open generic was invisible to
+        // find_type_references even though new_obj is the canonical "use" of a type.
+        var index = new MetadataIndex();
+        index.Load(SampleLibPath);
+        index.Load(typeof(SampleConsumer.ConsumerService).Assembly.Location);
+        using (index)
+        {
+            var libMvid = typeof(SampleLib.OrderService).Assembly.ManifestModule.ModuleVersionId;
+            var consumerMvid = typeof(SampleConsumer.ConsumerService).Assembly.ManifestModule.ModuleVersionId;
+            var boxOpenToken = typeof(SampleLib.Box<>).MetadataToken;
+
+            var result = index.FindTypeReferences(libMvid, boxOpenToken);
+
+            result.IsSuccess.Should().BeTrue();
+            // RunBox + RunBoxString both `new Box<...>(value)` — must surface as IlOpcode sites
+            // on the consumer module.
+            result.Result!.References.Should().Contain(r =>
+                r.ModuleVersionId == consumerMvid
+                && r.SiteKind == MemberKind.Method
+                && r.ReferenceKind == TypeReferenceKind.IlOpcode,
+                because: "cross-module newobj of Box<int>/Box<string> must surface as an IlOpcode reference to Box`1");
+        }
+    }
+
+    [Fact]
+    public void Finds_intra_module_call_through_generic_method_parent_TypeSpec()
+    {
+        // SampleLib.OrderService.Compute does `new Box<int>(x)` + `box.Value` (same module).
+        // The newobj/call operands are MemberRefs whose Parent is a TypeSpec over Box`1.
+        // Pre-#69, ScanTypesFromIl only walked InlineType/InlineTok operands, so this intra-
+        // module path was invisible — TypeUsageFixture.BoxTypeHandle() (ldtoken) was the only
+        // intra site and would mask any regression. We assert specifically on Compute's
+        // MethodDef token so the test fails if the MemberRef.Parent walk is removed.
+        var (index, mvid) = Load();
+        using (index)
+        {
+            var boxOpenToken = typeof(SampleLib.Box<>).MetadataToken;
+            var computeMethod = typeof(SampleLib.OrderService)
+                .GetMethod("Compute", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var computeToken = computeMethod.MetadataToken;
+
+            var result = index.FindTypeReferences(mvid, boxOpenToken);
+
+            result.IsSuccess.Should().BeTrue();
+            result.Result!.References.Should().Contain(r =>
+                r.SiteKind == MemberKind.Method
+                && r.ReferenceKind == TypeReferenceKind.IlOpcode
+                && r.MetadataToken == computeToken,
+                because: "intra-module newobj/call through TypeSpec parent on Box<int> must surface OrderService.Compute as an IlOpcode reference to Box`1");
+        }
+    }
 }
