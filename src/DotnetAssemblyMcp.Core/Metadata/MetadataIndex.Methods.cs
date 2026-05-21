@@ -313,17 +313,17 @@ public sealed partial class MetadataIndex
             return NativeBodyResult.Fail(new AssemblyError(ErrorKinds.IdentityMalformed,
                 $"metadataToken 0x{methodMetadataToken:X8} is not a MethodDef token."));
 
-        R2R.R2RReader? r2r = _r2rCache.GetOrAdd(module.Mvid, _ =>
+        var r2r = _r2rCache.GetOrBuild(module, m =>
         {
             try
             {
-                return R2R.R2RReader.TryCreate(module.PE, out var built) ? built : null;
+                return new R2RReaderBox(R2R.R2RReader.TryCreate(m.PE, out var built) ? built : null);
             }
             catch (BadImageFormatException)
             {
-                return null;
+                return new R2RReaderBox(null);
             }
-        });
+        }).Reader;
 
         if (r2r is null)
             return NativeBodyResult.NotFound();

@@ -23,15 +23,15 @@ namespace DotnetAssemblyMcp.Core.Metadata;
 internal sealed class StringIndex : IModuleScopedCache
 {
     private readonly ModuleStore _store;
-    private readonly ConcurrentDictionary<Guid, CacheEntry> _cache = new();
+    private readonly ModuleScopedCache<StringIndexData> _cache = new();
 
     public StringIndex(ModuleStore store) { _store = store; }
 
-    public void Invalidate(Guid mvid) => _cache.TryRemove(mvid, out _);
+    public void Invalidate(Guid mvid) => _cache.Invalidate(mvid);
 
     // Exposed for the IModuleScopedCache contract test — asserts the cache becomes empty
     // for a given MVID after Invalidate is called.
-    internal bool HasCacheEntry(Guid mvid) => _cache.ContainsKey(mvid);
+    internal bool HasCacheEntry(Guid mvid) => _cache.HasEntry(mvid);
 
     public FindStringReferencesReadResult FindStringReferences(
         string query,
@@ -158,19 +158,8 @@ internal sealed class StringIndex : IModuleScopedCache
             query, matchMode, hits, modulesSearched, FromCache: fromCache, Truncated: truncated));
     }
 
-    private StringIndexData GetOrBuild(ModuleHandle module, CancellationToken cancellationToken, out bool wasCached)
-    {
-        var stamp = ModuleCacheStamp.TryCapture(module);
-        if (_cache.TryGetValue(module.Mvid, out var entry) && entry.Stamp.Equals(stamp))
-        {
-            wasCached = true;
-            return entry.Data;
-        }
-        wasCached = false;
-        var data = BuildStringIndex(module, cancellationToken);
-        _cache[module.Mvid] = new CacheEntry(data, stamp);
-        return data;
-    }
+    private StringIndexData GetOrBuild(ModuleHandle module, CancellationToken cancellationToken, out bool wasCached) =>
+        _cache.GetOrBuild(module, m => BuildStringIndex(m, cancellationToken), out wasCached);
 
     private static bool AppendHits(ModuleHandle module, string literal, List<(int MethodToken, int IlOffset)> sites,
         List<StringReferenceRef> output, int maxHits)
@@ -254,6 +243,4 @@ internal sealed class StringIndex : IModuleScopedCache
 
         return new StringIndexData(dict);
     }
-
-    private sealed record CacheEntry(StringIndexData Data, ModuleCacheStamp Stamp);
 }

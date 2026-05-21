@@ -47,7 +47,7 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
     private readonly TypeNavigationIndex _typeNavigation;
     private readonly List<IModuleScopedCache> _moduleScopedCaches;
 
-    private readonly ConcurrentDictionary<Guid, R2R.R2RReader?> _r2rCache = new();
+    private readonly ModuleScopedCache<R2RReaderBox> _r2rCache = new();
     private readonly string _xrefCacheDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".cache", "dotnet-assembly-mcp");
@@ -85,7 +85,7 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
             _fieldAccessIndex,
             _pdbResolver,
             _typeNavigation,
-            new R2RCacheAdapter(_r2rCache),
+            _r2rCache,
         };
 
         // Forward lifecycle events: fan out to cache invalidation, then re-raise to subscribers
@@ -110,10 +110,12 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
 
     // ---- IModuleScopedCache adapters for caches that don't warrant their own class -------
 
-    private sealed class R2RCacheAdapter(ConcurrentDictionary<Guid, R2R.R2RReader?> cache) : IModuleScopedCache
-    {
-        public void Invalidate(Guid mvid) => cache.TryRemove(mvid, out _);
-    }
+    /// <summary>
+    /// Boxes a nullable <see cref="R2R.R2RReader"/> so the cache slot can serve a negative
+    /// result (no R2R section) without conflating it with a cache miss. The helper
+    /// <see cref="ModuleScopedCache{TData}"/> requires a reference-type payload.
+    /// </summary>
+    private sealed record R2RReaderBox(R2R.R2RReader? Reader);
 
     /// <inheritdoc />
     public LoadResult Load(string path) => _store.Load(path);
