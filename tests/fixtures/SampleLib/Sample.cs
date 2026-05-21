@@ -209,3 +209,28 @@ public sealed class IntRepository : Repository<int>
     public override int GetById(int id) => id;
 }
 
+/// <summary>
+/// Fixture for PInvoke metadata coverage on <see cref="MethodSummary.PInvoke"/> (#104).
+/// Uses libc / kernel32 entrypoints that exist on the build agent without runtime
+/// dispatching — we only need the metadata, the methods are never invoked.
+/// </summary>
+public static class PInvokeFixture
+{
+#pragma warning disable CA1401 // P/Invoke method visibility — fixture-only, methods are never invoked
+    [System.Runtime.InteropServices.DllImport(
+        "libc",
+        EntryPoint = "getpid",
+        CharSet = System.Runtime.InteropServices.CharSet.Ansi,
+        CallingConvention = System.Runtime.InteropServices.CallingConvention.Cdecl,
+        SetLastError = true,
+        ExactSpelling = true)]
+    public static extern int GetPid();
+
+    [System.Runtime.InteropServices.DllImport(
+        "kernel32.dll",
+        CharSet = System.Runtime.InteropServices.CharSet.Unicode,
+        PreserveSig = false)]
+    public static extern int FormatMessageW(uint flags, IntPtr source, uint messageId, uint langId, IntPtr buffer, uint size, IntPtr args);
+#pragma warning restore CA1401
+}
+

@@ -26,7 +26,70 @@ public sealed record MethodSummary(
     int IlSize,
     int GenericArity,
     IReadOnlyList<string> Attributes,
-    NativeBodyRef? NativeBody = null);
+    NativeBodyRef? NativeBody = null,
+    PInvokeInfo? PInvoke = null)
+{
+    // Binary-compat overload: preserves the 10-arg constructor signature that shipped before
+    // the PInvoke discriminator was added (issue #104). Existing compiled consumers calling
+    // MethodSummary(..., NativeBodyRef?) keep working without recompilation.
+    public MethodSummary(
+        Guid moduleVersionId,
+        int metadataToken,
+        string handle,
+        string typeFullName,
+        string methodName,
+        string signature,
+        int ilSize,
+        int genericArity,
+        IReadOnlyList<string> attributes,
+        NativeBodyRef? nativeBody)
+        : this(moduleVersionId, metadataToken, handle, typeFullName, methodName, signature,
+               ilSize, genericArity, attributes, nativeBody, PInvoke: null) { }
+
+    // Binary-compat overload: preserves the 10-out Deconstruct signature that records
+    // synthesise from a 10-param primary constructor (issue #104). Existing consumers using
+    // the pre-PInvoke deconstruction keep working without recompilation.
+    public void Deconstruct(
+        out Guid moduleVersionId,
+        out int metadataToken,
+        out string handle,
+        out string typeFullName,
+        out string methodName,
+        out string signature,
+        out int ilSize,
+        out int genericArity,
+        out IReadOnlyList<string> attributes,
+        out NativeBodyRef? nativeBody)
+    {
+        moduleVersionId = ModuleVersionId;
+        metadataToken = MetadataToken;
+        handle = Handle;
+        typeFullName = TypeFullName;
+        methodName = MethodName;
+        signature = Signature;
+        ilSize = IlSize;
+        genericArity = GenericArity;
+        attributes = Attributes;
+        nativeBody = NativeBody;
+    }
+}
+
+/// <summary>
+/// Decoded PInvoke binding for methods carrying <see cref="System.Reflection.MethodAttributes.PinvokeImpl"/>.
+/// Surfaced on <see cref="MethodSummary.PInvoke"/> so interop audits do not need to call
+/// <c>decompile_method</c>. Populated from <see cref="System.Reflection.Metadata.MethodImport"/>
+/// plus the method's <see cref="System.Reflection.MethodImplAttributes"/>.
+/// </summary>
+public sealed record PInvokeInfo(
+    string ModuleName,
+    string EntryPoint,
+    string CharSet,
+    string CallingConvention,
+    bool ExactSpelling = false,
+    bool SetLastError = false,
+    bool PreserveSig = false,
+    bool? BestFitMapping = null,
+    bool? ThrowOnUnmappableChar = null);
 
 /// <summary>
 /// Coarse-grained kind of a type definition. Mirrors the buckets a user-facing client cares

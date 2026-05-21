@@ -241,10 +241,68 @@ internal static class MetadataDisplay
 
         var attrs = FormatAttributes(def.Attributes);
         var handle = HandleSyntax.FormatMethod(m.Mvid, token);
+        var pinvoke = (def.Attributes & MethodAttributes.PinvokeImpl) != 0
+            ? DecodePInvoke(m, def, h)
+            : null;
 
         return new MethodSummary(
             m.Mvid, token, handle, fullType, methodName, signature,
-            ilSize, def.GetGenericParameters().Count, attrs);
+            ilSize, def.GetGenericParameters().Count, attrs, NativeBody: null, PInvoke: pinvoke);
+    }
+
+    private static PInvokeInfo? DecodePInvoke(ModuleHandle m, MethodDefinition def, MethodDefinitionHandle h)
+    {
+        try
+        {
+            var import = def.GetImport();
+            if (import.Module.IsNil) return null;
+
+            var moduleRef = m.MD.GetModuleReference(import.Module);
+            var moduleName = m.MD.GetString(moduleRef.Name);
+            var entryPoint = import.Name.IsNil ? m.MD.GetString(def.Name) : m.MD.GetString(import.Name);
+            var attrs = import.Attributes;
+            var impl = def.ImplAttributes;
+
+            string charSet = (attrs & MethodImportAttributes.CharSetMask) switch
+            {
+                MethodImportAttributes.CharSetAnsi => "Ansi",
+                MethodImportAttributes.CharSetUnicode => "Unicode",
+                MethodImportAttributes.CharSetAuto => "Auto",
+                _ => "None",
+            };
+            string callConv = (attrs & MethodImportAttributes.CallingConventionMask) switch
+            {
+                MethodImportAttributes.CallingConventionCDecl => "Cdecl",
+                MethodImportAttributes.CallingConventionStdCall => "StdCall",
+                MethodImportAttributes.CallingConventionThisCall => "ThisCall",
+                MethodImportAttributes.CallingConventionFastCall => "FastCall",
+                MethodImportAttributes.CallingConventionWinApi => "Winapi",
+                _ => "Winapi",
+            };
+            bool exactSpelling = (attrs & MethodImportAttributes.ExactSpelling) != 0;
+            bool setLastError = (attrs & MethodImportAttributes.SetLastError) != 0;
+            bool preserveSig = (impl & MethodImplAttributes.PreserveSig) != 0;
+            bool? bestFit = (attrs & MethodImportAttributes.BestFitMappingMask) switch
+            {
+                MethodImportAttributes.BestFitMappingEnable => true,
+                MethodImportAttributes.BestFitMappingDisable => false,
+                _ => null,
+            };
+            bool? throwOnUnmappable = (attrs & MethodImportAttributes.ThrowOnUnmappableCharMask) switch
+            {
+                MethodImportAttributes.ThrowOnUnmappableCharEnable => true,
+                MethodImportAttributes.ThrowOnUnmappableCharDisable => false,
+                _ => null,
+            };
+
+            return new PInvokeInfo(
+                moduleName, entryPoint, charSet, callConv,
+                exactSpelling, setLastError, preserveSig, bestFit, throwOnUnmappable);
+        }
+        catch (BadImageFormatException)
+        {
+            return null;
+        }
     }
 
     public static List<string> FormatAttributes(MethodAttributes a)
