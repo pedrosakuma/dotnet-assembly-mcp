@@ -14,6 +14,10 @@ on:
 permissions:
   contents: write
   packages: write
+  # Required by actions/attest-build-provenance to mint a Sigstore certificate
+  # via GitHub's OIDC issuer and publish the attestation back to the repo.
+  attestations: write
+  id-token: write
 
 env:
   DOTNET_NOLOGO: 'true'
@@ -75,6 +79,10 @@ jobs:
             -c Release \
             -o artifacts \
             /p:MinVerVersionOverride=${{ needs.version.outputs.version }}
+      - name: Attest nupkg provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'artifacts/*.nupkg'
       - name: Push to NuGet.org
         run: |
           dotnet nuget push 'artifacts/*.nupkg' \
@@ -144,6 +152,15 @@ jobs:
           $hash = (Get-FileHash "dist/$base.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $base.zip" | Out-File -Encoding ascii "dist/$base.zip.sha256"
 
+      - name: Attest binary archive provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          # Attests the archive itself; the sha256 sidecar is just a convenience and
+          # consumers verify the archive directly via `gh attestation verify`.
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -182,19 +199,46 @@ jobs:
             type=raw,value=${{ needs.version.outputs.version }}
             type=raw,value=latest,enable=${{ !contains(needs.version.outputs.version, '-') }}
 
-      - name: Build & push
+      - name: Build & push (by digest, no tags)
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          # Push by digest only — the version/latest tags are applied AFTER the
+          # GitHub-issued SLSA attestation succeeds. Without this, a tagged image
+          # would be reachable to consumers before its attestation existed, and a
+          # failed attestation step would leak an unattested tag.
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             MINVER_VERSION_OVERRIDE=${{ needs.version.outputs.version }}
           provenance: true
           sbom: true
+
+      - name: Attest container image provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Apply tags to attested digest
+        # Promotes the digest to the human-readable version/latest tags only after
+        # the attestation has been published. Tags become resolvable to consumers
+        # at the same moment as the SLSA provenance they can verify against.
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            args+=( -t "$tag" )
+          done <<< "$TAGS"
+          docker buildx imagetools create "${args[@]}" "${IMAGE_NAME}@${DIGEST}"
 
   github-release:
     name: GitHub Release
