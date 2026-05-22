@@ -93,6 +93,19 @@ public sealed class DecompilerTests
     }
 
     [Fact]
+    public void Decompile_clamps_user_supplied_maxChars_to_hard_cap()
+    {
+        var (index, dec) = NewSubject();
+        using var _ = index;
+
+        // int.MaxValue must NOT allocate a 2 GB buffer; the decompiler clamps to HardMaxChars.
+        var result = dec.Decompile(IdentityFor("Process", typeof(int)), maxChars: int.MaxValue);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Source!.Source.Length.Should().BeLessThanOrEqualTo(Decompiler.HardMaxChars + 128 /* truncation marker */);
+    }
+
+    [Fact]
     public void Decompile_unknown_mvid_returns_module_not_found()
     {
         var (index, dec) = NewSubject();

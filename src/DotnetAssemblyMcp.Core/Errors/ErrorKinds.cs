@@ -64,4 +64,14 @@ public static class ErrorKinds
     /// a symlink / reparse point, or pointing outside an expected containment directory.
     /// </summary>
     public const string PathRejected = "path_rejected";
+
+    /// <summary>
+    /// Building a per-module index (cross-reference graph, string-literal index) for the
+    /// requested module would exceed the server's per-module budget. Surfaced when the
+    /// candidate module has so many methods, references, or string literals that scanning
+    /// it would risk OOM. The partial index is discarded; nothing is persisted to the
+    /// xref / string cache. Recovery: narrow the call's scope (pass <c>mvidOrPath</c>
+    /// pointing at a smaller assembly) or run the analysis offline against the on-disk PE.
+    /// </summary>
+    public const string ModuleTooLarge = "module_too_large";
 }
