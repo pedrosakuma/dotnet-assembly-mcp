@@ -219,7 +219,7 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
         {
             return new AssemblyError(
                 ErrorKinds.MvidMismatch,
-                $"assemblyPathHint '{hint}' has MVID {probe.Mvid:D} but the caller requested {moduleVersionId:D}.");
+                $"assemblyPathHint {ErrorRedactor.RedactPath(hint)} has MVID {probe.Mvid:D} but the caller requested {moduleVersionId:D}.");
         }
         var load = _store.Load(hint);
         return load.IsSuccess ? null : load.Error;

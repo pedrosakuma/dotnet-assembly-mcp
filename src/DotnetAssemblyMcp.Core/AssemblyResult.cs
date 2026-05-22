@@ -108,6 +108,12 @@ public static class AssemblyErrorRecovery
             ErrorKinds.GenericInstantiationMismatch => new NextActionHint(
                 "get_method",
                 "methodSpec and genericTypeArguments decode to different instantiations. Re-issue the call with only one of them, or fix the producer to keep them consistent."),
+            ErrorKinds.PathMustBeAbsolute => new NextActionHint(
+                "load_assembly",
+                "Re-issue the call with an absolute path; relative paths are rejected because they resolve against the server's working directory."),
+            ErrorKinds.PathRejected => new NextActionHint(
+                "list_assemblies",
+                "The supplied path was rejected by the file-IO guard (size cap, symlink, or out-of-tree sibling lookup). Inspect already-loaded modules and use their MVID directly."),
             _ => new NextActionHint(
                 "list_assemblies",
                 "Inspect loaded modules and retry the call."),
