@@ -89,7 +89,18 @@ public sealed partial class MetadataIndex
             : null;
 
         var fromCache = true;
-        var xref = _xrefIndex.LoadOrBuildXref(module, ref fromCache, cancellationToken);
+        XrefData xref;
+        try
+        {
+            xref = _xrefIndex.LoadOrBuildXref(module, ref fromCache, cancellationToken);
+        }
+        catch (ModuleTooLargeException ex)
+        {
+            return FindTypeReferencesReadResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleTooLarge,
+                "xref index for the target's module would exceed the per-module budget.",
+                ex.Message));
+        }
 
         var references = new List<TypeReferenceRef>();
 
@@ -110,7 +121,15 @@ public sealed partial class MetadataIndex
                 if (other.Mvid == module.Mvid) continue;
                 modulesSearched++;
 
-                var otherXref = _xrefIndex.LoadOrBuildXref(other, cancellationToken);
+                XrefData otherXref;
+                try
+                {
+                    otherXref = _xrefIndex.LoadOrBuildXref(other, cancellationToken);
+                }
+                catch (ModuleTooLargeException)
+                {
+                    continue;
+                }
                 foreach (var entry in otherXref.TypeOutbound)
                 {
                     if (!string.Equals(entry.TargetAssemblyName, targetAssemblyName, StringComparison.Ordinal)) continue;

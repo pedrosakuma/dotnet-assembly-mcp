@@ -183,7 +183,18 @@ public sealed partial class MetadataIndex
 
         // Same-module callers.
         var fromCache = true;
-        var xref = _xrefIndex.LoadOrBuildXref(module, ref fromCache, cancellationToken);
+        XrefData xref;
+        try
+        {
+            xref = _xrefIndex.LoadOrBuildXref(module, ref fromCache, cancellationToken);
+        }
+        catch (ModuleTooLargeException ex)
+        {
+            return FindCallersReadResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleTooLarge,
+                "xref index for the callee's module would exceed the per-module budget.",
+                ex.Message));
+        }
 
         var callers = new List<CallerRef>();
         if (xref.Intra.TryGetValue(callee.MetadataToken, out var localCallers))
@@ -206,7 +217,18 @@ public sealed partial class MetadataIndex
             if (other.Mvid == module.Mvid) continue;
             modulesSearched++;
 
-            var otherXref = _xrefIndex.LoadOrBuildXref(other, cancellationToken);
+            XrefData otherXref;
+            try
+            {
+                otherXref = _xrefIndex.LoadOrBuildXref(other, cancellationToken);
+            }
+            catch (ModuleTooLargeException)
+            {
+                // Skip a single cross-module probe when its xref would blow the budget;
+                // surfacing it as a hard failure would let one oversized loaded assembly
+                // poison every find_callers call.
+                continue;
+            }
             foreach (var outbound in otherXref.Outbound)
             {
                 if (!outbound.Matches(calleeKey)) continue;

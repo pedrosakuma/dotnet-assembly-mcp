@@ -94,7 +94,19 @@ internal sealed class StringIndex : IModuleScopedCache
             cancellationToken.ThrowIfCancellationRequested();
             modulesSearched++;
 
-            var index = GetOrBuild(module, cancellationToken, out var wasCached);
+            StringIndexData index;
+            bool wasCached;
+            try
+            {
+                index = GetOrBuild(module, cancellationToken, out wasCached);
+            }
+            catch (ModuleTooLargeException ex)
+            {
+                return FindStringReferencesReadResult.Fail(new AssemblyError(
+                    ErrorKinds.ModuleTooLarge,
+                    "string-literal index for the target module would exceed the per-module budget.",
+                    ex.Message));
+            }
             if (!wasCached) fromCache = false;
 
             switch (matchMode)
@@ -176,13 +188,29 @@ internal sealed class StringIndex : IModuleScopedCache
         return true;
     }
 
+    /// <summary>
+    /// Maximum number of MethodDef rows scanned before <see cref="BuildStringIndex"/>
+    /// aborts. Matches <c>XrefIndex.MaxMethodsScanned</c>.
+    /// </summary>
+    internal const int MaxMethodsScanned = 200_000;
+
+    /// <summary>
+    /// Maximum number of (literal, callsite) records retained before
+    /// <see cref="BuildStringIndex"/> aborts. 1M ≈ ~80 MiB of dictionary overhead.
+    /// </summary>
+    internal const long MaxRecordsRetained = 1_000_000;
+
     private static StringIndexData BuildStringIndex(ModuleHandle module, CancellationToken cancellationToken)
     {
         var dict = new Dictionary<string, List<(int MethodToken, int IlOffset)>>(StringComparer.Ordinal);
+        long totalRecords = 0;
+        int methodIndex = 0;
 
         foreach (var methodHandle in module.MD.MethodDefinitions)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (++methodIndex > MaxMethodsScanned)
+                throw new Errors.ModuleTooLargeException(nameof(MaxMethodsScanned), MaxMethodsScanned);
             var def = module.MD.GetMethodDefinition(methodHandle);
             if (def.RelativeVirtualAddress == 0) continue;
 
@@ -234,6 +262,8 @@ internal sealed class StringIndex : IModuleScopedCache
                             dict[literal] = list;
                         }
                         list.Add((methodToken, opStart));
+                        if (++totalRecords > MaxRecordsRetained)
+                            throw new Errors.ModuleTooLargeException(nameof(MaxRecordsRetained), MaxRecordsRetained);
                     }
                 }
 

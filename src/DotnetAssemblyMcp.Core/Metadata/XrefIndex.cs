@@ -72,6 +72,21 @@ internal sealed class XrefIndex : IModuleScopedCache
 
     private string XrefCachePath(Guid mvid) => Path.Combine(_xrefCacheDir, $"{mvid:N}.xref");
 
+    /// <summary>
+    /// Maximum number of MethodDef rows scanned before <see cref="BuildXref"/> aborts.
+    /// Roughly 10× the largest .NET BCL assembly. Above this point the index is no
+    /// longer "an index" — it's a denial-of-service vector against the host's memory.
+    /// </summary>
+    internal const int MaxMethodsScanned = 200_000;
+
+    /// <summary>
+    /// Maximum number of references (intra + outbound, calls + type-refs) retained
+    /// across all four buckets of <see cref="XrefData"/> before <see cref="BuildXref"/>
+    /// aborts. 5M ≈ ~250 MiB of pointer-rich Dictionary/List overhead — beyond this we
+    /// fail closed rather than chase an OOM.
+    /// </summary>
+    internal const long MaxRefsRetained = 5_000_000;
+
     private static XrefData BuildXref(ModuleHandle module, CancellationToken cancellationToken = default)
     {
         var data = new XrefData(
@@ -87,7 +102,13 @@ internal sealed class XrefIndex : IModuleScopedCache
         var i = 0;
         foreach (var methodHandle in module.MD.MethodDefinitions)
         {
-            if ((++i & 0xFF) == 0) cancellationToken.ThrowIfCancellationRequested();
+            if ((++i & 0xFF) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                EnforceRefBudget(data);
+            }
+            if (i > MaxMethodsScanned)
+                throw new Errors.ModuleTooLargeException(nameof(MaxMethodsScanned), MaxMethodsScanned);
             var def = module.MD.GetMethodDefinition(methodHandle);
 
             var callerToken = MetadataTokens.GetToken(methodHandle);
@@ -136,8 +157,10 @@ internal sealed class XrefIndex : IModuleScopedCache
             ScanTypesFromIl(module, ilBytes, callerToken, data, typeIntraSeen, typeOutboundSeen);
         }
 
+        var nonMethodCount = 0;
         foreach (var fh in module.MD.FieldDefinitions)
         {
+            if ((++nonMethodCount & 0xFF) == 0) EnforceRefBudget(data);
             try
             {
                 var fd = module.MD.GetFieldDefinition(fh);
@@ -151,6 +174,7 @@ internal sealed class XrefIndex : IModuleScopedCache
         }
         foreach (var ph in module.MD.PropertyDefinitions)
         {
+            if ((++nonMethodCount & 0xFF) == 0) EnforceRefBudget(data);
             try
             {
                 var pd = module.MD.GetPropertyDefinition(ph);
@@ -164,6 +188,7 @@ internal sealed class XrefIndex : IModuleScopedCache
         }
         foreach (var eh in module.MD.EventDefinitions)
         {
+            if ((++nonMethodCount & 0xFF) == 0) EnforceRefBudget(data);
             try
             {
                 var ed = module.MD.GetEventDefinition(eh);
@@ -176,6 +201,7 @@ internal sealed class XrefIndex : IModuleScopedCache
 
         foreach (var tdh in module.MD.TypeDefinitions)
         {
+            if ((++nonMethodCount & 0xFF) == 0) EnforceRefBudget(data);
             try
             {
                 var td = module.MD.GetTypeDefinition(tdh);
@@ -198,7 +224,17 @@ internal sealed class XrefIndex : IModuleScopedCache
             catch (BadImageFormatException) { /* skip */ }
         }
 
+        EnforceRefBudget(data);
         return data;
+    }
+
+    private static void EnforceRefBudget(XrefData data)
+    {
+        long total = data.Outbound.Count + data.TypeOutbound.Count;
+        foreach (var kv in data.Intra) total += kv.Value.Count;
+        foreach (var kv in data.TypeIntra) total += kv.Value.Count;
+        if (total > MaxRefsRetained)
+            throw new Errors.ModuleTooLargeException(nameof(MaxRefsRetained), MaxRefsRetained);
     }
 
     private static void EmitCollectedTypes(ModuleHandle module, TypeTokenCollectorProvider collector,

@@ -1,11 +1,13 @@
 using System.Collections.Concurrent;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using System.Text;
 using DotnetAssemblyMcp.Core.Errors;
 using DotnetAssemblyMcp.Core.Identity;
 using DotnetAssemblyMcp.Core.Metadata;
 using ICSharpCode.Decompiler;
 using ICSharpCode.Decompiler.CSharp;
+using ICSharpCode.Decompiler.CSharp.OutputVisitor;
 using ICSharpCode.Decompiler.Metadata;
 
 namespace DotnetAssemblyMcp.Core.Decompilation;
@@ -38,6 +40,26 @@ public sealed class Decompiler : IDecompiler, IDisposable
     /// <summary>Default upper bound on a single whole-type response. Four times <see cref="DefaultMaxChars"/>
     /// because a type body naturally aggregates N method bodies plus declarations.</summary>
     public const int DefaultTypeMaxChars = 64 * 1024;
+
+    /// <summary>
+    /// Server-side absolute ceiling on a single method response. Callers may pass any
+    /// <c>maxChars</c> they like — we clamp to this. Defends against a hostile assembly +
+    /// caller pair that uses <c>maxChars=int.MaxValue</c> to drive arbitrary allocations.
+    /// 1 MiB is &gt;&gt; the largest real method body we have ever produced.
+    /// </summary>
+    public const int HardMaxChars = 1 * 1024 * 1024;
+
+    /// <summary>Same ceiling for whole-type decompiles. 4 MiB matches the 4× ratio
+    /// between <see cref="DefaultMaxChars"/> and <see cref="DefaultTypeMaxChars"/>.</summary>
+    public const int HardMaxTypeChars = 4 * 1024 * 1024;
+
+    /// <summary>
+    /// Wall-time cap on a single decompile call. Combined with the caller-supplied
+    /// <see cref="CancellationToken"/> via <see cref="CancellationTokenSource.CreateLinkedTokenSource(CancellationToken[])"/>.
+    /// Defeats pathological-assembly CPU exhaustion regardless of how cheap the input PE looks
+    /// at metadata level.
+    /// </summary>
+    public static readonly TimeSpan DefaultDecompileTimeout = TimeSpan.FromSeconds(30);
 
     /// <summary>Per-entry wall-time TTL.</summary>
     public static readonly TimeSpan EntryTtl = TimeSpan.FromMinutes(10);
@@ -79,6 +101,7 @@ public sealed class Decompiler : IDecompiler, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
 
         var cap = maxChars > 0 ? maxChars : DefaultMaxChars;
+        if (cap > HardMaxChars) cap = HardMaxChars;
         var key = new CacheKey(identity.ModuleVersionId, identity.MetadataToken, cap);
 
         if (TryGetCached(key, out var cached))
@@ -108,16 +131,18 @@ public sealed class Decompiler : IDecompiler, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
 
         string source;
+        bool truncated;
         try
         {
             var handle = MetadataTokens.EntityHandle(identity.MetadataToken);
-            // CSharpDecompiler instances are not thread-safe (per ICSharpCode.Decompiler XML
-            // docs — transform instances carry mutable state). Serialize all calls into the
-            // cached engine on the engineToken itself.
-            lock (engineToken)
-            {
-                source = engineResult.Engine!.DecompileAsString(handle);
-            }
+            (source, truncated) = RunDecompile(
+                engineResult.Engine!, engineToken, handle, cap, cancellationToken);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return DecompileResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleLoadFailed,
+                $"decompilation timed out after {DefaultDecompileTimeout.TotalSeconds:N0}s."));
         }
         catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or NotSupportedException)
         {
@@ -136,11 +161,10 @@ public sealed class Decompiler : IDecompiler, IDisposable
                 ex.Message));
         }
 
-        var truncated = false;
-        if (source.Length > cap)
+        var truncatedNote = "\n// ... [truncated by server: exceeded maxChars]\n";
+        if (truncated)
         {
-            source = string.Concat(source.AsSpan(0, cap), "\n// ... [truncated by server: exceeded maxChars]\n");
-            truncated = true;
+            source = string.Concat(source, truncatedNote);
         }
 
         var summary = resolved.Method!;
@@ -168,6 +192,7 @@ public sealed class Decompiler : IDecompiler, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
 
         var cap = maxChars > 0 ? maxChars : DefaultTypeMaxChars;
+        if (cap > HardMaxTypeChars) cap = HardMaxTypeChars;
         var key = new CacheKey(moduleVersionId, typeMetadataToken, cap);
 
         if (TryGetCachedType(key, out var cached))
@@ -215,16 +240,17 @@ public sealed class Decompiler : IDecompiler, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
 
         string source;
+        bool truncated;
         try
         {
-            // DecompileTypesAsString takes an enumerable; passing the single handle gives us the
-            // same output as DecompileTypeAsString(FullTypeName) without computing the reflection
-            // name string ourselves (and avoids ambiguity for generic / nested types).
-            // CSharpDecompiler instances are not thread-safe — serialize on engineToken.
-            lock (engineToken)
-            {
-                source = engineResult.Engine!.DecompileTypesAsString(new[] { typeHandle });
-            }
+            (source, truncated) = RunDecompileTypes(
+                engineResult.Engine!, engineToken, new[] { typeHandle }, cap, cancellationToken);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return DecompileTypeResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleLoadFailed,
+                $"decompilation timed out after {DefaultDecompileTimeout.TotalSeconds:N0}s."));
         }
         catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException or NotSupportedException)
         {
@@ -242,11 +268,9 @@ public sealed class Decompiler : IDecompiler, IDisposable
                 ex.Message));
         }
 
-        var truncated = false;
-        if (source.Length > cap)
+        if (truncated)
         {
-            source = string.Concat(source.AsSpan(0, cap), "\n// ... [truncated by server: exceeded maxChars]\n");
-            truncated = true;
+            source = string.Concat(source, "\n// ... [truncated by server: exceeded maxChars]\n");
         }
 
         var entry = new DecompiledType(
@@ -436,6 +460,110 @@ public sealed class Decompiler : IDecompiler, IDisposable
         _typeResidentBytes -= node.Value.Bytes;
         if (_typeResidentBytes < 0) _typeResidentBytes = 0;
     }
+
+    private static (string Source, bool Truncated) RunDecompile(
+        CSharpDecompiler engine, CachedDecompiler engineToken, EntityHandle handle,
+        int cap, CancellationToken cancellationToken)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(DefaultDecompileTimeout);
+        ICSharpCode.Decompiler.CSharp.Syntax.SyntaxTree tree;
+        lock (engineToken)
+        {
+            // Snapshot inside the lock — concurrent same-MVID requests serialize on engineToken
+            // and must not observe each other's transient CT assignments. Reading savedCt
+            // outside the lock would let request B persist request A's (potentially canceled)
+            // linked token back onto the engine after A finishes.
+            var savedCt = engine.CancellationToken;
+            engine.CancellationToken = cts.Token;
+            try { tree = engine.Decompile(handle); }
+            finally { engine.CancellationToken = savedCt; }
+        }
+        return SerializeWithCap(tree, cap);
+    }
+
+    private static (string Source, bool Truncated) RunDecompileTypes(
+        CSharpDecompiler engine, CachedDecompiler engineToken,
+        IEnumerable<TypeDefinitionHandle> handles, int cap, CancellationToken cancellationToken)
+    {
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(DefaultDecompileTimeout);
+        ICSharpCode.Decompiler.CSharp.Syntax.SyntaxTree tree;
+        lock (engineToken)
+        {
+            var savedCt = engine.CancellationToken;
+            engine.CancellationToken = cts.Token;
+            try { tree = engine.DecompileTypes(handles); }
+            finally { engine.CancellationToken = savedCt; }
+        }
+        return SerializeWithCap(tree, cap);
+    }
+
+    private static (string Source, bool Truncated) SerializeWithCap(
+        ICSharpCode.Decompiler.CSharp.Syntax.SyntaxTree tree, int cap)
+    {
+        using var writer = new LimitingStringWriter(cap);
+        var truncated = false;
+        try
+        {
+            // GetOrCreateEngine constructs CSharpDecompiler with only ThrowOnAssemblyResolveErrors /
+            // ShowXmlDocumentation set; CSharpFormattingOptions are defaulted. Re-create a settings
+            // instance here for the visitor — identical formatting, no need to expose the engine's
+            // private Settings field.
+            var settings = new DecompilerSettings();
+            tree.AcceptVisitor(new CSharpOutputVisitor(writer, settings.CSharpFormattingOptions));
+        }
+        catch (LimitExceededException)
+        {
+            truncated = true;
+        }
+        return (writer.ToString(), truncated);
+    }
+
+    /// <summary>
+    /// <see cref="StringWriter"/> that throws <see cref="LimitExceededException"/> when the
+    /// total characters written exceed <c>limit</c>. Truncates the in-flight call at the
+    /// last legal char so the partial output is still well-formed UTF-16.
+    /// </summary>
+    private sealed class LimitingStringWriter : StringWriter
+    {
+        private readonly int _limit;
+        public LimitingStringWriter(int limit) { _limit = limit; }
+
+        public override void Write(char value)
+        {
+            CheckBudget(1);
+            base.Write(value);
+        }
+
+        public override void Write(string? value)
+        {
+            if (value is null) return;
+            CheckBudget(value.Length);
+            base.Write(value);
+        }
+
+        public override void Write(char[] buffer, int index, int count)
+        {
+            CheckBudget(count);
+            base.Write(buffer, index, count);
+        }
+
+        public override void Write(ReadOnlySpan<char> buffer)
+        {
+            CheckBudget(buffer.Length);
+            base.Write(buffer);
+        }
+
+        private void CheckBudget(int incoming)
+        {
+            // GetStringBuilder().Length is the authoritative length already emitted.
+            if ((long)GetStringBuilder().Length + incoming > _limit)
+                throw new LimitExceededException();
+        }
+    }
+
+    private sealed class LimitExceededException : Exception { }
 
     private string? TryGetLoadedModulePath(Guid mvid) =>
         _index.List().FirstOrDefault(m => m.ModuleVersionId == mvid)?.ModulePath;

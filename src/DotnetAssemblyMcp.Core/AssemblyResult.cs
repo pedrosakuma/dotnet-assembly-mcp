@@ -114,6 +114,9 @@ public static class AssemblyErrorRecovery
             ErrorKinds.PathRejected => new NextActionHint(
                 "list_assemblies",
                 "The supplied path was rejected by the file-IO guard (size cap, symlink, or out-of-tree sibling lookup). Inspect already-loaded modules and use their MVID directly."),
+            ErrorKinds.ModuleTooLarge => new NextActionHint(
+                "list_assemblies",
+                "The target module would exceed the per-module index budget. Narrow the call's scope by passing mvidOrPath to a smaller assembly, or run the analysis offline on the on-disk PE."),
             _ => new NextActionHint(
                 "list_assemblies",
                 "Inspect loaded modules and retry the call."),
