@@ -187,6 +187,33 @@ public static class SafeFileOpener
         public static ReadResult Fail(AssemblyError error) => new(false, null, error);
     }
 
+    /// <summary>
+    /// Reads <paramref name="path"/> through the same TOCTOU-safe pipeline as
+    /// <see cref="ReadAllBytes(string,long,string?)"/> but returns the result as a
+    /// non-writable <see cref="MemoryStream"/> ready to hand off to libraries (e.g.
+    /// ICSharpCode.Decompiler's <c>PEFile</c>) that insist on a <see cref="Stream"/> input.
+    /// </summary>
+    /// <remarks>
+    /// Returning a <see cref="MemoryStream"/> instead of the live <see cref="FileStream"/>
+    /// is intentional: it severs the consumer from the on-disk handle so the open file
+    /// descriptor is released the moment <see cref="ReadAllBytes"/> returns, matching the
+    /// memory profile of <c>ModuleStore</c>. Callers retain the bytes only for as
+    /// long as they hold the returned stream.
+    /// </remarks>
+    public static StreamResult OpenReadAsStream(string path, long maxBytes, string? expectedParentDirectory = null)
+    {
+        var read = ReadAllBytes(path, maxBytes, expectedParentDirectory);
+        if (!read.IsSuccess) return StreamResult.Fail(read.Error!);
+        return StreamResult.Ok(new MemoryStream(read.Bytes!, writable: false));
+    }
+
+    /// <summary>Result envelope for <see cref="OpenReadAsStream(string,long,string?)"/>.</summary>
+    public readonly record struct StreamResult(bool IsSuccess, MemoryStream? Stream, AssemblyError? Error)
+    {
+        public static StreamResult Ok(MemoryStream stream) => new(true, stream, null);
+        public static StreamResult Fail(AssemblyError error) => new(false, null, error);
+    }
+
     // ---- TOCTOU-safe open ---------------------------------------------------
     //
     // Opens the file using kernel-level no-follow semantics so a symlink that races into
