@@ -50,11 +50,11 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
       - run: dotnet restore
@@ -66,11 +66,11 @@ jobs:
     needs: [version, build-test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
       - name: Pack
@@ -80,7 +80,7 @@ jobs:
             -o artifacts \
             /p:MinVerVersionOverride=${{ needs.version.outputs.version }}
       - name: Attest nupkg provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: 'artifacts/*.nupkg'
       - name: Push to NuGet.org
@@ -90,7 +90,7 @@ jobs:
             --api-key "${{ secrets.NUGET_API_KEY }}" \
             --skip-duplicate
       - name: Upload nupkg artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nupkg
           path: artifacts/*.nupkg
@@ -109,11 +109,11 @@ jobs:
           - { os: windows-latest, rid: win-arm64,   archive: zip  }
           - { os: macos-latest,   rid: osx-arm64,   archive: tar  }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
 
@@ -153,7 +153,7 @@ jobs:
           "$hash  $base.zip" | Out-File -Encoding ascii "dist/$base.zip.sha256"
 
       - name: Attest binary archive provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           # Attests the archive itself; the sha256 sidecar is just a convenience and
           # consumers verify the archive directly via `gh attestation verify`.
@@ -162,7 +162,7 @@ jobs:
             dist/*.zip
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: binary-${{ matrix.rid }}
           path: dist/*
@@ -172,19 +172,19 @@ jobs:
     needs: [version, build-test]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
           fetch-depth: 0
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -192,7 +192,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -201,7 +201,7 @@ jobs:
 
       - name: Build & push (by digest, no tags)
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: deploy/Dockerfile
@@ -218,7 +218,7 @@ jobs:
           sbom: true
 
       - name: Attest container image provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -246,14 +246,14 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: nupkg
           path: artifacts
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: binary-*
           merge-multiple: true
@@ -267,7 +267,7 @@ jobs:
             echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
