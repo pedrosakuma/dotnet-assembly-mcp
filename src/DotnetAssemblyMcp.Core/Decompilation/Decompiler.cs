@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
 using System.Text;
 using DotnetAssemblyMcp.Core.Errors;
 using DotnetAssemblyMcp.Core.Identity;
@@ -306,13 +307,33 @@ public sealed class Decompiler : IDecompiler, IDisposable
         {
             // PEFile owns the stream and disposes it on dispose; CSharpDecompiler owns the
             // PEFile via its IDecompilerTypeSystem and disposes it when the engine is dropped.
-            var pef = new PEFile(modulePath, streamResult.Stream!);
-            var resolver = new UniversalAssemblyResolver(modulePath, throwOnError: false, targetFramework: null);
-            var csd = new CSharpDecompiler(pef, resolver, new DecompilerSettings
+            // Mirror CSharpDecompiler(string, settings) -> CreateTypeSystemFromFile internals:
+            // detect TFM + runtime pack from the loaded PE and prefetch metadata of resolved
+            // assemblies (otherwise FileStreams stay open until GC because resolver-opened
+            // PEFiles are not deterministically disposed by CSharpDecompiler).
+            var settings = new DecompilerSettings
             {
                 ThrowOnAssemblyResolveErrors = false,
                 ShowXmlDocumentation = false,
-            });
+                LoadInMemory = true,
+            };
+            var pef = new PEFile(
+                modulePath,
+                streamResult.Stream!,
+                PEStreamOptions.PrefetchEntireImage,
+                metadataOptions: settings.ApplyWindowsRuntimeProjections
+                    ? MetadataReaderOptions.ApplyWindowsRuntimeProjections
+                    : MetadataReaderOptions.None);
+            var resolver = new UniversalAssemblyResolver(
+                modulePath,
+                throwOnError: false,
+                targetFramework: pef.DetectTargetFrameworkId(),
+                runtimePack: pef.DetectRuntimePack(),
+                streamOptions: PEStreamOptions.PrefetchMetadata,
+                metadataOptions: settings.ApplyWindowsRuntimeProjections
+                    ? MetadataReaderOptions.ApplyWindowsRuntimeProjections
+                    : MetadataReaderOptions.None);
+            var csd = new CSharpDecompiler(pef, resolver, settings);
             var token = new CachedDecompiler(modulePath, csd);
             _engines[mvid] = token;
             return new EngineResult(csd, token, null);
