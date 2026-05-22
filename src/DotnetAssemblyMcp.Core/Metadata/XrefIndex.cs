@@ -592,6 +592,30 @@ internal sealed class XrefIndex : IModuleScopedCache
         data = null!;
         if (!File.Exists(path)) return false;
 
+        // Reject any group/other permission bit on Unix. The cache may include xref data
+        // derived from the assembly's metadata — owner-only is the only hygienic state.
+        // Files inherited from a previous version (or from a pre-0.19.0 install under a
+        // 0022 umask) may be 0644 — read-only to others but still leaked. Force-rebuild.
+        if (!OperatingSystem.IsWindows())
+        {
+            try
+            {
+                var mode = File.GetUnixFileMode(path);
+                const UnixFileMode foreignAny =
+                    UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+                    UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+                if ((mode & foreignAny) != 0)
+                {
+                    try { File.Delete(path); } catch (IOException) { /* swallow */ }
+                    catch (UnauthorizedAccessException) { /* swallow */ }
+                    return false;
+                }
+            }
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (PlatformNotSupportedException) { /* old runtime — fall through */ }
+        }
+
         FileInfo info;
         try { info = new FileInfo(module.Path); }
         catch (IOException) { return false; }
@@ -682,14 +706,30 @@ internal sealed class XrefIndex : IModuleScopedCache
     {
         try
         {
-            Directory.CreateDirectory(_xrefCacheDir);
+            EnsureCacheDirectoryHardened();
             FileInfo info;
             try { info = new FileInfo(module.Path); }
             catch (IOException) { return; }
             if (!info.Exists) return;
 
             var tmp = path + ".tmp";
-            using (var fs = File.Create(tmp))
+
+            // Owner-only perms on Unix (0600). On Windows the cache dir is the user profile,
+            // which already inherits a user-only ACL by default; FileStreamOptions.UnixCreateMode
+            // is a no-op there.
+            var streamOptions = new FileStreamOptions
+            {
+                Mode = FileMode.Create,
+                Access = FileAccess.Write,
+                Share = FileShare.None,
+                Options = FileOptions.SequentialScan,
+            };
+            if (!OperatingSystem.IsWindows())
+            {
+                streamOptions.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            }
+
+            using (var fs = new FileStream(tmp, streamOptions))
             using (var bw = new BinaryWriter(fs))
             {
                 bw.Write(XrefMagic);
@@ -742,5 +782,30 @@ internal sealed class XrefIndex : IModuleScopedCache
         }
         catch (IOException) { /* best-effort */ }
         catch (UnauthorizedAccessException) { /* best-effort */ }
+    }
+
+    /// <summary>
+    /// Creates the xref cache directory if missing and tightens its mode to 0700 on Unix.
+    /// Defends against a multi-user host where the directory might pre-exist with permissive
+    /// umask, letting another local user read or poison cache files. No-op on Windows
+    /// (the user profile already inherits a user-only ACL).
+    /// </summary>
+    private void EnsureCacheDirectoryHardened()
+    {
+        Directory.CreateDirectory(_xrefCacheDir);
+        if (OperatingSystem.IsWindows()) return;
+        try
+        {
+            const UnixFileMode ownerOnly =
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            var current = File.GetUnixFileMode(_xrefCacheDir);
+            if (current != ownerOnly)
+            {
+                File.SetUnixFileMode(_xrefCacheDir, ownerOnly);
+            }
+        }
+        catch (IOException) { /* best-effort — keep going even if chmod fails */ }
+        catch (UnauthorizedAccessException) { /* best-effort */ }
+        catch (PlatformNotSupportedException) { /* best-effort */ }
     }
 }

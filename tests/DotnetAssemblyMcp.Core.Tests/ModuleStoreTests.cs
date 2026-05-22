@@ -36,6 +36,24 @@ public sealed class ModuleStoreTests : IDisposable
     }
 
     [Fact]
+    public void Load_rejects_relative_path_with_path_must_be_absolute()
+    {
+        using var store = new ModuleStore(watchForChanges: false);
+        var result = store.Load("relative/foo.dll");
+        result.IsSuccess.Should().BeFalse();
+        result.Error!.Kind.Should().Be(ErrorKinds.PathMustBeAbsolute);
+    }
+
+    [Fact]
+    public void Probe_rejects_relative_path_with_path_must_be_absolute()
+    {
+        using var store = new ModuleStore(watchForChanges: false);
+        var result = store.Probe("./foo.dll");
+        result.IsSuccess.Should().BeFalse();
+        result.Error!.Kind.Should().Be(ErrorKinds.PathMustBeAbsolute);
+    }
+
+    [Fact]
     public void Load_returns_module_load_failed_for_missing_file()
     {
         using var store = new ModuleStore(watchForChanges: false);

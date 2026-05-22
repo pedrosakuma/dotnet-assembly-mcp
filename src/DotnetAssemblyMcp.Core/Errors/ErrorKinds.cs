@@ -51,4 +51,17 @@ public static class ErrorKinds
 
     /// <summary>A pattern argument (regex / substring) would match more results than the server is willing to return in a single call.</summary>
     public const string PatternTooBroad = "pattern_too_broad";
+
+    /// <summary>
+    /// A path supplied to a tool is not absolute (per <see cref="System.IO.Path.IsPathFullyQualified(string)"/>).
+    /// Relative paths are rejected because they would resolve against the server's working
+    /// directory, which is unrelated to the operator's intent in HTTP / container deployments.
+    /// </summary>
+    public const string PathMustBeAbsolute = "path_must_be_absolute";
+
+    /// <summary>
+    /// A path was rejected by the security-hardening layer before any read: too large,
+    /// a symlink / reparse point, or pointing outside an expected containment directory.
+    /// </summary>
+    public const string PathRejected = "path_rejected";
 }

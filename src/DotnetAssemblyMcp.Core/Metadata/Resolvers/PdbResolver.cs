@@ -5,6 +5,7 @@ using System.Reflection.PortableExecutable;
 using DotnetAssemblyMcp.Core.Errors;
 using DotnetAssemblyMcp.Core.Handles;
 using DotnetAssemblyMcp.Core.Identity;
+using DotnetAssemblyMcp.Core.IO;
 
 namespace DotnetAssemblyMcp.Core.Metadata.Resolvers;
 
@@ -180,11 +181,15 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
 
         // 2) Sibling .pdb next to the assembly.
         var sibling = Path.ChangeExtension(module.Path, ".pdb");
+        var expectedDir = Path.GetDirectoryName(module.Path);
         if (!File.Exists(sibling)) return null;
 
         try
         {
-            var bytes = File.ReadAllBytes(sibling);
+            var readResult = SafeFileOpener.ReadAllBytes(sibling,
+                SafeFileOpener.DefaultMaxPdbBytes, expectedParentDirectory: expectedDir);
+            if (!readResult.IsSuccess) return null;
+            var bytes = readResult.Bytes!;
             // Portable PDB blobs start with the ECMA-335 metadata signature "BSJB" (0x424A5342).
             if (bytes.Length >= 4 && BitConverter.ToUInt32(bytes, 0) == 0x424A5342)
             {

@@ -117,6 +117,13 @@ public sealed partial class AssemblyTools
                     ErrorKinds.InvalidArgument, "moduleVersionId and path are required."));
                 continue;
             }
+            if (!Path.IsPathFullyQualified(entry.Path))
+            {
+                skipped.Add(new ManifestImportSkipped(entry.ModuleVersionId, entry.Path,
+                    ErrorKinds.PathMustBeAbsolute,
+                    $"path must be absolute; received {ErrorRedactor.RedactPath(entry.Path)}."));
+                continue;
+            }
 
             if (alreadyLoaded.Contains(entry.ModuleVersionId))
             {

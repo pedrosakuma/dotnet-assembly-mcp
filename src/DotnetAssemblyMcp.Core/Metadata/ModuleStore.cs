@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
 using DotnetAssemblyMcp.Core.Errors;
+using DotnetAssemblyMcp.Core.IO;
 
 namespace DotnetAssemblyMcp.Core.Metadata;
 
@@ -60,8 +61,8 @@ internal sealed class ModuleStore : IDisposable
 
     public LoadResult Load(string path)
     {
-        if (string.IsNullOrWhiteSpace(path))
-            return LoadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "path is required."));
+        var absErr = PathPolicy.RequireAbsolute(path);
+        if (absErr is not null) return LoadResult.Fail(absErr);
         if (!File.Exists(path))
             return LoadResult.Fail(new AssemblyError(
                 ErrorKinds.ModuleLoadFailed, $"file not found: {ErrorRedactor.RedactPath(path)}"));
@@ -142,10 +143,11 @@ internal sealed class ModuleStore : IDisposable
     public ProbeResult Probe(string path)
     {
 #pragma warning restore CA1822
-        if (string.IsNullOrWhiteSpace(path))
-            return ProbeResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "path is required."));
+        var absErr = PathPolicy.RequireAbsolute(path);
+        if (absErr is not null) return ProbeResult.Fail(absErr);
         if (!File.Exists(path))
-            return ProbeResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, $"file not found: {path}"));
+            return ProbeResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleLoadFailed, $"file not found: {ErrorRedactor.RedactPath(path)}"));
         var fullPath = Path.GetFullPath(path);
         var opened = OpenModule(fullPath);
         if (opened.Error is not null) return ProbeResult.Fail(opened.Error);
@@ -164,6 +166,7 @@ internal sealed class ModuleStore : IDisposable
     public void RegisterPathHint(Guid moduleVersionId, string path)
     {
         if (moduleVersionId == Guid.Empty || string.IsNullOrWhiteSpace(path)) return;
+        if (!Path.IsPathFullyQualified(path)) return; // silent reject — manifest entries surface via Probe
         _pathHints[moduleVersionId] = Path.GetFullPath(path);
     }
 
@@ -256,18 +259,21 @@ internal sealed class ModuleStore : IDisposable
     {
         try
         {
-            // Read the bytes once and back the PEReader with a MemoryStream so the file on disk
-            // stays unlocked. Required for the Tier-1 watcher to be able to observe rewrites on
-            // Windows, where File.Move(overwrite: true) needs the destination to be free of
-            // open writable handles. Per the spike, fixture-sized assemblies cost ~tens of KB
-            // resident — well within the Tier-1 budget.
-            var bytes = File.ReadAllBytes(fullPath);
-            var pe = new PEReader(new MemoryStream(bytes, writable: false));
+            // SafeFileOpener enforces size cap and reparse-point rejection before allocation.
+            // The PEReader is backed by a MemoryStream so the file on disk stays unlocked —
+            // required for the Tier-1 watcher to observe rewrites on Windows where
+            // File.Move(overwrite: true) needs the destination free of open writable handles.
+            var readResult = SafeFileOpener.ReadAllBytes(fullPath, SafeFileOpener.DefaultMaxAssemblyBytes);
+            if (!readResult.IsSuccess)
+            {
+                return new OpenedModule(null, null, null, readResult.Error);
+            }
+            var pe = new PEReader(new MemoryStream(readResult.Bytes!, writable: false));
             if (!pe.HasMetadata)
             {
                 pe.Dispose();
                 return new OpenedModule(null, null, null,
-                    new AssemblyError(ErrorKinds.ModuleLoadFailed, $"not a managed PE: {fullPath}"));
+                    new AssemblyError(ErrorKinds.ModuleLoadFailed, $"not a managed PE: {ErrorRedactor.RedactPath(fullPath)}"));
             }
             var md = pe.GetMetadataReader();
             var mvid = md.GetGuid(md.GetModuleDefinition().Mvid);
@@ -277,16 +283,6 @@ internal sealed class ModuleStore : IDisposable
         {
             return new OpenedModule(null, null, null,
                 new AssemblyError(ErrorKinds.ModuleLoadFailed, "invalid PE/CLI image.", ErrorRedactor.Redact(ex.Message)));
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            return new OpenedModule(null, null, null,
-                new AssemblyError(ErrorKinds.ModuleLoadFailed, "permission denied.", ErrorRedactor.Redact(ex.Message)));
-        }
-        catch (IOException ex)
-        {
-            return new OpenedModule(null, null, null,
-                new AssemblyError(ErrorKinds.ModuleLoadFailed, "i/o error opening assembly.", ErrorRedactor.Redact(ex.Message)));
         }
     }
 
