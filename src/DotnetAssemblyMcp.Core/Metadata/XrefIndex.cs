@@ -628,39 +628,48 @@ internal sealed class XrefIndex : IModuleScopedCache
         data = null!;
         if (!File.Exists(path)) return false;
 
-        // Reject any group/other permission bit on Unix. The cache may include xref data
-        // derived from the assembly's metadata — owner-only is the only hygienic state.
-        // Files inherited from a previous version (or from a pre-0.19.0 install under a
-        // 0022 umask) may be 0644 — read-only to others but still leaked. Force-rebuild.
-        if (!OperatingSystem.IsWindows())
-        {
-            try
-            {
-                var mode = File.GetUnixFileMode(path);
-                const UnixFileMode foreignAny =
-                    UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
-                    UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
-                if ((mode & foreignAny) != 0)
-                {
-                    try { File.Delete(path); } catch (IOException) { /* swallow */ }
-                    catch (UnauthorizedAccessException) { /* swallow */ }
-                    return false;
-                }
-            }
-            catch (IOException) { return false; }
-            catch (UnauthorizedAccessException) { return false; }
-            catch (PlatformNotSupportedException) { /* old runtime — fall through */ }
-        }
-
         FileInfo info;
         try { info = new FileInfo(module.Path); }
         catch (IOException) { return false; }
         if (!info.Exists) return false;
 
+        // SECURITY (#146): TOCTOU-safe permission check.
+        // Open the file ONCE with O_NOFOLLOW (defeats symlink swap on the leaf), then
+        // fstat the open handle via File.GetUnixFileMode(SafeFileHandle). A path-based
+        // GetUnixFileMode followed by a separate File.OpenRead would let an attacker swap
+        // the file between the two syscalls — even though our cache dir is 0700, this
+        // closes the window unconditionally and the read of the cache happens through the
+        // SAME descriptor we permission-checked.
+        var openRes = IO.SafeFileOpener.OpenReadNoFollow(path);
+        if (!openRes.IsSuccess) return false;
+        var fs = openRes.Stream!;
+        bool fsOwned = true;
         try
         {
-            using var fs = File.OpenRead(path);
+            if (!OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    var mode = File.GetUnixFileMode(fs.SafeFileHandle);
+                    const UnixFileMode foreignAny =
+                        UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+                        UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+                    if ((mode & foreignAny) != 0)
+                    {
+                        fs.Dispose();
+                        fsOwned = false;
+                        try { File.Delete(path); } catch (IOException) { /* swallow */ }
+                        catch (UnauthorizedAccessException) { /* swallow */ }
+                        return false;
+                    }
+                }
+                catch (IOException) { return false; }
+                catch (UnauthorizedAccessException) { return false; }
+                catch (PlatformNotSupportedException) { /* old runtime — fall through */ }
+            }
+
             using var br = new BinaryReader(fs);
+            fsOwned = false; // BinaryReader.Dispose closes fs
             if (br.ReadUInt32() != XrefMagic) return false;
             if (br.ReadInt32() != XrefFormatVersion) return false;
             var mvidBytes = br.ReadBytes(16);
@@ -736,6 +745,10 @@ internal sealed class XrefIndex : IModuleScopedCache
         catch (FormatException) { return false; }
         catch (ArgumentException) { return false; }
         catch (OutOfMemoryException) { return false; }
+        finally
+        {
+            if (fsOwned) fs.Dispose();
+        }
     }
 
     private void TryWriteXrefCache(string path, ModuleHandle module, XrefData data)

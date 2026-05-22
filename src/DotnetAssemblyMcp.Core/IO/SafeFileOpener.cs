@@ -214,6 +214,63 @@ public static class SafeFileOpener
         public static StreamResult Fail(AssemblyError error) => new(false, null, error);
     }
 
+    /// <summary>
+    /// Opens <paramref name="path"/> for reading with kernel-level no-follow semantics and
+    /// hands the open <see cref="FileStream"/> back to the caller. Use this when the caller
+    /// needs to keep the file descriptor open across additional fd-based syscalls
+    /// (e.g. <c>fstat</c>-based permission checks) — the absence of a path-based recheck is
+    /// what closes the TOCTOU window between <c>stat</c> and <c>open</c>.
+    /// </summary>
+    /// <remarks>
+    /// Caller owns the returned <see cref="FileStream"/> and must dispose it. No size cap is
+    /// enforced here — these helpers are designed for fixed-format cache files where the
+    /// caller decodes a header before deciding how much to read.
+    /// </remarks>
+    public static OpenResult OpenReadNoFollow(string path)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        try
+        {
+            return OpenResult.Ok(OpenNoFollow(path));
+        }
+        catch (PathRejectedException pre)
+        {
+            return OpenResult.Fail(new AssemblyError(
+                ErrorKinds.PathRejected,
+                $"refusing to read symlink / reparse point: {ErrorRedactor.RedactPath(path)}",
+                ErrorRedactor.Redact(pre.Message)));
+        }
+        catch (FileNotFoundException ex)
+        {
+            return OpenResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleLoadFailed, $"file not found: {ErrorRedactor.RedactPath(path)}",
+                ErrorRedactor.Redact(ex.Message)));
+        }
+        catch (DirectoryNotFoundException ex)
+        {
+            return OpenResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleLoadFailed, $"directory not found: {ErrorRedactor.RedactPath(path)}",
+                ErrorRedactor.Redact(ex.Message)));
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return OpenResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleLoadFailed, "permission denied.", ErrorRedactor.Redact(ex.Message)));
+        }
+        catch (IOException ex)
+        {
+            return OpenResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleLoadFailed, "i/o error opening file.", ErrorRedactor.Redact(ex.Message)));
+        }
+    }
+
+    /// <summary>Result envelope for <see cref="OpenReadNoFollow(string)"/>.</summary>
+    public readonly record struct OpenResult(bool IsSuccess, FileStream? Stream, AssemblyError? Error)
+    {
+        public static OpenResult Ok(FileStream stream) => new(true, stream, null);
+        public static OpenResult Fail(AssemblyError error) => new(false, null, error);
+    }
+
     // ---- TOCTOU-safe open ---------------------------------------------------
     //
     // Opens the file using kernel-level no-follow semantics so a symlink that races into
