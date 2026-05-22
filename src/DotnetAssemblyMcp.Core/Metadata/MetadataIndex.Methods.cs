@@ -211,6 +211,7 @@ public sealed partial class MetadataIndex
         // Cross-module: compute the callee's signature key once and probe every other loaded module.
         var calleeKey = XrefIndex.BuildCalleeKey(module, methodHandle);
         var modulesSearched = 1;
+        List<Guid>? skipped = null;
         foreach (var other in _store.Modules)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -224,9 +225,10 @@ public sealed partial class MetadataIndex
             }
             catch (ModuleTooLargeException)
             {
-                // Skip a single cross-module probe when its xref would blow the budget;
-                // surfacing it as a hard failure would let one oversized loaded assembly
-                // poison every find_callers call.
+                // SECURITY: surface which MVIDs were skipped so the caller can detect that
+                // results are partial — an oversized loaded assembly would otherwise silently
+                // hide cross-module callers.
+                (skipped ??= new List<Guid>()).Add(other.Mvid);
                 continue;
             }
             foreach (var outbound in otherXref.Outbound)
@@ -318,7 +320,8 @@ public sealed partial class MetadataIndex
         var calleeHandleStr = HandleSyntax.FormatMethod(module.Mvid, callee.MetadataToken);
         return FindCallersReadResult.Ok(new FindCallersResult(
             module.Mvid, callee.MetadataToken, calleeHandleStr,
-            callers, modulesSearched, FromCache: fromCache));
+            callers, modulesSearched, FromCache: fromCache,
+            SkippedOverBudgetModules: skipped));
     }
     /// <inheritdoc />
     public NativeBodyResult GetNativeBodyRef(Guid moduleVersionId, int methodMetadataToken)

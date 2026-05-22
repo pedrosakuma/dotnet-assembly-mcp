@@ -113,6 +113,7 @@ public sealed partial class MetadataIndex
 
         // Cross-module sites: probe every other loaded module's outbound type-refs.
         var modulesSearched = 1;
+        List<Guid>? skipped = null;
         if (targetAssemblyName is not null)
         {
             foreach (var other in _store.Modules)
@@ -128,6 +129,7 @@ public sealed partial class MetadataIndex
                 }
                 catch (ModuleTooLargeException)
                 {
+                    (skipped ??= new List<Guid>()).Add(other.Mvid);
                     continue;
                 }
                 foreach (var entry in otherXref.TypeOutbound)
@@ -143,7 +145,8 @@ public sealed partial class MetadataIndex
         var targetHandleStr = HandleSyntax.FormatType(module.Mvid, typeMetadataToken);
         return FindTypeReferencesReadResult.Ok(new FindTypeReferencesResult(
             module.Mvid, typeMetadataToken, targetHandleStr,
-            references, modulesSearched, FromCache: fromCache));
+            references, modulesSearched, FromCache: fromCache,
+            SkippedOverBudgetModules: skipped));
     }
     private static TypeReferenceRef RenderTypeReferenceSite(ModuleHandle module, TypeReferenceSite site)
     {

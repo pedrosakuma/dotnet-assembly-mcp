@@ -21,7 +21,8 @@ public sealed record FindCallersResult(
     string CalleeHandle,
     IReadOnlyList<CallerRef> Callers,
     int ModulesSearched,
-    bool FromCache);
+    bool FromCache,
+    IReadOnlyList<Guid>? SkippedOverBudgetModules = null);
 
 /// <summary>Result of <see cref="IMetadataIndex.FindCallers"/>.</summary>
 public readonly record struct FindCallersReadResult(FindCallersResult? Result, AssemblyError? Error)
@@ -116,7 +117,8 @@ public sealed record FindTypeReferencesResult(
     string TargetHandle,
     IReadOnlyList<TypeReferenceRef> References,
     int ModulesSearched,
-    bool FromCache);
+    bool FromCache,
+    IReadOnlyList<Guid>? SkippedOverBudgetModules = null);
 
 /// <summary>Result of <see cref="IMetadataIndex.FindTypeReferences"/>.</summary>
 public readonly record struct FindTypeReferencesReadResult(FindTypeReferencesResult? Result, AssemblyError? Error)

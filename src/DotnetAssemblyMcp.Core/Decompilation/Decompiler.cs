@@ -292,9 +292,23 @@ public sealed class Decompiler : IDecompiler, IDisposable
         if (_engines.TryGetValue(mvid, out var cached) && string.Equals(cached.Path, modulePath, StringComparison.Ordinal))
             return new EngineResult(cached.Engine, cached, null);
 
+        // SECURITY: Re-route the open through SafeFileOpener so a file that was safely loaded
+        // through ModuleStore but then swapped on disk for a symlink / oversized file before
+        // the first decompile cannot bypass the size cap or reparse-point check that
+        // ModuleStore enforced at load time. CSharpDecompiler's (string) constructor uses
+        // PEFile(string) which calls File.OpenRead under the hood — that path does NOT honor
+        // O_NOFOLLOW. We hand it a MemoryStream over already-validated bytes instead.
+        var streamResult = IO.SafeFileOpener.OpenReadAsStream(modulePath, IO.SafeFileOpener.DefaultMaxAssemblyBytes);
+        if (!streamResult.IsSuccess)
+            return new EngineResult(null, null, streamResult.Error);
+
         try
         {
-            var csd = new CSharpDecompiler(modulePath, new DecompilerSettings
+            // PEFile owns the stream and disposes it on dispose; CSharpDecompiler owns the
+            // PEFile via its IDecompilerTypeSystem and disposes it when the engine is dropped.
+            var pef = new PEFile(modulePath, streamResult.Stream!);
+            var resolver = new UniversalAssemblyResolver(modulePath, throwOnError: false, targetFramework: null);
+            var csd = new CSharpDecompiler(pef, resolver, new DecompilerSettings
             {
                 ThrowOnAssemblyResolveErrors = false,
                 ShowXmlDocumentation = false,
@@ -305,17 +319,19 @@ public sealed class Decompiler : IDecompiler, IDisposable
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or DirectoryNotFoundException)
         {
+            streamResult.Stream?.Dispose();
             return new EngineResult(null, null, new AssemblyError(
                 ErrorKinds.ModuleLoadFailed,
                 $"decompiler could not open module: {ex.GetType().Name}.",
-                ex.Message));
+                ErrorRedactor.Redact(ex.Message)));
         }
         catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException)
         {
+            streamResult.Stream?.Dispose();
             return new EngineResult(null, null, new AssemblyError(
                 ErrorKinds.ModuleLoadFailed,
                 $"decompiler could not open module: {ex.GetType().Name}.",
-                ex.Message));
+                ErrorRedactor.Redact(ex.Message)));
         }
     }
 

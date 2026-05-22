@@ -170,26 +170,36 @@ public sealed class IlDisassembler : IIlDisassembler, IDisposable
         if (_files.TryGetValue(mvid, out var cached) && string.Equals(cached.Path, modulePath, StringComparison.Ordinal))
             return new FileResult(cached, null);
 
+        // SECURITY (#135 follow-up): re-validate through SafeFileOpener. PEFile(string) opens
+        // the path directly without honoring O_NOFOLLOW / size cap. A file loaded safely via
+        // ModuleStore but replaced with a symlink between load and first disassembly call
+        // would otherwise bypass the file-IO defense.
+        var streamResult = IO.SafeFileOpener.OpenReadAsStream(modulePath, IO.SafeFileOpener.DefaultMaxAssemblyBytes);
+        if (!streamResult.IsSuccess)
+            return new FileResult(null, streamResult.Error);
+
         try
         {
-            var pef = new PEFile(modulePath);
+            var pef = new PEFile(modulePath, streamResult.Stream!);
             var token = new CachedFile(modulePath, pef);
             _files[mvid] = token;
             return new FileResult(token, null);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or DirectoryNotFoundException)
         {
+            streamResult.Stream?.Dispose();
             return new FileResult(null, new AssemblyError(
                 ErrorKinds.ModuleLoadFailed,
                 $"disassembler could not open module: {ex.GetType().Name}.",
-                ex.Message));
+                ErrorRedactor.Redact(ex.Message)));
         }
         catch (Exception ex) when (ex is BadImageFormatException or InvalidOperationException)
         {
+            streamResult.Stream?.Dispose();
             return new FileResult(null, new AssemblyError(
                 ErrorKinds.ModuleLoadFailed,
                 $"disassembler could not open module: {ex.GetType().Name}.",
-                ex.Message));
+                ErrorRedactor.Redact(ex.Message)));
         }
     }
 
