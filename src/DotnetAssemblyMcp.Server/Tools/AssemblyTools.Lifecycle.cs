@@ -26,10 +26,11 @@ public sealed partial class AssemblyTools
         var result = index.Load(path);
         if (!result.IsSuccess)
         {
+            var sanitized = ErrorRedactor.Sanitize(result.Error!);
             return AssemblyResult.Fail<ModuleSummary>(
-                $"Failed to load '{path}': {result.Error!.Message}",
-                result.Error,
-                AssemblyErrorRecovery.For(result.Error));
+                $"Failed to load {ErrorRedactor.RedactPath(path)}: {sanitized.Message}",
+                sanitized,
+                AssemblyErrorRecovery.For(sanitized));
         }
 
         var m = result.Module!;

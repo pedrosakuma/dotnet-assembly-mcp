@@ -70,9 +70,9 @@ internal sealed class BearerTokenMiddleware
 /// Resolved bearer-token configuration for <see cref="BearerTokenMiddleware"/>. Loaded from
 /// the <c>ASSEMBLY_MCP_BEARER_TOKEN</c> environment variable (falling back to
 /// <c>MCP_BEARER_TOKEN</c> so operators can share a single token across both MCP servers in
-/// a sidecar topology). Returns <c>null</c> when neither is set — the caller is expected to
-/// skip wiring the middleware so the HTTP transport remains unauthenticated, matching the
-/// back-compat policy spelled out in <c>deploy/k8s/README.md</c>.
+/// a sidecar topology). When neither is set <see cref="TryLoad"/> returns <c>null</c>;
+/// <c>Program.cs</c> then refuses to start the HTTP transport unless the operator has
+/// explicitly acknowledged the risk via <see cref="AllowUnauthenticatedEnvVar"/>.
 /// </summary>
 internal sealed partial class BearerTokenOptions
 {
@@ -83,6 +83,15 @@ internal sealed partial class BearerTokenOptions
 
     /// <summary>Cross-server fallback shared with <c>dotnet-diagnostics-mcp</c>.</summary>
     public const string FallbackEnvVar = "MCP_BEARER_TOKEN";
+
+    /// <summary>
+    /// When set to <c>1</c> / <c>true</c> the HTTP transport may start without a bearer
+    /// token (e.g. local 127.0.0.1 single-node development). Default-deny otherwise — the
+    /// historical behavior of silently exposing an unauthenticated <c>/mcp</c> endpoint
+    /// when the env var was missing was the highest-severity finding in the v0.18.1
+    /// security audit.
+    /// </summary>
+    public const string AllowUnauthenticatedEnvVar = "ASSEMBLY_MCP_ALLOW_UNAUTHENTICATED_HTTP";
 
     public static BearerTokenOptions? TryLoad(ILogger logger)
     {
@@ -95,17 +104,35 @@ internal sealed partial class BearerTokenOptions
         }
         if (string.IsNullOrWhiteSpace(token))
         {
-            LogUnauthenticated(logger, PrimaryEnvVar, FallbackEnvVar);
             return null;
         }
         LogTokenLoaded(logger, source);
         return new BearerTokenOptions { Token = token! };
     }
 
-    [LoggerMessage(EventId = 1, Level = LogLevel.Information,
-        Message = "{Primary} not set (fallback {Fallback} also empty) — HTTP transport will run unauthenticated. Set one to require Bearer auth.")]
-    private static partial void LogUnauthenticated(ILogger logger, string primary, string fallback);
+    /// <summary>
+    /// Returns <c>true</c> when the operator has explicitly opted into running the HTTP
+    /// transport without bearer authentication. Accepts the standard truthy spellings
+    /// (<c>1</c>, <c>true</c>, <c>yes</c>, <c>on</c>) case-insensitively.
+    /// </summary>
+    public static bool IsUnauthenticatedHttpAllowed()
+    {
+        var raw = Environment.GetEnvironmentVariable(AllowUnauthenticatedEnvVar);
+        if (string.IsNullOrWhiteSpace(raw)) return false;
+        return raw.Trim() switch
+        {
+            "1" => true,
+            _ when string.Equals(raw.Trim(), "true", StringComparison.OrdinalIgnoreCase) => true,
+            _ when string.Equals(raw.Trim(), "yes", StringComparison.OrdinalIgnoreCase) => true,
+            _ when string.Equals(raw.Trim(), "on", StringComparison.OrdinalIgnoreCase) => true,
+            _ => false,
+        };
+    }
 
     [LoggerMessage(EventId = 2, Level = LogLevel.Information, Message = "Bearer token loaded from {Source}.")]
     private static partial void LogTokenLoaded(ILogger logger, string source);
+
+    [LoggerMessage(EventId = 3, Level = LogLevel.Warning,
+        Message = "HTTP transport starting WITHOUT bearer authentication ({EnvVar}=true). Bind to 127.0.0.1 only; do not expose this port to untrusted networks.")]
+    public static partial void LogUnauthenticatedHttpAllowed(ILogger logger, string envVar);
 }
