@@ -89,6 +89,51 @@ public sealed class BearerTokenMiddlewareTests
     }
 
     [Fact]
+    public void IsUnauthenticatedHttpAllowed_defaults_to_false()
+    {
+        Environment.SetEnvironmentVariable(BearerTokenOptions.AllowUnauthenticatedEnvVar, null);
+        BearerTokenOptions.IsUnauthenticatedHttpAllowed().Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("1")]
+    [InlineData("true")]
+    [InlineData("TRUE")]
+    [InlineData("yes")]
+    [InlineData("on")]
+    public void IsUnauthenticatedHttpAllowed_accepts_truthy_values(string value)
+    {
+        try
+        {
+            Environment.SetEnvironmentVariable(BearerTokenOptions.AllowUnauthenticatedEnvVar, value);
+            BearerTokenOptions.IsUnauthenticatedHttpAllowed().Should().BeTrue();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(BearerTokenOptions.AllowUnauthenticatedEnvVar, null);
+        }
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("false")]
+    [InlineData("no")]
+    [InlineData("")]
+    [InlineData("nonsense")]
+    public void IsUnauthenticatedHttpAllowed_rejects_other_values(string value)
+    {
+        try
+        {
+            Environment.SetEnvironmentVariable(BearerTokenOptions.AllowUnauthenticatedEnvVar, value);
+            BearerTokenOptions.IsUnauthenticatedHttpAllowed().Should().BeFalse();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(BearerTokenOptions.AllowUnauthenticatedEnvVar, null);
+        }
+    }
+
+    [Fact]
     public void TryLoad_prefers_primary_env_var_over_fallback()
     {
         try

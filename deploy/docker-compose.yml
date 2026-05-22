@@ -47,6 +47,14 @@ services:
       ASPNETCORE_URLS: http://0.0.0.0:8080
       MCP_BEARER_TOKEN: ${MCP_BEARER_TOKEN:-}
       DOTNET_NOLOGO: "1"
+    # Container hardening — least-privilege defaults. Override with caution.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+      - /home/app/.cache:size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     # Uncomment to enable host-PID attach for local .NET targets running on the
     # host. Elevates blast radius — only do this on a developer machine.
     # pid: host
@@ -73,6 +81,16 @@ services:
       # docker-managed volume so `up` works on a clean checkout (you just won't
       # have anything to inspect until you mount something real).
       - ${ASSEMBLIES_DIR:-assembly-cache}:/assemblies:ro
+    # Container hardening — least-privilege defaults. The xref cache lives under
+    # /home/app/.cache (see MetadataIndex) so we mount a sized tmpfs there to keep
+    # the filesystem read-only without breaking caching.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+      - /home/app/.cache:size=256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "dotnet DotnetAssemblyMcp.Server.dll --health-check --url=http://127.0.0.1:8080/health || exit 1"]
       interval: 30s

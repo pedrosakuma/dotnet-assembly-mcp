@@ -63,7 +63,8 @@ internal sealed class ModuleStore : IDisposable
         if (string.IsNullOrWhiteSpace(path))
             return LoadResult.Fail(new AssemblyError(ErrorKinds.InvalidArgument, "path is required."));
         if (!File.Exists(path))
-            return LoadResult.Fail(new AssemblyError(ErrorKinds.ModuleLoadFailed, $"file not found: {path}"));
+            return LoadResult.Fail(new AssemblyError(
+                ErrorKinds.ModuleLoadFailed, $"file not found: {ErrorRedactor.RedactPath(path)}"));
 
         var fullPath = Path.GetFullPath(path);
         var loaded = OpenAndRegister(fullPath);
@@ -275,17 +276,17 @@ internal sealed class ModuleStore : IDisposable
         catch (BadImageFormatException ex)
         {
             return new OpenedModule(null, null, null,
-                new AssemblyError(ErrorKinds.ModuleLoadFailed, "invalid PE/CLI image.", ex.Message));
+                new AssemblyError(ErrorKinds.ModuleLoadFailed, "invalid PE/CLI image.", ErrorRedactor.Redact(ex.Message)));
         }
         catch (UnauthorizedAccessException ex)
         {
             return new OpenedModule(null, null, null,
-                new AssemblyError(ErrorKinds.ModuleLoadFailed, "permission denied.", ex.Message));
+                new AssemblyError(ErrorKinds.ModuleLoadFailed, "permission denied.", ErrorRedactor.Redact(ex.Message)));
         }
         catch (IOException ex)
         {
             return new OpenedModule(null, null, null,
-                new AssemblyError(ErrorKinds.ModuleLoadFailed, "i/o error opening assembly.", ex.Message));
+                new AssemblyError(ErrorKinds.ModuleLoadFailed, "i/o error opening assembly.", ErrorRedactor.Redact(ex.Message)));
         }
     }
 

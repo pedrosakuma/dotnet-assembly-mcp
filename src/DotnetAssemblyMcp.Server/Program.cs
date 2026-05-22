@@ -71,12 +71,29 @@ ConfigureMcpServer(builder.Services)
 
 var app = builder.Build();
 
-// Static bearer-token gate (opt-in). When neither ASSEMBLY_MCP_BEARER_TOKEN nor
-// MCP_BEARER_TOKEN is set, the HTTP transport stays unauthenticated to preserve back-compat
-// for local 127.0.0.1 deploys. /health is exempt either way (see BearerTokenMiddleware).
+// Static bearer-token gate (default-deny). When neither ASSEMBLY_MCP_BEARER_TOKEN nor
+// MCP_BEARER_TOKEN is set the HTTP transport refuses to start unless the operator has
+// explicitly opted in via ASSEMBLY_MCP_ALLOW_UNAUTHENTICATED_HTTP=true. /health is exempt
+// from the bearer check either way (see BearerTokenMiddleware) so liveness probes work.
 var bearerOptions = BearerTokenOptions.TryLoad(app.Logger);
 if (bearerOptions is not null)
+{
     app.UseMiddleware<BearerTokenMiddleware>(bearerOptions);
+}
+else if (BearerTokenOptions.IsUnauthenticatedHttpAllowed())
+{
+    BearerTokenOptions.LogUnauthenticatedHttpAllowed(app.Logger, BearerTokenOptions.AllowUnauthenticatedEnvVar);
+}
+else
+{
+    await Console.Error.WriteLineAsync(
+        $"FATAL: HTTP transport refuses to start without a bearer token. Set " +
+        $"{BearerTokenOptions.PrimaryEnvVar} (or {BearerTokenOptions.FallbackEnvVar}) to a " +
+        $"shared secret, or set {BearerTokenOptions.AllowUnauthenticatedEnvVar}=true to " +
+        $"explicitly opt into an unauthenticated 127.0.0.1-only deploy. Use --stdio for " +
+        $"local single-client transports that don't need network auth.").ConfigureAwait(false);
+    return 1;
+}
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 app.MapMcp("/mcp");
