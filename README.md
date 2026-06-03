@@ -246,6 +246,9 @@ dotnet-assembly-cli explain-method "$DLL" SampleLib.OrderService Compute --decom
 
 # Who transitively calls a method? A recursive caller tree, resolved by name.
 dotnet-assembly-cli callgraph "$DLL" SampleLib.OrderService Compute --depth 3
+
+# What changed in the public surface between two builds of an assembly?
+dotnet-assembly-cli diff-assemblies "$OLD_DLL" "$NEW_DLL"
 ```
 
 `explain-method` matches the method name **exactly** by default (and lists near-misses if there
@@ -258,9 +261,21 @@ across all loaded modules. Bound it with `--depth` (caller levels, default 3) an
 shown]` when the depth limit is reached. It is a MethodDef/IL call-path tree, so generic methods
 appear once (not per closed instantiation).
 
+`diff-assemblies` compares the **externally-visible public surface** of two assemblies (a type is
+visible only when its whole declaring chain is public): types added / removed, and, for types in
+both, public / protected members added / removed / signature-changed plus type-shape changes
+(kind / base / interfaces). Member identity is name + generic arity + parameter list, so a
+return-type, visibility or modifier (`static` / `virtual` / `abstract` / `sealed` / `readonly` /
+`const`) change on the same signature is reported as a change rather than an add + remove.
+Property / event accessors appear as their `get_` / `set_` / `add_` / `remove_` methods. Finding
+differences still exits 0 (a diff is not an error); only an unreadable input assembly exits 1.
+Type identity is compared by full name (signatures render type references by full name without
+assembly identity), so a type that keeps its full name but moves to a different assembly — e.g. a
+dependency version swap or type forward — is not flagged as a change.
+
 ### Subcommands
 
-The 22 MCP tools each have a matching 1:1 subcommand, plus three human-oriented composed commands:
+The 22 MCP tools each have a matching 1:1 subcommand, plus four human-oriented composed commands:
 
 | Group | Commands |
 |---|---|
@@ -268,7 +283,7 @@ The 22 MCP tools each have a matching 1:1 subcommand, plus three human-oriented 
 | **Methods** | `get-method`, `decompile-method`, `decompile-type`, `get-method-il`, `list-methods`, `find-method`, `find-callers`, `get-method-source` |
 | **Types** | `list-types`, `list-assembly-references`, `list-resources`, `list-attributes`, `get-type`, `list-derived-types`, `list-members` |
 | **References** | `find-string-references`, `find-attribute-targets`, `find-member-references`, `find-type-references` |
-| **Analysis (composed)** | `explain-type`, `explain-method`, `callgraph` |
+| **Analysis (composed)** | `explain-type`, `explain-method`, `callgraph`, `diff-assemblies` |
 
 Run `dotnet-assembly-cli <command> --help` for each command's arguments and options.
 

@@ -63,3 +63,53 @@ public sealed record CallGraphNode(
     IReadOnlyList<CallGraphNode> Callers,
     bool Cycle = false,
     bool DepthLimited = false);
+
+/// <summary>
+/// Public-surface diff between two assemblies, produced by
+/// <see cref="AssemblyAnalysisOperations.DiffAssemblies"/>. Covers externally-visible types and
+/// their public / protected members (methods — including property and event accessors — and
+/// fields). <see cref="Incomplete"/> is set when at least one visible type's surface could not be
+/// read and was excluded from comparison (see <see cref="Warnings"/>).
+/// </summary>
+public sealed record AssemblyDiff(
+    string LeftDisplay,
+    string RightDisplay,
+    IReadOnlyList<TypeDiff> AddedTypes,
+    IReadOnlyList<TypeDiff> RemovedTypes,
+    IReadOnlyList<TypeDiff> ChangedTypes,
+    int LeftTypeCount,
+    int RightTypeCount,
+    bool Incomplete = false,
+    IReadOnlyList<string>? Warnings = null);
+
+/// <summary>
+/// A single type entry in an <see cref="AssemblyDiff"/>. For added / removed types only
+/// <see cref="TypeFullName"/>, <see cref="Kind"/> and <see cref="MemberCount"/> are populated. For
+/// changed types the member-level deltas and <see cref="ShapeChanges"/> (kind / base / interface
+/// changes) are filled in.
+/// </summary>
+public sealed record TypeDiff(
+    string TypeFullName,
+    string Kind,
+    int MemberCount = 0,
+    IReadOnlyList<MemberChange>? AddedMembers = null,
+    IReadOnlyList<MemberChange>? RemovedMembers = null,
+    IReadOnlyList<MemberSignatureChange>? ChangedMembers = null,
+    IReadOnlyList<string>? ShapeChanges = null);
+
+/// <summary>A member added to or removed from a type's public surface.</summary>
+public sealed record MemberChange(
+    string Name,
+    string Category,
+    string Signature);
+
+/// <summary>
+/// A member kept (same identity: name + generic arity + parameter list) but whose surface
+/// fingerprint changed — e.g. a return-type, visibility or modifier (static / virtual / abstract /
+/// sealed / readonly / const) change.
+/// </summary>
+public sealed record MemberSignatureChange(
+    string Name,
+    string Category,
+    string Before,
+    string After);

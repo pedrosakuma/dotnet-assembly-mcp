@@ -10,5 +10,6 @@
     <Project Path="tests/fixtures/SampleLib/SampleLib.csproj" />
     <Project Path="tests/fixtures/SampleConsumer/SampleConsumer.csproj" />
     <Project Path="tests/fixtures/SampleLibR2R/SampleLibR2R.csproj" />
+    <Project Path="tests/fixtures/SampleLibV2/SampleLibV2.csproj" />
   </Folder>
 </Solution>

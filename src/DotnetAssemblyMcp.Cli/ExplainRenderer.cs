@@ -151,6 +151,93 @@ internal static class ExplainRenderer
         }
     }
 
+    public static void WriteAssemblyDiff(TextWriter w, AssemblyDiff d)
+    {
+        ArgumentNullException.ThrowIfNull(w);
+        ArgumentNullException.ThrowIfNull(d);
+
+        w.WriteLine();
+        w.WriteLine($"Left:  {d.LeftDisplay}   ({Count(d.LeftTypeCount)} visible type(s))");
+        w.WriteLine($"Right: {d.RightDisplay}   ({Count(d.RightTypeCount)} visible type(s))");
+        w.WriteLine("  Note: property / event accessors appear as get_/set_/add_/remove_ methods.");
+
+        if (d.AddedTypes.Count == 0 && d.RemovedTypes.Count == 0 && d.ChangedTypes.Count == 0)
+        {
+            w.WriteLine();
+            w.WriteLine("No public-surface differences.");
+        }
+
+        if (d.RemovedTypes.Count > 0)
+        {
+            w.WriteLine();
+            w.WriteLine($"Removed types ({Count(d.RemovedTypes.Count)}):");
+            foreach (TypeDiff t in d.RemovedTypes)
+            {
+                w.WriteLine($"  - {t.TypeFullName}   ({t.Kind}, {Count(t.MemberCount)} member(s))");
+            }
+        }
+
+        if (d.AddedTypes.Count > 0)
+        {
+            w.WriteLine();
+            w.WriteLine($"Added types ({Count(d.AddedTypes.Count)}):");
+            foreach (TypeDiff t in d.AddedTypes)
+            {
+                w.WriteLine($"  + {t.TypeFullName}   ({t.Kind}, {Count(t.MemberCount)} member(s))");
+            }
+        }
+
+        if (d.ChangedTypes.Count > 0)
+        {
+            w.WriteLine();
+            w.WriteLine($"Changed types ({Count(d.ChangedTypes.Count)}):");
+            foreach (TypeDiff t in d.ChangedTypes)
+            {
+                w.WriteLine($"  ~ {t.TypeFullName}   ({t.Kind})");
+                if (t.ShapeChanges is { Count: > 0 } shape)
+                {
+                    foreach (string s in shape)
+                    {
+                        w.WriteLine($"      {s}");
+                    }
+                }
+
+                if (t.RemovedMembers is { Count: > 0 } rm)
+                {
+                    foreach (MemberChange m in rm)
+                    {
+                        w.WriteLine($"      - {m.Signature}");
+                    }
+                }
+
+                if (t.AddedMembers is { Count: > 0 } am)
+                {
+                    foreach (MemberChange m in am)
+                    {
+                        w.WriteLine($"      + {m.Signature}");
+                    }
+                }
+
+                if (t.ChangedMembers is { Count: > 0 } cm)
+                {
+                    foreach (MemberSignatureChange m in cm)
+                    {
+                        w.WriteLine($"      ~ {m.Before}");
+                        w.WriteLine($"        -> {m.After}");
+                    }
+                }
+            }
+        }
+
+        if (d.Incomplete)
+        {
+            w.WriteLine();
+            w.WriteLine("Note: diff is incomplete — one or more visible types could not be read (see warnings).");
+        }
+
+        WriteWarnings(w, d.Warnings);
+    }
+
     private static void WriteMemberGroup(TextWriter w, string label, IReadOnlyList<MemberSummary> members, MemberKind kind, bool truncated)
     {
         var group = members.Where(m => m.Kind == kind).ToList();

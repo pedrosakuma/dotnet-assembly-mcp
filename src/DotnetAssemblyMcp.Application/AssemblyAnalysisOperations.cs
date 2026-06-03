@@ -23,6 +23,9 @@ public static class AssemblyAnalysisOperations
     /// <summary>Hard cap on pages walked while collecting overloads, to bound pathological inputs.</summary>
     private const int MaxOverloadPages = 200;
 
+    /// <summary>Hard cap on pages walked while enumerating an assembly's types / a type's members.</summary>
+    private const int MaxSurfacePages = 10_000;
+
     /// <summary>
     /// Resolves a type by name and gathers a one-shot overview: the <see cref="TypeSummary"/>
     /// plus its attributes, members (fields / properties / events) and methods. Sub-lookups
@@ -475,4 +478,391 @@ public static class AssemblyAnalysisOperations
             return new CallGraphNode(mvid, token, handle, display, children);
         }
     }
+
+    // ---- diff-assemblies ----------------------------------------------------------------------
+
+    /// <summary>Surface modifiers that participate in a member's change fingerprint.</summary>
+    private static readonly HashSet<string> RelevantModifiers = new(StringComparer.Ordinal)
+    {
+        "public", "protected", "protected internal", "static", "virtual", "abstract", "sealed", "readonly", "const",
+    };
+
+    /// <summary>
+    /// Diffs the public surface of two assemblies: externally-visible types added / removed, and,
+    /// for types present in both, their public / protected members (methods — including property
+    /// and event accessors — and fields) added, removed or signature-changed, plus type-shape
+    /// changes (kind / base type / interfaces). Member identity is name + generic arity + parameter
+    /// list, so a return-type / visibility / modifier change on the same signature is reported as a
+    /// change rather than an add+remove. A visible type whose surface cannot be read is excluded
+    /// and flagged via <see cref="AssemblyDiff.Incomplete"/> + a warning rather than diffed against
+    /// an empty surface.
+    /// <para>
+    /// Known limitation: type references are compared by full name only (signatures render type
+    /// references without assembly identity), so a type that keeps its full name but moves to a
+    /// different assembly — e.g. a dependency version swap or a type forward — is not flagged.
+    /// </para>
+    /// </summary>
+    /// <param name="index">The metadata index.</param>
+    /// <param name="left">Baseline module MVID or filesystem path (auto-loaded).</param>
+    /// <param name="right">Comparand module MVID or filesystem path (auto-loaded).</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public static AssemblyResult<AssemblyDiff> DiffAssemblies(
+        IMetadataIndex index,
+        string left,
+        string right,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(index);
+
+        var warnings = new List<string>();
+
+        Surface? leftSurface = BuildSurface(index, left, warnings, cancellationToken, out AssemblyError? leftError);
+        if (leftSurface is null)
+        {
+            return AssemblyResult.Fail<AssemblyDiff>($"Could not read left assembly '{left}': {leftError!.Message}", leftError);
+        }
+
+        Surface? rightSurface = BuildSurface(index, right, warnings, cancellationToken, out AssemblyError? rightError);
+        if (rightSurface is null)
+        {
+            return AssemblyResult.Fail<AssemblyDiff>($"Could not read right assembly '{right}': {rightError!.Message}", rightError);
+        }
+
+        var added = new List<TypeDiff>();
+        foreach (string name in rightSurface.VisibleTypes.Keys.Where(k => !leftSurface.VisibleTypes.ContainsKey(k)))
+        {
+            TypeSummary t = rightSurface.VisibleTypes[name];
+            int count = rightSurface.Members.TryGetValue(name, out var m) ? m.Count : 0;
+            added.Add(new TypeDiff(name, t.Kind.ToString(), count));
+        }
+
+        var removed = new List<TypeDiff>();
+        foreach (string name in leftSurface.VisibleTypes.Keys.Where(k => !rightSurface.VisibleTypes.ContainsKey(k)))
+        {
+            TypeSummary t = leftSurface.VisibleTypes[name];
+            int count = leftSurface.Members.TryGetValue(name, out var m) ? m.Count : 0;
+            removed.Add(new TypeDiff(name, t.Kind.ToString(), count));
+        }
+
+        var changed = new List<TypeDiff>();
+        foreach (string name in leftSurface.VisibleTypes.Keys.Where(rightSurface.VisibleTypes.ContainsKey))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // A type whose surface could not be read on either side is excluded entirely so we
+            // never fabricate diffs from a partial read.
+            if (!leftSurface.Members.TryGetValue(name, out var leftMembers) ||
+                !rightSurface.Members.TryGetValue(name, out var rightMembers))
+            {
+                continue;
+            }
+
+            var addedMembers = new List<MemberChange>();
+            var removedMembers = new List<MemberChange>();
+            var changedMembers = new List<MemberSignatureChange>();
+
+            foreach (string key in leftMembers.Keys.Union(rightMembers.Keys, StringComparer.Ordinal))
+            {
+                bool inLeft = leftMembers.TryGetValue(key, out MemberEntry l);
+                bool inRight = rightMembers.TryGetValue(key, out MemberEntry r);
+                if (inLeft && !inRight)
+                {
+                    removedMembers.Add(new MemberChange(l.Name, l.Category, l.Display));
+                }
+                else if (!inLeft && inRight)
+                {
+                    addedMembers.Add(new MemberChange(r.Name, r.Category, r.Display));
+                }
+                else if (!string.Equals(l.Fingerprint, r.Fingerprint, StringComparison.Ordinal))
+                {
+                    changedMembers.Add(new MemberSignatureChange(l.Name, l.Category, l.Display, r.Display));
+                }
+            }
+
+            List<string> shape = ShapeChanges(leftSurface.VisibleTypes[name], rightSurface.VisibleTypes[name]);
+
+            if (addedMembers.Count == 0 && removedMembers.Count == 0 && changedMembers.Count == 0 && shape.Count == 0)
+            {
+                continue;
+            }
+
+            addedMembers.Sort((a, b) => string.CompareOrdinal(a.Signature, b.Signature));
+            removedMembers.Sort((a, b) => string.CompareOrdinal(a.Signature, b.Signature));
+            changedMembers.Sort((a, b) => string.CompareOrdinal(a.Before, b.Before));
+
+            changed.Add(new TypeDiff(
+                name,
+                leftSurface.VisibleTypes[name].Kind.ToString(),
+                MemberCount: 0,
+                addedMembers.Count > 0 ? addedMembers : null,
+                removedMembers.Count > 0 ? removedMembers : null,
+                changedMembers.Count > 0 ? changedMembers : null,
+                shape.Count > 0 ? shape : null));
+        }
+
+        added.Sort((a, b) => string.CompareOrdinal(a.TypeFullName, b.TypeFullName));
+        removed.Sort((a, b) => string.CompareOrdinal(a.TypeFullName, b.TypeFullName));
+        changed.Sort((a, b) => string.CompareOrdinal(a.TypeFullName, b.TypeFullName));
+
+        bool incomplete = leftSurface.Unreadable.Count > 0 || rightSurface.Unreadable.Count > 0;
+
+        var diff = new AssemblyDiff(
+            left,
+            right,
+            added,
+            removed,
+            changed,
+            leftSurface.VisibleTypes.Count,
+            rightSurface.VisibleTypes.Count,
+            incomplete,
+            warnings.Count > 0 ? warnings : null);
+
+        var summary = $"+{added.Count} type(s), -{removed.Count} type(s), ~{changed.Count} type(s){(incomplete ? " (incomplete)" : string.Empty)}.";
+        return AssemblyResult.Ok(diff, summary);
+    }
+
+    private static List<string> ShapeChanges(TypeSummary a, TypeSummary b)
+    {
+        var changes = new List<string>();
+        if (a.Kind != b.Kind)
+        {
+            changes.Add($"kind: {a.Kind} -> {b.Kind}");
+        }
+
+        string? baseA = a.BaseType?.FullName;
+        string? baseB = b.BaseType?.FullName;
+        if (!string.Equals(baseA, baseB, StringComparison.Ordinal))
+        {
+            changes.Add($"base: {baseA ?? "(none)"} -> {baseB ?? "(none)"}");
+        }
+
+        var ifA = new HashSet<string>((a.Interfaces ?? Array.Empty<TypeReferenceSummary>()).Select(i => i.FullName), StringComparer.Ordinal);
+        var ifB = new HashSet<string>((b.Interfaces ?? Array.Empty<TypeReferenceSummary>()).Select(i => i.FullName), StringComparer.Ordinal);
+        foreach (string gone in ifA.Except(ifB).OrderBy(x => x, StringComparer.Ordinal))
+        {
+            changes.Add($"interface -{gone}");
+        }
+
+        foreach (string add in ifB.Except(ifA).OrderBy(x => x, StringComparer.Ordinal))
+        {
+            changes.Add($"interface +{add}");
+        }
+
+        return changes;
+    }
+
+    /// <summary>
+    /// Reads the externally-visible public surface of one assembly. Returns null (with
+    /// <paramref name="error"/> set) only when the assembly itself cannot be enumerated; per-type
+    /// read failures are recorded in <see cref="Surface.Unreadable"/> + a warning.
+    /// </summary>
+    private static Surface? BuildSurface(
+        IMetadataIndex index,
+        string mvidOrPath,
+        List<string> warnings,
+        CancellationToken cancellationToken,
+        out AssemblyError? error)
+    {
+        error = null;
+        var allTypes = new Dictionary<string, TypeSummary>(StringComparer.Ordinal);
+        int? cursor = 0;
+        for (var page = 0; page < MaxSurfacePages; page++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AssemblyResult<ListTypesPage> typesResult = AssemblyOperations.ListTypes(
+                index, mvidOrPath, namespacePrefix: null, nameContains: null, kind: null,
+                cursor: cursor ?? 0, pageSize: ListTypesQuery.MaxPageSize);
+            if (typesResult.IsError)
+            {
+                error = typesResult.Error;
+                return null;
+            }
+
+            ListTypesPage typesPage = typesResult.Data!;
+            foreach (TypeSummary t in typesPage.Types)
+            {
+                allTypes[t.FullName] = t;
+            }
+
+            if (typesPage.NextCursor is null)
+            {
+                break;
+            }
+
+            cursor = typesPage.NextCursor;
+        }
+
+        var visible = new Dictionary<string, TypeSummary>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, TypeSummary> kv in allTypes)
+        {
+            if (IsExternallyVisible(kv.Key, allTypes))
+            {
+                visible[kv.Key] = kv.Value;
+            }
+        }
+
+        var members = new Dictionary<string, Dictionary<string, MemberEntry>>(StringComparer.Ordinal);
+        var unreadable = new HashSet<string>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, TypeSummary> kv in visible)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (TryReadTypeSurface(index, kv.Value, cancellationToken, out Dictionary<string, MemberEntry> typeMembers, out string? failure))
+            {
+                members[kv.Key] = typeMembers;
+            }
+            else
+            {
+                unreadable.Add(kv.Key);
+                warnings.Add($"surface of '{kv.Key}' unavailable: {failure}");
+            }
+        }
+
+        return new Surface(visible, members, unreadable);
+    }
+
+    /// <summary>
+    /// A type is externally visible only when every type in its declaring chain (split on '+') is
+    /// itself public / nested-public. A missing ancestor is treated conservatively as not visible.
+    /// </summary>
+    private static bool IsExternallyVisible(string fullName, Dictionary<string, TypeSummary> allTypes)
+    {
+        string[] segments = fullName.Split('+');
+        string cumulative = segments[0];
+        for (var i = 0; i < segments.Length; i++)
+        {
+            if (i > 0)
+            {
+                cumulative = cumulative + "+" + segments[i];
+            }
+
+            if (!allTypes.TryGetValue(cumulative, out TypeSummary? t) || !t.IsPublic)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryReadTypeSurface(
+        IMetadataIndex index,
+        TypeSummary type,
+        CancellationToken cancellationToken,
+        out Dictionary<string, MemberEntry> members,
+        out string? failure)
+    {
+        members = new Dictionary<string, MemberEntry>(StringComparer.Ordinal);
+        failure = null;
+
+        int? cursor = 0;
+        for (var page = 0; page < MaxSurfacePages; page++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AssemblyResult<ListMethodsPage> methodsResult = AssemblyOperations.ListMethods(
+                index, type.Handle, mvidOrPath: null, typeFullName: null,
+                namePattern: null, cursor: cursor ?? 0, pageSize: ListMethodsQuery.MaxPageSize);
+            if (methodsResult.IsError)
+            {
+                failure = methodsResult.Summary;
+                return false;
+            }
+
+            foreach (MethodSummary m in methodsResult.Data!.Methods)
+            {
+                if (!IsVisible(m.Attributes))
+                {
+                    continue;
+                }
+
+                string key = $"method:{m.MethodName}`{m.GenericArity.ToString(CultureInfo.InvariantCulture)}{ParamSuffix(m.Signature)}";
+                members[key] = new MemberEntry(m.MethodName, "method", Display(m.Attributes, m.Signature), Fingerprint(m.Attributes, m.Signature));
+            }
+
+            if (methodsResult.Data!.NextCursor is null)
+            {
+                break;
+            }
+
+            cursor = methodsResult.Data!.NextCursor;
+        }
+
+        cursor = 0;
+        for (var page = 0; page < MaxSurfacePages; page++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AssemblyResult<ListMembersPage> fieldsResult = AssemblyOperations.ListMembers(
+                index, type.Handle, mvidOrPath: null, typeFullName: null, kind: MemberKind.Field,
+                namePattern: null, signatureContains: null, cursor: cursor ?? 0, pageSize: ListMembersQuery.MaxPageSize);
+            if (fieldsResult.IsError)
+            {
+                failure = fieldsResult.Summary;
+                return false;
+            }
+
+            foreach (MemberSummary f in fieldsResult.Data!.Members)
+            {
+                if (!IsVisible(f.Attributes))
+                {
+                    continue;
+                }
+
+                members[$"field:{f.Name}"] = new MemberEntry(f.Name, "field", Display(f.Attributes, f.Signature), Fingerprint(f.Attributes, f.Signature));
+            }
+
+            if (fieldsResult.Data!.NextCursor is null)
+            {
+                break;
+            }
+
+            cursor = fieldsResult.Data!.NextCursor;
+        }
+
+        return true;
+    }
+
+    /// <summary>True for members that form the externally-callable surface (public / protected).</summary>
+    private static bool IsVisible(IReadOnlyList<string> attributes) =>
+        attributes.Contains("public") || attributes.Contains("protected") || attributes.Contains("protected internal");
+
+    /// <summary>The parameter-list substring of a method signature, used as part of its identity key.</summary>
+    private static string ParamSuffix(string signature)
+    {
+        int open = signature.IndexOf('(', StringComparison.Ordinal);
+        int close = signature.LastIndexOf(')');
+        return open >= 0 && close > open ? signature.Substring(open, close - open + 1) : "()";
+    }
+
+    /// <summary>
+    /// A normalized fingerprint that captures surface-affecting modifiers plus the full signature,
+    /// so a visibility / static / virtual / abstract / sealed / readonly / const change on an
+    /// otherwise identical member is detected as a change.
+    /// </summary>
+    private static string Fingerprint(IReadOnlyList<string> attributes, string signature)
+    {
+        IEnumerable<string> relevant = attributes
+            .Where(RelevantModifiers.Contains)
+            .OrderBy(a => a, StringComparer.Ordinal);
+        return string.Join(" ", relevant) + " | " + signature;
+    }
+
+    /// <summary>
+    /// A human-facing member display: surface-affecting modifiers prefixed to the signature, so a
+    /// modifier-only change (e.g. <c>virtual</c> dropped) is visible in the rendered before / after
+    /// even when the bare signature string is unchanged.
+    /// </summary>
+    private static string Display(IReadOnlyList<string> attributes, string signature)
+    {
+        IEnumerable<string> relevant = attributes
+            .Where(RelevantModifiers.Contains)
+            .OrderBy(a => a, StringComparer.Ordinal);
+        string prefix = string.Join(" ", relevant);
+        return prefix.Length > 0 ? prefix + " " + signature : signature;
+    }
+
+    private sealed record Surface(
+        Dictionary<string, TypeSummary> VisibleTypes,
+        Dictionary<string, Dictionary<string, MemberEntry>> Members,
+        HashSet<string> Unreadable);
+
+    private readonly record struct MemberEntry(string Name, string Category, string Display, string Fingerprint);
 }
