@@ -43,9 +43,14 @@ public static class SafeFileOpener
     /// <param name="path">Absolute path to the file. Caller is expected to have validated <see cref="Path.IsPathFullyQualified(string)"/>.</param>
     /// <param name="maxBytes">Hard cap on the file size in bytes. Reads above this throw before allocation.</param>
     /// <param name="expectedParentDirectory">
-    /// Optional canonical directory that the resolved real path must reside in. Used by the
-    /// sibling-PDB lookup to prevent an attacker-controlled directory layout from escaping
-    /// the assembly's directory via a symlink to e.g. <c>/etc/shadow.pdb</c>.
+    /// Optional directory that the opened descriptor's <em>real</em> parent directory must equal.
+    /// Used by the sibling-PDB lookup to prevent an attacker-controlled directory layout from
+    /// escaping the assembly's directory via a symlink to e.g. <c>/etc/shadow.pdb</c>. The caller
+    /// MUST pass a path it captured <em>canonically at load time</em> (e.g.
+    /// <c>ModuleHandle.RealDirectory</c>): the comparison is a pure string match against the
+    /// descriptor's real parent and does NOT re-canonicalise this value, because re-resolving a
+    /// string path at check time would itself be racy. The read fails closed if the descriptor's
+    /// real path cannot be resolved on this platform.
     /// </param>
     /// <param name="verifyOpenedRealPath">
     /// Optional post-open verifier closing the ancestor-directory TOCTOU window (#156). When
@@ -128,34 +133,49 @@ public static class SafeFileOpener
 
         using (fs)
         {
+            // Resolve the kernel's authoritative real path for the now-open descriptor ONCE.
+            // fd-based (not path-based) so it cannot itself be raced. Best-effort: null on
+            // platforms/configurations where it can't be resolved (callers that gate on it fail
+            // closed; the load anchor simply goes unset). Reused by the #156 allow-list re-check,
+            // the sibling containment check, and the returned load-time real-path anchor.
+            var descriptorRealPath = TryResolveDescriptorRealPath(fs.SafeFileHandle);
+
             // Post-open ancestor-TOCTOU verification (#156). O_NOFOLLOW only guards the leaf, so an
             // ancestor directory swapped for an out-of-root symlink AFTER pre-open canonicalisation
-            // could redirect this open. We ask the kernel for the real path of the now-open
-            // descriptor and let the caller re-check containment. Fail closed if it can't be resolved.
+            // could redirect this open. Re-check containment against the descriptor's real path.
+            // Fail closed if it can't be resolved under active enforcement.
             if (verifyOpenedRealPath is not null)
             {
-                var realPath = TryResolveDescriptorRealPath(fs.SafeFileHandle);
-                if (realPath is null)
+                if (descriptorRealPath is null)
                 {
                     return ReadResult.Fail(new AssemblyError(
                         ErrorKinds.PathRejected,
                         $"cannot verify opened descriptor's real path on this platform: {ErrorRedactor.RedactPath(path)}"));
                 }
-                var verifyErr = verifyOpenedRealPath(realPath);
+                var verifyErr = verifyOpenedRealPath(descriptorRealPath);
                 if (verifyErr is not null) return ReadResult.Fail(verifyErr);
             }
 
-            // Sibling-PDB / containment check. Verifies the OS-canonical parent of the open
-            // file is the directory the caller expected — defeats a 'pdb is a symlink that
-            // escapes the assembly directory' attack.
+            // Sibling containment (#156 follow-up). The open descriptor's REAL parent directory must
+            // equal the caller-supplied expected directory, which the caller captured *canonically at
+            // load time* (see ModuleHandle.RealDirectory). Compared by pure string — re-canonicalising
+            // the expected path here would itself be racy and, for a sibling, tautological. This catches
+            // an ancestor-directory symlink that redirects the sibling outside the assembly's real
+            // directory even when the allow-list is disabled; O_NOFOLLOW alone only guards the leaf.
+            // Fail closed if the descriptor's real path can't be resolved.
             if (expectedParentDirectory is not null)
             {
-                var actualParent = Path.GetDirectoryName(Path.GetFullPath(path));
-                var expectedFull = Path.GetFullPath(expectedParentDirectory);
+                if (descriptorRealPath is null)
+                {
+                    return ReadResult.Fail(new AssemblyError(
+                        ErrorKinds.PathRejected,
+                        $"cannot verify opened descriptor's real path on this platform: {ErrorRedactor.RedactPath(path)}"));
+                }
+                var actualRealParent = Path.GetDirectoryName(descriptorRealPath);
                 var comp = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
                 if (!string.Equals(
-                        actualParent?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                        expectedFull.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                        actualRealParent?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                        expectedParentDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
                         comp))
                 {
                     return ReadResult.Fail(new AssemblyError(
@@ -201,14 +221,20 @@ public static class SafeFileOpener
                     ErrorKinds.ModuleLoadFailed,
                     $"short read: expected {buffer.Length} bytes, got {read}: {ErrorRedactor.RedactPath(path)}"));
             }
-            return ReadResult.Ok(buffer);
+            return ReadResult.Ok(buffer, descriptorRealPath);
         }
     }
 
-    /// <summary>Result envelope mirroring the shape of <c>ProbeResult</c> / <c>LoadResult</c>.</summary>
-    public readonly record struct ReadResult(bool IsSuccess, byte[]? Bytes, AssemblyError? Error)
+    /// <summary>
+    /// Result envelope mirroring the shape of <c>ProbeResult</c> / <c>LoadResult</c>.
+    /// <c>OpenedRealPath</c> is the kernel-resolved real path of the descriptor that was read
+    /// (best-effort; <c>null</c> when the platform cannot resolve it). Callers capture it as a
+    /// load-time anchor — e.g. <c>ModuleHandle.RealDirectory</c> — so a later sibling read can be
+    /// containment-checked against a path that was canonical at load, not re-resolved at read time.
+    /// </summary>
+    public readonly record struct ReadResult(bool IsSuccess, byte[]? Bytes, AssemblyError? Error, string? OpenedRealPath = null)
     {
-        public static ReadResult Ok(byte[] bytes) => new(true, bytes, null);
+        public static ReadResult Ok(byte[] bytes, string? openedRealPath = null) => new(true, bytes, null, openedRealPath);
         public static ReadResult Fail(AssemblyError error) => new(false, null, error);
     }
 
@@ -403,14 +429,19 @@ public static class SafeFileOpener
 
     /// <summary>
     /// Test-only seam: when set, overrides kernel descriptor-path resolution so the ancestor-TOCTOU
-    /// rejection can be exercised deterministically without a real filesystem race.
+    /// rejection can be exercised deterministically without a real filesystem race. <see cref="ThreadStaticAttribute"/>
+    /// so a value set by one test cannot leak into descriptor resolution performed by another test
+    /// running concurrently on a different thread (resolution now runs on every read, including the
+    /// default no-allow-list sibling-PDB path).
     /// </summary>
+    [ThreadStatic]
     internal static Func<SafeFileHandle, string?>? DescriptorRealPathResolverOverride;
 
     internal static string? TryResolveDescriptorRealPath(SafeFileHandle handle)
     {
-        if (DescriptorRealPathResolverOverride is not null)
-            return DescriptorRealPathResolverOverride(handle);
+        var over = DescriptorRealPathResolverOverride;
+        if (over is not null)
+            return over(handle);
         if (handle.IsInvalid || handle.IsClosed) return null;
 
         try

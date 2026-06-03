@@ -95,7 +95,8 @@ public sealed class SafeFileOpenerTests : IDisposable
         var fileInB = Path.Combine(dirB, "foo.pdb");
         File.WriteAllBytes(fileInB, [0x00]);
 
-        var result = SafeFileOpener.ReadAllBytes(fileInB, maxBytes: 1024, expectedParentDirectory: dirA);
+        var result = SafeFileOpener.ReadAllBytes(
+            fileInB, maxBytes: 1024, expectedParentDirectory: PathPolicy.CanonicalizeRealPath(dirA));
         result.IsSuccess.Should().BeFalse();
         result.Error!.Kind.Should().Be(ErrorKinds.PathRejected);
         result.Error.Message.Should().Contain("out-of-tree");
@@ -109,8 +110,79 @@ public sealed class SafeFileOpenerTests : IDisposable
         var sibling = Path.Combine(dir, "foo.pdb");
         File.WriteAllBytes(sibling, [0xCA, 0xFE]);
 
-        var result = SafeFileOpener.ReadAllBytes(sibling, maxBytes: 1024, expectedParentDirectory: dir);
+        var result = SafeFileOpener.ReadAllBytes(
+            sibling, maxBytes: 1024, expectedParentDirectory: PathPolicy.CanonicalizeRealPath(dir));
         result.IsSuccess.Should().BeTrue();
         result.Bytes.Should().Equal(0xCA, 0xFE);
+    }
+
+    [Fact]
+    public void ReadAllBytes_returns_descriptor_real_path_for_load_anchor()
+    {
+        // OpenedRealPath is the load-time anchor sibling reads are later checked against.
+        var path = Path.Combine(_tempDir, "anchor.bin");
+        File.WriteAllBytes(path, [0x01]);
+
+        var result = SafeFileOpener.ReadAllBytes(path, maxBytes: 1024);
+
+        result.IsSuccess.Should().BeTrue();
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+        {
+            result.OpenedRealPath.Should().Be(PathPolicy.CanonicalizeRealPath(path));
+        }
+    }
+
+    [Fact]
+    public void ReadAllBytes_rejects_sibling_whose_ancestor_is_swapped_for_an_out_of_tree_symlink()
+    {
+        if (OperatingSystem.IsWindows()) return; // directory symlink creation is privilege-gated
+
+        // Models the residual sibling-PDB ancestor-TOCTOU with the allow-list DISABLED (no verifier):
+        // 'anchor' is the assembly's real directory captured at load. The pdb is then read at the
+        // lexical path anchor/foo.pdb, but 'anchor' has since been swapped for a symlink to 'evil'.
+        // O_NOFOLLOW permits the ancestor traversal (it only guards the leaf), so the open succeeds
+        // and the descriptor's real parent resolves to 'evil' — the load-anchored containment check
+        // must reject it without needing the allow-list.
+        var realDir = Path.Combine(_tempDir, "asm");
+        Directory.CreateDirectory(realDir);
+        var anchor = PathPolicy.CanonicalizeRealPath(realDir); // captured at "load" time
+
+        var evil = Path.Combine(_tempDir, "evil");
+        Directory.CreateDirectory(evil);
+        File.WriteAllBytes(Path.Combine(evil, "foo.pdb"), [0xBA, 0xD0]);
+
+        Directory.Delete(realDir);
+        Directory.CreateSymbolicLink(realDir, evil);
+        var lexicalSibling = Path.Combine(realDir, "foo.pdb"); // realDir -> evil
+
+        var result = SafeFileOpener.ReadAllBytes(
+            lexicalSibling, maxBytes: 1024, expectedParentDirectory: anchor);
+
+        result.IsSuccess.Should().BeFalse("the descriptor's real parent is 'evil', not the load anchor");
+        result.Error!.Kind.Should().Be(ErrorKinds.PathRejected);
+        result.Error.Message.Should().Contain("out-of-tree");
+    }
+
+    [Fact]
+    public void ReadAllBytes_sibling_check_fails_closed_when_descriptor_real_path_unresolvable()
+    {
+        var dir = Path.Combine(_tempDir, "asm");
+        Directory.CreateDirectory(dir);
+        var sibling = Path.Combine(dir, "foo.pdb");
+        File.WriteAllBytes(sibling, [0x00]);
+
+        var prev = SafeFileOpener.DescriptorRealPathResolverOverride;
+        SafeFileOpener.DescriptorRealPathResolverOverride = _ => null;
+        try
+        {
+            var result = SafeFileOpener.ReadAllBytes(
+                sibling, maxBytes: 1024, expectedParentDirectory: PathPolicy.CanonicalizeRealPath(dir));
+            result.IsSuccess.Should().BeFalse();
+            result.Error!.Kind.Should().Be(ErrorKinds.PathRejected);
+        }
+        finally
+        {
+            SafeFileOpener.DescriptorRealPathResolverOverride = prev;
+        }
     }
 }

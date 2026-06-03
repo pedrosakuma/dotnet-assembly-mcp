@@ -183,13 +183,21 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
 
         // 2) Sibling .pdb next to the assembly.
         var sibling = Path.ChangeExtension(module.Path, ".pdb");
-        var expectedDir = Path.GetDirectoryName(module.Path);
         if (!File.Exists(sibling)) return null;
+
+        // Fail closed (#156 follow-up): without a load-time real-directory anchor we cannot prove the
+        // sibling wasn't redirected out of the assembly's real directory by an ancestor-symlink swap
+        // (O_NOFOLLOW only guards the leaf). Skip the sibling rather than read it unanchored. On the
+        // supported platforms (Linux/macOS/Windows) the anchor is always captured, so this only
+        // forgoes sibling-PDB source mapping on platforms whose descriptor real path is unresolvable.
+        if (module.RealDirectory is null) return null;
 
         try
         {
+            // Anchor the containment check on the assembly's real directory captured at load
+            // (#156 follow-up): the sibling's opened real parent must match it.
             var readResult = SafeFileOpener.ReadAllBytes(sibling,
-                SafeFileOpener.DefaultMaxPdbBytes, expectedParentDirectory: expectedDir,
+                SafeFileOpener.DefaultMaxPdbBytes, expectedParentDirectory: module.RealDirectory,
                 verifyOpenedRealPath: _verifyOpenedRealPath);
             if (!readResult.IsSuccess) return null;
             var bytes = readResult.Bytes!;
