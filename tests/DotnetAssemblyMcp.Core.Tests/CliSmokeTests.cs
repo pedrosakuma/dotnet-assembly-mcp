@@ -257,4 +257,47 @@ public sealed class CliSmokeTests
         exit.Should().Be(1);
         error.Should().Contain("--contains");
     }
+
+    [Fact]
+    public void DiffAssemblies_SelfVsSelf_ReportsNoDifferences()
+    {
+        var (exit, output, _) = Invoke("diff-assemblies", SampleLibPath, SampleLibPath);
+
+        exit.Should().Be(0);
+        output.Should().Contain("No public-surface differences.");
+    }
+
+    [Fact]
+    public void DiffAssemblies_DifferentAssembly_RendersAddedAndRemoved()
+    {
+        var v2 = Fixtures.SampleLibV2Fixture.Path;
+        v2.Should().NotBeNull("SampleLibV2 fixture must be built by the test csproj");
+
+        var (exit, output, _) = Invoke("diff-assemblies", SampleLibPath, v2!);
+
+        exit.Should().Be(0);
+        output.Should().Contain("Added types");
+        output.Should().Contain("Changed types");
+        output.Should().Contain("SampleLib.OrderService");
+    }
+
+    [Fact]
+    public void DiffAssemblies_Json_EmitsCompositeEnvelope()
+    {
+        var (exit, output, _) = Invoke("--json", "diff-assemblies", SampleLibPath, SampleLibPath);
+
+        exit.Should().Be(0);
+        output.TrimStart().Should().StartWith("{");
+        output.Should().Contain("\"AddedTypes\"");
+        output.Should().Contain("\"RemovedTypes\"");
+        output.Should().Contain("\"ChangedTypes\"");
+    }
+
+    [Fact]
+    public void DiffAssemblies_BadAssembly_ReturnsErrorExitCode()
+    {
+        var (exit, _, _) = Invoke("diff-assemblies", "/does/not/exist.dll", SampleLibPath);
+
+        exit.Should().Be(1);
+    }
 }

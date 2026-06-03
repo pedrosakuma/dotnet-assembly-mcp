@@ -18,6 +18,7 @@ internal static class AnalyzeCommands
         root.Subcommands.Add(BuildExplainType(context));
         root.Subcommands.Add(BuildExplainMethod(context));
         root.Subcommands.Add(BuildCallGraph(context));
+        root.Subcommands.Add(BuildDiffAssemblies(context));
     }
 
     private static Command BuildExplainType(CliContext context)
@@ -101,6 +102,27 @@ internal static class AnalyzeCommands
                 pr.GetValue(contains),
                 CancellationToken.None);
             return Render(result, pr.GetValue(context.JsonOption), ExplainRenderer.WriteCallGraph);
+        });
+        return command;
+    }
+
+    private static Command BuildDiffAssemblies(CliContext context)
+    {
+        var left = new Argument<string>("left") { Description = "Baseline module MVID or absolute path to the assembly." };
+        var right = new Argument<string>("right") { Description = "Comparand module MVID or absolute path to the assembly." };
+
+        var command = new Command("diff-assemblies", "Diff the public surface of two assemblies: added / removed / changed types and members.");
+        command.Arguments.Add(left);
+        command.Arguments.Add(right);
+        command.SetAction(pr =>
+        {
+            CliRun.Preload(context, pr);
+            AssemblyResult<AssemblyDiff> result = AssemblyAnalysisOperations.DiffAssemblies(
+                context.Engine.Index,
+                pr.GetValue(left)!,
+                pr.GetValue(right)!,
+                CancellationToken.None);
+            return Render(result, pr.GetValue(context.JsonOption), ExplainRenderer.WriteAssemblyDiff);
         });
         return command;
     }

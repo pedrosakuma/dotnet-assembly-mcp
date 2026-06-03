@@ -40,6 +40,19 @@
       Properties="Configuration=$(Configuration)" />
   </Target>
 
+  <!-- SampleLibV2 is intentionally NOT referenced as a ProjectReference: it reuses the SampleLib
+       namespace, so referencing it would introduce duplicate SampleLib.* type names and break
+       compilation of the test project. We only need its .dll on disk for MetadataIndex.Load() in
+       the diff-assemblies fixtures, so we just trigger its build before the test project compiles.
+       It is listed in DotnetAssemblyMcp.slnx so solution-level restore hydrates it; we still pass
+       Restore explicitly so a direct `dotnet build` on this csproj works without a prior restore. -->
+  <Target Name="BuildSampleLibV2Fixture" BeforeTargets="BeforeBuild">
+    <MSBuild
+      Projects="..\fixtures\SampleLibV2\SampleLibV2.csproj"
+      Targets="Restore;Build"
+      Properties="Configuration=$(Configuration)" />
+  </Target>
+
   <!-- Build the counterpart CoreClrSample fixture (git submodule) before tests run, so
        integration tests can load it via MetadataIndex. The submodule may be absent in
        lightweight clones; the target is a no-op in that case and the integration tests
