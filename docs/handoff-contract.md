@@ -126,8 +126,33 @@ Semantics, applied before the underlying resolution:
 | MVID not loaded, hint absent | `module_not_found`. |
 | MVID not loaded, hint present, **on-disk MVID matches** | Open and load the PE idempotently (same code path as `load_assembly`), then resolve. |
 | MVID not loaded, hint present, **on-disk MVID differs** | `mvid_mismatch` carrying both the requested MVID and the MVID actually found at the hinted path. **The wrong binary is not loaded silently.** |
+| MVID not loaded, hint present, **path outside configured allowed roots** | `path_not_allowed` carrying the redacted candidate path. Only enforced when the operator configured an allow-list (see §3.1.1); identity-first resolution is reached *before* this check, so an already-loaded MVID is never blocked. |
 
 The hint is a hint — trust is anchored to the MVID match, never to the path. Producers SHOULD populate the hint from `MethodIdentity.modulePath`.
+
+#### 3.1.1 Untrusted path hints & the allowed-root allow-list
+
+Every path-shaped argument — `load_assembly(path)`, `import_assembly_manifest(entries[].path)`, and every `assemblyPathHint` / `mvidOrPath` — arrives off the LLM-driven handoff wire and is treated as **untrusted**. The consumer never `Assembly.Load`s; it reads metadata via `PEReader`/`MetadataReader` only, and every filesystem load funnels through a single chokepoint that applies, in order:
+
+1. **Absolute-path requirement** (`path_must_be_absolute`) — relative paths are rejected, never canonicalised against the server CWD.
+2. **Symlink / reparse-point rejection** + kernel `O_NOFOLLOW` (Unix) and a 64 MiB size cap (`path_rejected`).
+3. **Allowed-root containment** (`path_not_allowed`) — *opt-in*. The candidate is canonicalised to its **real** on-disk path (every component's symlinks resolved, including ancestors) and must be contained in one of the operator-configured trusted roots.
+4. **MVID verification** before caching (`mvid_mismatch`) — the path is a hint, never an override.
+
+The allow-list is configured by the operator, not the agent:
+
+- `AssemblyMcp:AllowedRoots` — a JSON/config string array of absolute directory roots, **or**
+- `ASSEMBLY_MCP_ALLOWED_ROOTS` — a `PATH`-style (`Path.PathSeparator`-delimited) list.
+
+Semantics:
+
+| Configuration | Behavior |
+|---|---|
+| Nothing configured (default) | Enforcement **disabled** — any absolute path may be loaded, subject to steps 1, 2 and 4. Back-compatible with single-user stdio workflows. |
+| One or more valid roots | Enforcement **active** — a load whose canonical real path is not contained in a root returns `path_not_allowed`. |
+| Configured but every root invalid/relative | **Fail closed** — every load is denied. (A non-absolute root is also warned about on stderr at startup.) |
+
+Because canonicalisation resolves ancestor symlinks, a directory symlink planted *inside* an allowed root that points outside it is rejected; and a canonicalisation failure under active enforcement fails closed.
 
 ### 3.2 `import_assembly_manifest` — bulk handshake from a sidecar producer
 
@@ -354,7 +379,7 @@ When resolution fails, the consumer MUST return a structured error with one of t
 | `token_trimmed`      | The requested method has no body in the target module (trimmed / NativeAOT). |
 | `identity_malformed` | Required field missing or wrong type in the `MethodIdentity` payload. |
 | `invalid_argument`   | A parameter failed validation before any resolution was attempted (e.g. unparseable token, malformed GUID, paired `methodSpec*` fields supplied incompletely). |
-| `path_not_allowed`   | The supplied path is outside the configured search roots and explicit loading is disabled by configuration. |
+| `path_not_allowed`   | The supplied path's canonical real location is outside the operator-configured allowed roots (§3.1.1). Recovery: load from a trusted root, or address the module by its already-loaded MVID. |
 | `batch_too_large`    | Retained for backward compatibility with clients of the dropped `*_batch` tools; no current tool emits it. |
 | `generic_instantiation_unresolvable` | A type-arg name in `genericTypeArguments` (§3.5) did not resolve in any loaded module. Recovery: `load_assembly` for the missing dependency, or supply `assemblyPathHint`. |
 | `generic_instantiation_ambiguous`    | A type-arg name in `genericTypeArguments` (§3.5) resolved in 2+ modules with conflicting MVIDs. Error echoes candidate MVIDs; producer should qualify or consumer should narrow the manifest. |

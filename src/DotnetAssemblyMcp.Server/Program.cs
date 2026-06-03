@@ -104,10 +104,51 @@ return 0;
 static void RegisterCoreServices(IServiceCollection services, IConfiguration configuration)
 {
     services.AddSingleton<IMetadataIndex>(_ =>
-        new MetadataIndex(watchForChanges:
-            configuration.GetValue("AssemblyMcp:WatchForChanges", defaultValue: true)));
+        new MetadataIndex(
+            watchForChanges: configuration.GetValue("AssemblyMcp:WatchForChanges", defaultValue: true),
+            allowedRoots: ReadAllowedRoots(configuration)));
     services.AddSingleton<IDecompiler, Decompiler>();
     services.AddSingleton<IIlDisassembler, IlDisassembler>();
+}
+
+// Untrusted-path-hint contract (#150): opt-in allow-list of trusted load roots. Sources are the
+// 'AssemblyMcp:AllowedRoots' config array and the PathSeparator-delimited ASSEMBLY_MCP_ALLOWED_ROOTS
+// env var. Returns null ONLY when neither source is present (enforcement disabled, back-compatible).
+// If either source is present — even an explicit empty array or a value that yields zero valid
+// roots — a non-null (possibly empty) list is returned so MetadataIndex fails closed (deny all)
+// rather than silently reverting to allow-all.
+static IReadOnlyList<string>? ReadAllowedRoots(IConfiguration configuration)
+{
+    var configured = new List<string>();
+    var present = false;
+
+    var fromConfig = configuration.GetSection("AssemblyMcp:AllowedRoots").Get<string[]>();
+    if (fromConfig is not null) // an empty JSON array is still a deliberate "enforce" signal
+    {
+        present = true;
+        configured.AddRange(fromConfig);
+    }
+
+    var fromEnv = Environment.GetEnvironmentVariable("ASSEMBLY_MCP_ALLOWED_ROOTS");
+    if (!string.IsNullOrWhiteSpace(fromEnv))
+    {
+        present = true;
+        configured.AddRange(fromEnv.Split(
+            Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
+    if (!present) return null; // not configured — enforcement disabled
+
+    foreach (var root in configured)
+    {
+        if (!Path.IsPathFullyQualified(root))
+            Console.Error.WriteLine(
+                $"[assembly-mcp] WARNING: configured allowed root '{root}' is not an absolute path and will be ignored.");
+    }
+    if (configured.Count == 0)
+        Console.Error.WriteLine(
+            "[assembly-mcp] WARNING: an allowed-root allow-list was configured but resolved to zero valid roots; all loads will be denied (fail closed).");
+    return configured;
 }
 
 static Microsoft.Extensions.DependencyInjection.IMcpServerBuilder ConfigureMcpServer(IServiceCollection services) =>
