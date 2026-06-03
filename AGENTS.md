@@ -47,8 +47,10 @@ work tracked in [issue #1](https://github.com/pedrosakuma/dotnet-assembly-mcp/is
 - **Tool surface ~10, justify additions.** Keep the count near 10 and prefer
   Resources / parameters / handle drill-down. Currently shipping 22 — adding the
   23rd requires explicit justification in the PR. See `docs/mcp-conventions.md` §2.1.
-  (This rule is about the **MCP tool** surface only; `Cli` subcommands mirror the same
-  operations 1:1 and do not count against it.)
+  (This rule is about the **MCP tool** surface only; `Cli` subcommands wrap the same
+  Application operations and do not count against it. The two stateful lifecycle tools
+  — `load_assembly` / `list_assemblies` — are intentionally **not** exposed as CLI
+  subcommands, since they have no standalone meaning in a one-shot, stateless CLI.)
 - **Mirror the companion** for build conventions (CPM, warnings-as-errors, slnx,
   `net10.0`, SDK 10.0.201 via `global.json`). Don't invent a new convention "because
   it's our repo" — drift between the two repos is the single biggest cost.

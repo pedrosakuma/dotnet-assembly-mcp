@@ -165,32 +165,25 @@ public sealed class CliSmokeTests
     }
 
     [Fact]
-    public void ListAssemblies_Empty_PrintsCliGuidanceNotMcpToolName()
+    public void Load_Subcommand_IsNotRegistered()
     {
-        var (exit, output, _) = Invoke("list-assemblies");
+        // The stateful 'load' MCP tool has no standalone meaning in a one-shot CLI; it must not
+        // be exposed as a subcommand (the global '--load' option is the priming mechanism instead).
+        var (exit, _, error) = Invoke("load", SampleLibPath);
 
-        exit.Should().Be(0);
-        output.Should().Contain("stateless");
-        output.Should().NotContain("load_assembly");
+        exit.Should().NotBe(0);
+        error.Should().Contain("'load'");
     }
 
     [Fact]
-    public void ListAssemblies_WithLoad_ListsPrimedModule()
+    public void ListAssemblies_Subcommand_IsNotRegistered()
     {
-        var (exit, output, _) = Invoke("list-assemblies", "--load", SampleLibPath);
+        // 'list-assemblies' would only ever echo back what was primed on the same command line,
+        // so it is intentionally not a CLI subcommand.
+        var (exit, _, error) = Invoke("list-assemblies");
 
-        exit.Should().Be(0);
-        output.Should().Contain("SampleLib");
-    }
-
-    [Fact]
-    public void ListAssemblies_Empty_Json_KeepsRawEnvelope()
-    {
-        var (exit, output, _) = Invoke("--json", "list-assemblies");
-
-        exit.Should().Be(0);
-        output.TrimStart().Should().StartWith("{");
-        output.Should().Contain("\"Summary\"");
+        exit.Should().NotBe(0);
+        error.Should().Contain("'list-assemblies'");
     }
 
     [Fact]
