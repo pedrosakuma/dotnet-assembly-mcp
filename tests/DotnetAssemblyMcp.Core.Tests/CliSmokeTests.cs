@@ -135,4 +135,77 @@ public sealed class CliSmokeTests
         exit.Should().Be(0);
         output.Should().Contain("Callers:");
     }
+
+    [Fact]
+    public void ExplainType_Text_RendersGroupedOverview()
+    {
+        var (exit, output, _) = Invoke("explain-type", SampleLibPath, "SampleLib.OrderService");
+
+        exit.Should().Be(0);
+        output.Should().Contain("Type: SampleLib.OrderService");
+        output.Should().Contain("Kind: Class");
+        output.Should().Contain("Methods (");
+        output.Should().Contain("Process");
+    }
+
+    [Fact]
+    public void ExplainType_Json_EmitsCompositeEnvelope()
+    {
+        var (exit, output, _) = Invoke("--json", "explain-type", SampleLibPath, "SampleLib.OrderService");
+
+        exit.Should().Be(0);
+        output.TrimStart().Should().StartWith("{");
+        output.Should().Contain("\"Type\"");
+        output.Should().Contain("\"Methods\"");
+    }
+
+    [Fact]
+    public void ExplainType_UnknownType_ErrorsToStderr()
+    {
+        var (exit, output, error) = Invoke("explain-type", SampleLibPath, "Nope.Missing");
+
+        exit.Should().Be(1);
+        output.Should().BeEmpty();
+        error.Should().Contain("error:");
+    }
+
+    [Fact]
+    public void ExplainMethod_Text_ListsOverloads()
+    {
+        var (exit, output, _) = Invoke("explain-method", SampleLibPath, "SampleLib.OrderService", "Process");
+
+        exit.Should().Be(0);
+        output.Should().Contain("Method: SampleLib.OrderService.Process");
+        output.Should().Contain("(2 overload(s))");
+        output.Should().Contain("Source:");
+    }
+
+    [Fact]
+    public void ExplainMethod_Decompile_PrintsCSharpBody()
+    {
+        var (exit, output, _) = Invoke("explain-method", SampleLibPath, "SampleLib.OrderService", "Compute", "--decompile");
+
+        exit.Should().Be(0);
+        output.Should().Contain("--- C# ---");
+        output.Should().Contain("Compute");
+    }
+
+    [Fact]
+    public void ExplainMethod_ExactMiss_SuggestsContains()
+    {
+        var (exit, _, error) = Invoke("explain-method", SampleLibPath, "SampleLib.OrderService", "Proc");
+
+        exit.Should().Be(1);
+        error.Should().Contain("--contains");
+    }
+
+    [Fact]
+    public void ExplainMethod_Contains_MatchesSubstrings()
+    {
+        var (exit, output, _) = Invoke("explain-method", SampleLibPath, "SampleLib.OrderService", "Proc", "--contains");
+
+        exit.Should().Be(0);
+        output.Should().Contain("[substring match]");
+        output.Should().Contain("ProcessAsync");
+    }
 }
