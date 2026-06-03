@@ -17,6 +17,10 @@
     <PackageVersion Include="MinVer" Version="6.0.0" />
   </ItemGroup>
 
+  <ItemGroup Label="CLI">
+    <PackageVersion Include="System.CommandLine" Version="2.0.8" />
+  </ItemGroup>
+
   <ItemGroup Label="Hosting">
     <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.5" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.5" />
