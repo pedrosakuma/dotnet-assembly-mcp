@@ -167,6 +167,32 @@ static Microsoft.Extensions.DependencyInjection.IMcpServerBuilder ConfigureMcpSe
                 sufficient because two builds of the same assembly have the same name but different
                 MVIDs.
 
+                Exploring an assembly with no MethodIdentity in hand (cold start — you have a
+                .dll but no diagnostic payload):
+
+                  1. `load_assembly` / `list_assemblies` — get a module loaded (by path or MVID).
+                  2. `list_types` — enumerate types (filter by namespacePrefix / nameContains /
+                     kind). Each row carries a `t:<mvid>:0x<token>` type handle.
+                  3. `find_method` — or jump straight to a method by name regex across the whole
+                     module; each hit carries an `m:<mvid>:0x<token>` method handle plus the raw
+                     (moduleVersionId, metadataToken) pair.
+                  4. `list_methods` / `list_members` — drill into a type's methods, fields,
+                     properties and events.
+                  5. Feed the handle (or the moduleVersionId + metadataToken) into `get_method`,
+                     `decompile_method`, `decompile_type`, `get_method_il`, `get_method_source` or
+                     `find_callers`.
+
+                Every `(MVID, token)`-addressed tool also accepts the matching handle directly in
+                its `moduleVersionId` argument (`m:` for method tools, `t:` for `decompile_type`),
+                so a handle returned by one tool pastes straight into the next without splitting it
+                into two fields. The canonical diagnostics handoff — passing the raw
+                (moduleVersionId, metadataToken) pair — keeps working unchanged.
+
+                Reverse-index ("who uses X?") entry points: `find_callers`,
+                `find_type_references`, `find_member_references`, `find_string_references`,
+                `find_attribute_targets`, and `list_derived_types`. `list_attributes` decodes the
+                custom-attribute usage on any handle.
+
                 For the full contract semantics (error kinds, generic instantiation, NativeAOT
                 caveats), read the `assembly://contract/method-identity` resource.
                 """;

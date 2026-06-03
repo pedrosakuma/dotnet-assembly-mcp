@@ -22,7 +22,7 @@ public sealed partial class AssemblyTools
     public static AssemblyResult<MethodSummary> GetMethod(
         IMetadataIndex index,
         [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
-        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string? metadataToken = null,
         [Description(AssemblyToolDescriptions.GetMethod_TypeFullName)] string? typeFullName = null,
         [Description(AssemblyToolDescriptions.GetMethod_MethodName)] string? methodName = null,
         [Description(AssemblyToolDescriptions.GetMethod_GenericArity)] int genericArity = 0,
@@ -33,23 +33,8 @@ public sealed partial class AssemblyTools
         [Description(AssemblyToolDescriptions.GetMethod_MethodSpecMetadataToken)] string? methodSpecMetadataToken = null,
         [Description(AssemblyToolDescriptions.GetMethod_IncludeNativeBody)] bool includeNativeBody = false)
     {
-        if (!Guid.TryParse(moduleVersionId, out var mvid))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{moduleVersionId}' as a GUID.");
-            return AssemblyResult.Fail<MethodSummary>(
-                "moduleVersionId is not a valid GUID.",
-                err,
-                AssemblyErrorRecovery.For(err));
-        }
-
-        if (!TryParseToken(metadataToken, out var token))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{metadataToken}' as a 32-bit metadata token.");
-            return AssemblyResult.Fail<MethodSummary>(
-                "metadataToken is not a valid integer.",
-                err,
-                AssemblyErrorRecovery.For(err));
-        }
+        if (!TryResolveMethodTokens(moduleVersionId, metadataToken, out var mvid, out var token, out var idErr))
+            return AssemblyResult.Fail<MethodSummary>(idErr!.Message, idErr, AssemblyErrorRecovery.For(idErr));
 
         if (index.EnsureLoaded(mvid, assemblyPathHint) is { } loadErr)
             return AssemblyResult.Fail<MethodSummary>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
@@ -134,27 +119,13 @@ public sealed partial class AssemblyTools
         IDecompiler decompiler,
         IMetadataIndex index,
         [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
-        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string? metadataToken = null,
         [Description(AssemblyToolDescriptions.DecompileMethod_MaxChars)] int maxChars = 0,
         [Description(AssemblyToolDescriptions.Common_AssemblyPathHint)] string? assemblyPathHint = null,
         CancellationToken cancellationToken = default)
     {
-        if (!Guid.TryParse(moduleVersionId, out var mvid))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{moduleVersionId}' as a GUID.");
-            return AssemblyResult.Fail<DecompiledMethod>(
-                "moduleVersionId is not a valid GUID.",
-                err,
-                AssemblyErrorRecovery.For(err));
-        }
-        if (!TryParseToken(metadataToken, out var token))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{metadataToken}' as a 32-bit metadata token.");
-            return AssemblyResult.Fail<DecompiledMethod>(
-                "metadataToken is not a valid integer.",
-                err,
-                AssemblyErrorRecovery.For(err));
-        }
+        if (!TryResolveMethodTokens(moduleVersionId, metadataToken, out var mvid, out var token, out var idErr))
+            return AssemblyResult.Fail<DecompiledMethod>(idErr!.Message, idErr, AssemblyErrorRecovery.For(idErr));
 
         if (index.EnsureLoaded(mvid, assemblyPathHint) is { } loadErr)
             return AssemblyResult.Fail<DecompiledMethod>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
@@ -187,28 +158,14 @@ public sealed partial class AssemblyTools
     public static AssemblyResult<DecompiledType> DecompileType(
         IDecompiler decompiler,
         IMetadataIndex index,
-        [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
-        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.DecompileType_ModuleVersionId)] string moduleVersionId,
+        [Description(AssemblyToolDescriptions.DecompileType_MetadataToken)] string? metadataToken = null,
         [Description(AssemblyToolDescriptions.DecompileType_MaxChars)] int maxChars = 0,
         [Description(AssemblyToolDescriptions.Common_AssemblyPathHint)] string? assemblyPathHint = null,
         CancellationToken cancellationToken = default)
     {
-        if (!Guid.TryParse(moduleVersionId, out var mvid))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{moduleVersionId}' as a GUID.");
-            return AssemblyResult.Fail<DecompiledType>(
-                "moduleVersionId is not a valid GUID.",
-                err,
-                AssemblyErrorRecovery.For(err));
-        }
-        if (!TryParseToken(metadataToken, out var token))
-        {
-            var err = new AssemblyError(ErrorKinds.InvalidArgument, $"could not parse '{metadataToken}' as a 32-bit metadata token.");
-            return AssemblyResult.Fail<DecompiledType>(
-                "metadataToken is not a valid integer.",
-                err,
-                AssemblyErrorRecovery.For(err));
-        }
+        if (!TryResolveTypeTokens(moduleVersionId, metadataToken, out var mvid, out var token, out var idErr))
+            return AssemblyResult.Fail<DecompiledType>(idErr!.Message, idErr, AssemblyErrorRecovery.For(idErr));
 
         if (index.EnsureLoaded(mvid, assemblyPathHint) is { } loadErr)
             return AssemblyResult.Fail<DecompiledType>(loadErr.Message, loadErr, AssemblyErrorRecovery.For(loadErr));
@@ -246,7 +203,7 @@ public sealed partial class AssemblyTools
         IIlDisassembler disassembler,
         IMetadataIndex index,
         [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
-        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string? metadataToken = null,
         [Description(AssemblyToolDescriptions.GetMethodIl_Format)] string format = "raw",
         [Description(AssemblyToolDescriptions.GetMethodIl_MaxBytes)] int maxBytes = 0,
         [Description(AssemblyToolDescriptions.GetMethodIl_MaxLines)] int maxLines = 0,
@@ -480,7 +437,7 @@ public sealed partial class AssemblyTools
     public static AssemblyResult<FindCallersResult> FindCallers(
         IMetadataIndex index,
         [Description(AssemblyToolDescriptions.FindCallers_ModuleVersionId)] string moduleVersionId,
-        [Description(AssemblyToolDescriptions.FindCallers_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.FindCallers_MetadataToken)] string? metadataToken = null,
         [Description(AssemblyToolDescriptions.Common_AssemblyPathHint)] string? assemblyPathHint = null,
         [Description(AssemblyToolDescriptions.FindCallers_GenericTypeArguments)] string[]? genericTypeArguments = null,
         [Description(AssemblyToolDescriptions.FindCallers_GenericMethodArguments)] string[]? genericMethodArguments = null,
@@ -537,7 +494,7 @@ public sealed partial class AssemblyTools
     public static AssemblyResult<MethodSourceLocation> GetMethodSource(
         IMetadataIndex index,
         [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
-        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string metadataToken,
+        [Description(AssemblyToolDescriptions.Common_MetadataToken)] string? metadataToken = null,
         [Description(AssemblyToolDescriptions.Common_AssemblyPathHint)] string? assemblyPathHint = null,
         CancellationToken cancellationToken = default)
     {

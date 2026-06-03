@@ -48,24 +48,110 @@ public sealed partial class AssemblyTools
     }
 
 
-    private static bool TryParseIdentity(string moduleVersionId, string metadataToken,
+    private static bool TryParseIdentity(string moduleVersionId, string? metadataToken,
         out MethodIdentity identity, out AssemblyError? error)
     {
-        if (!Guid.TryParse(moduleVersionId, out var mvid))
-        {
-            identity = default!;
-            error = new AssemblyError(ErrorKinds.InvalidArgument,
-                $"could not parse '{moduleVersionId}' as a GUID.");
+        identity = default!;
+        if (!TryResolveMethodTokens(moduleVersionId, metadataToken, out var mvid, out var token, out error))
             return false;
-        }
-        if (!TryParseToken(metadataToken, out var token))
-        {
-            identity = default!;
-            error = new AssemblyError(ErrorKinds.InvalidArgument,
-                $"could not parse '{metadataToken}' as a 32-bit metadata token.");
-            return false;
-        }
         identity = new MethodIdentity(mvid, token);
+        return true;
+    }
+
+    /// <summary>
+    /// Resolves the <c>(mvid, token)</c> pair for a method-addressed tool. <paramref name="moduleVersionId"/>
+    /// accepts EITHER the canonical handoff anchor — a bare MVID GUID, in which case
+    /// <paramref name="metadataToken"/> is required — OR (intra-server convenience) a full method handle
+    /// <c>m:&lt;mvid&gt;:0x&lt;token&gt;</c> as emitted by <c>list_methods</c> / <c>find_method</c>, in which
+    /// case <paramref name="metadataToken"/> may be omitted and, if supplied, is cross-checked.
+    /// </summary>
+    private static bool TryResolveMethodTokens(string moduleVersionId, string? metadataToken,
+        out Guid mvid, out int token, out AssemblyError? error)
+        => TryResolveTokens(moduleVersionId, metadataToken, HandleKind.Method, out mvid, out token, out error);
+
+    /// <summary>
+    /// Type-addressed analogue of <see cref="TryResolveMethodTokens"/>: accepts a bare MVID GUID
+    /// (then <paramref name="metadataToken"/> — a TypeDef token — is required) or a full type handle
+    /// <c>t:&lt;mvid&gt;:0x&lt;typeToken&gt;</c> as emitted by <c>list_types</c> / <c>get_type</c>.
+    /// </summary>
+    private static bool TryResolveTypeTokens(string moduleVersionId, string? metadataToken,
+        out Guid mvid, out int token, out AssemblyError? error)
+        => TryResolveTokens(moduleVersionId, metadataToken, HandleKind.Type, out mvid, out token, out error);
+
+    private static readonly string[] HandlePrefixes = { "pa:", "a:", "t:", "m:", "f:", "p:", "e:" };
+
+    private static bool TryResolveTokens(string moduleVersionId, string? metadataToken,
+        HandleKind expectedKind, out Guid mvid, out int token, out AssemblyError? error)
+    {
+        mvid = Guid.Empty;
+        token = 0;
+
+        var handleForm = expectedKind == HandleKind.Type
+            ? "t:<mvid>:0x<typeToken>"
+            : "m:<mvid>:0x<methodToken>";
+
+        if (string.IsNullOrWhiteSpace(moduleVersionId))
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument, "moduleVersionId is required.");
+            return false;
+        }
+
+        // Intra-server convenience: a full handle carries both anchors in one string.
+        if (HandleSyntax.TryParseAny(moduleVersionId, out var kind, out mvid, out token, out _))
+        {
+            if (kind != expectedKind)
+            {
+                error = new AssemblyError(ErrorKinds.InvalidArgument,
+                    $"moduleVersionId '{moduleVersionId}' is a {kind} handle; expected a GUID or '{handleForm}'.");
+                return false;
+            }
+            if (!string.IsNullOrWhiteSpace(metadataToken))
+            {
+                if (!TryParseToken(metadataToken!, out var explicitToken))
+                {
+                    error = new AssemblyError(ErrorKinds.InvalidArgument,
+                        $"could not parse metadataToken '{metadataToken}' as a 32-bit metadata token.");
+                    return false;
+                }
+                if (explicitToken != token)
+                {
+                    error = new AssemblyError(ErrorKinds.InvalidArgument,
+                        $"moduleVersionId handle token 0x{token:X8} does not match metadataToken 0x{explicitToken:X8}.");
+                    return false;
+                }
+            }
+            error = null;
+            return true;
+        }
+
+        // Looks like a (malformed or wrong-kind) handle but did not parse — give a targeted message
+        // instead of the confusing "not a valid GUID" fallthrough.
+        if (HandlePrefixes.Any(p => moduleVersionId.AsSpan().TrimStart().StartsWith(p, StringComparison.Ordinal)))
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse moduleVersionId '{moduleVersionId}' as a handle. Expected a GUID or '{handleForm}'.");
+            return false;
+        }
+
+        // Canonical handoff pair: GUID + required token.
+        if (!Guid.TryParse(moduleVersionId, out mvid))
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse '{moduleVersionId}' as a GUID or '{handleForm}' handle.");
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(metadataToken))
+        {
+            error = new AssemblyError(ErrorKinds.IdentityMalformed,
+                $"metadataToken is required when moduleVersionId is a GUID; pass metadataToken or use a full '{handleForm}' handle.");
+            return false;
+        }
+        if (!TryParseToken(metadataToken!, out token))
+        {
+            error = new AssemblyError(ErrorKinds.InvalidArgument,
+                $"could not parse metadataToken '{metadataToken}' as a 32-bit metadata token.");
+            return false;
+        }
         error = null;
         return true;
     }
