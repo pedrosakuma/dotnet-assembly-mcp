@@ -24,6 +24,7 @@ ARG MINVER_VERSION_OVERRIDE
 # Bring in the files needed to restore first so the layer caches well.
 COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/DotnetAssemblyMcp.Core/DotnetAssemblyMcp.Core.csproj src/DotnetAssemblyMcp.Core/
+COPY src/DotnetAssemblyMcp.Application/DotnetAssemblyMcp.Application.csproj src/DotnetAssemblyMcp.Application/
 COPY src/DotnetAssemblyMcp.Server/DotnetAssemblyMcp.Server.csproj src/DotnetAssemblyMcp.Server/
 
 RUN dotnet restore src/DotnetAssemblyMcp.Server/DotnetAssemblyMcp.Server.csproj
