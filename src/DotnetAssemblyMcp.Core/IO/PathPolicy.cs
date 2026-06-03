@@ -80,6 +80,44 @@ public static class PathPolicy
         return (null, Denied(fullPath, parameterName));
     }
 
+    /// <summary>
+    /// Containment-only re-check for a path the caller already knows to be canonical/real (e.g. the
+    /// kernel-reported real path of an <em>open</em> file descriptor). Unlike
+    /// <see cref="RequireWithinRoots"/> this does <strong>not</strong> re-canonicalise the candidate —
+    /// re-stat'ing a string path would itself be racy. It is the post-open half of the
+    /// untrusted-path-hint TOCTOU defense (#156): after the file is open, verify the descriptor's
+    /// real path is still contained in a trusted root, catching an ancestor directory that was
+    /// swapped for an out-of-root symlink between canonicalisation and open. <paramref name="canonicalRoots"/>
+    /// are assumed already canonical (the same list <see cref="RequireWithinRoots"/> consumes).
+    /// </summary>
+    public static AssemblyError? RequireRealPathWithinRoots(
+        string canonicalRealPath, IReadOnlyList<string> canonicalRoots, string parameterName = "path")
+    {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        foreach (var root in canonicalRoots)
+        {
+            if (IsWithin(canonicalRealPath, root, comparison)) return null;
+        }
+        return Denied(canonicalRealPath, parameterName);
+    }
+
+    /// <summary>
+    /// Builds the post-open descriptor verifier for the untrusted-path-hint TOCTOU defense (#156),
+    /// or <c>null</c> when enforcement is disabled (<paramref name="canonicalRoots"/> is <c>null</c>).
+    /// The returned delegate is the <c>verifyOpenedRealPath</c> callback consumed by
+    /// <see cref="SafeFileOpener.ReadAllBytes(string,long,string?,Func{string,AssemblyError?})"/>:
+    /// it re-checks an opened descriptor's kernel real path is contained in a trusted root.
+    /// Centralised so every reopen path (module load, decompile, IL, sibling-PDB) builds an
+    /// identical verifier instead of duplicating the lambda.
+    /// </summary>
+    public static Func<string, AssemblyError?>? BuildRealPathVerifier(
+        IReadOnlyList<string>? canonicalRoots, string parameterName = "path")
+        => canonicalRoots is null
+            ? null
+            : realPath => RequireRealPathWithinRoots(realPath, canonicalRoots, parameterName);
+
     private static AssemblyError Denied(string fullPath, string parameterName) =>
         new(ErrorKinds.PathNotAllowed,
             $"{parameterName} is outside the configured allowed roots: {ErrorRedactor.RedactPath(fullPath)}.");

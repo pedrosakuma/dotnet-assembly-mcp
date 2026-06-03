@@ -42,9 +42,10 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
     // cannot distinguish "parked" from "disposed but still usable".
     internal int GraveyardCount => _graveyard.Count;
 
-    public PdbResolver(MethodResolver methods)
+    public PdbResolver(MethodResolver methods, IReadOnlyList<string>? allowedRoots = null)
     {
         _methods = methods;
+        _verifyOpenedRealPath = PathPolicy.BuildRealPathVerifier(allowedRoots);
         _sourceCache = new ModuleScopedCache<PdbBox>(
             onEvict: box =>
             {
@@ -70,6 +71,7 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
         new("0E8A571B-6926-466E-B4AD-8AB04611F5FE");
 
     private readonly MethodResolver _methods;
+    private readonly Func<string, AssemblyError?>? _verifyOpenedRealPath;
 
     // Wrapper so we can cache the "no PDB found" negative result alongside successful hits
     // without conflating it with a cache miss (the helper requires a reference-type payload).
@@ -163,7 +165,7 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
             Found: false, File: null, StartLine: null, EndLine: null, SourceLink: null,
             PdbKind: pdb.Kind, PdbAge: pdb.Age, Reason: reason);
 
-    private static PdbHandle? TryOpenPdb(ModuleHandle module)
+    private PdbHandle? TryOpenPdb(ModuleHandle module)
     {
         // 1) Embedded portable PDB.
         try
@@ -187,7 +189,8 @@ internal sealed class PdbResolver : IModuleScopedCache, IDisposable
         try
         {
             var readResult = SafeFileOpener.ReadAllBytes(sibling,
-                SafeFileOpener.DefaultMaxPdbBytes, expectedParentDirectory: expectedDir);
+                SafeFileOpener.DefaultMaxPdbBytes, expectedParentDirectory: expectedDir,
+                verifyOpenedRealPath: _verifyOpenedRealPath);
             if (!readResult.IsSuccess) return null;
             var bytes = readResult.Bytes!;
             // Portable PDB blobs start with the ECMA-335 metadata signature "BSJB" (0x424A5342).

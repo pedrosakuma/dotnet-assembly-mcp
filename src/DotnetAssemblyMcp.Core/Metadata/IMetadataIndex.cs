@@ -47,6 +47,15 @@ public interface IMetadataIndex
     IReadOnlyDictionary<Guid, string> PathHints { get; }
 
     /// <summary>
+    /// Operator-configured trusted roots for the untrusted-path-hint contract (#150), already
+    /// canonicalised, or <c>null</c> when allow-list enforcement is disabled. Exposed so the
+    /// Tier-2+ reopen paths (decompile, IL, sibling-PDB) can build the same post-open
+    /// descriptor verifier (#156) that <c>ModuleStore</c> applies at load time, closing the
+    /// ancestor-directory TOCTOU window on every file descriptor rather than just the first.
+    /// </summary>
+    IReadOnlyList<string>? AllowedRoots { get; }
+
+    /// <summary>
     /// Installs the per-directory <see cref="System.IO.FileSystemWatcher"/> for the path's
     /// directory without opening the PE. No-op when the index was constructed without
     /// <c>watchForChanges</c>. Used by <c>import_assembly_manifest</c> in <c>lazy</c> mode

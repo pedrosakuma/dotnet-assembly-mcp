@@ -299,7 +299,8 @@ public sealed class Decompiler : IDecompiler, IDisposable
         // ModuleStore enforced at load time. CSharpDecompiler's (string) constructor uses
         // PEFile(string) which calls File.OpenRead under the hood — that path does NOT honor
         // O_NOFOLLOW. We hand it a MemoryStream over already-validated bytes instead.
-        var streamResult = IO.SafeFileOpener.OpenReadAsStream(modulePath, IO.SafeFileOpener.DefaultMaxAssemblyBytes);
+        var streamResult = IO.SafeFileOpener.OpenReadAsStream(modulePath, IO.SafeFileOpener.DefaultMaxAssemblyBytes,
+            verifyOpenedRealPath: IO.PathPolicy.BuildRealPathVerifier(_index.AllowedRoots));
         if (!streamResult.IsSuccess)
             return new EngineResult(null, null, streamResult.Error);
 

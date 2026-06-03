@@ -31,6 +31,7 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
     public static readonly TimeSpan WatchDebounce = ModuleStore.WatchDebounce;
 
     private readonly ModuleStore _store;
+    private readonly IReadOnlyList<string>? _allowedRoots;
     private int _disposed;
 
     // Extracted per-module caches (#82). Each implements IModuleScopedCache and is registered
@@ -72,6 +73,7 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
     public MetadataIndex(bool watchForChanges, IReadOnlyList<string>? allowedRoots)
     {
         _store = new ModuleStore(watchForChanges, allowedRoots);
+        _allowedRoots = _store.AllowedRoots;
 
         _xrefIndex = new XrefIndex(_xrefCacheDir);
         _stringIndex = new StringIndex(_store);
@@ -79,7 +81,7 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
         _fieldAccessIndex = new FieldAccessIndex(_store, FindCallers);
         _methodResolver = new MethodResolver(_store);
         _ilBodyReader = new IlBodyReader(_methodResolver);
-        _pdbResolver = new PdbResolver(_methodResolver);
+        _pdbResolver = new PdbResolver(_methodResolver, _allowedRoots);
         _typeNavigation = new TypeNavigationIndex(_store);
 
         // Subscriber list for module-reload fan-out (#82). Each entry is invalidated when a
@@ -145,6 +147,9 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
 
     /// <inheritdoc />
     public IReadOnlyDictionary<Guid, string> PathHints => _store.PathHints;
+
+    /// <inheritdoc />
+    public IReadOnlyList<string>? AllowedRoots => _allowedRoots;
 
     /// <inheritdoc />
     public void WatchPath(string path) => _store.WatchPath(path);

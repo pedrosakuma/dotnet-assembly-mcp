@@ -65,6 +65,13 @@ internal sealed class ModuleStore : IDisposable
         _allowedRoots = CanonicalizeRoots(allowedRoots);
     }
 
+    /// <summary>
+    /// The canonicalised allow-list roots actually enforced by this store (<c>null</c> when
+    /// enforcement is disabled). Exposed so sibling Tier-2+ caches can build the same post-open
+    /// descriptor verifier (#156) on their own reopen paths.
+    /// </summary>
+    internal IReadOnlyList<string>? AllowedRoots => _allowedRoots;
+
     private static List<string>? CanonicalizeRoots(IReadOnlyList<string>? roots)
     {
         if (roots is null) return null; // enforcement disabled
@@ -291,13 +298,17 @@ internal sealed class ModuleStore : IDisposable
         var (resolvedPath, rootErr) = PathPolicy.ResolveWithinRoots(fullPath, _allowedRoots);
         if (rootErr is not null) return new OpenedModule(null, null, null, rootErr);
         var openPath = resolvedPath!;
+        // Post-open ancestor-TOCTOU verifier (#156): only meaningful when enforcement is active.
+        // Re-checks the opened descriptor's kernel real path is still inside an allowed root.
+        var verifyOpenedRealPath = PathPolicy.BuildRealPathVerifier(_allowedRoots);
         try
         {
             // SafeFileOpener enforces size cap and reparse-point rejection before allocation.
             // The PEReader is backed by a MemoryStream so the file on disk stays unlocked —
             // required for the Tier-1 watcher to observe rewrites on Windows where
             // File.Move(overwrite: true) needs the destination free of open writable handles.
-            var readResult = SafeFileOpener.ReadAllBytes(openPath, SafeFileOpener.DefaultMaxAssemblyBytes);
+            var readResult = SafeFileOpener.ReadAllBytes(
+                openPath, SafeFileOpener.DefaultMaxAssemblyBytes, verifyOpenedRealPath: verifyOpenedRealPath);
             if (!readResult.IsSuccess)
             {
                 return new OpenedModule(null, null, null, readResult.Error);
