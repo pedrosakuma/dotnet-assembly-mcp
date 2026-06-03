@@ -79,6 +79,10 @@ jobs:
             -c Release \
             -o artifacts \
             /p:MinVerVersionOverride=${{ needs.version.outputs.version }}
+          dotnet pack src/DotnetAssemblyMcp.Cli/DotnetAssemblyMcp.Cli.csproj \
+            -c Release \
+            -o artifacts \
+            /p:MinVerVersionOverride=${{ needs.version.outputs.version }}
       - name: Attest nupkg provenance
         uses: actions/attest-build-provenance@v4
         with:
