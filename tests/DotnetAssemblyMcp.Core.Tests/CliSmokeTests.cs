@@ -208,4 +208,53 @@ public sealed class CliSmokeTests
         output.Should().Contain("[substring match]");
         output.Should().Contain("ProcessAsync");
     }
+
+    [Fact]
+    public void CallGraph_Text_RendersTransitiveCallerTree()
+    {
+        var (exit, output, _) = Invoke("callgraph", SampleLibPath, "SampleLib.OrderService", "Compute", "--depth", "3");
+
+        exit.Should().Be(0);
+        output.Should().Contain("Call graph: SampleLib.OrderService.Compute");
+        output.Should().Contain("Process");
+        output.Should().Contain("MoveNext");
+    }
+
+    [Fact]
+    public void CallGraph_DepthLimit_MarksUnexpandedCallers()
+    {
+        var (exit, output, _) = Invoke("callgraph", SampleLibPath, "SampleLib.OrderService", "Compute", "--depth", "1");
+
+        exit.Should().Be(0);
+        output.Should().Contain("more callers not shown");
+    }
+
+    [Fact]
+    public void CallGraph_MaxNodes_FlagsTruncation()
+    {
+        var (exit, output, _) = Invoke("callgraph", SampleLibPath, "SampleLib.OrderService", "Compute", "--max-nodes", "1");
+
+        exit.Should().Be(0);
+        output.Should().Contain("truncated");
+    }
+
+    [Fact]
+    public void CallGraph_Json_EmitsCompositeEnvelope()
+    {
+        var (exit, output, _) = Invoke("--json", "callgraph", SampleLibPath, "SampleLib.OrderService", "Compute");
+
+        exit.Should().Be(0);
+        output.TrimStart().Should().StartWith("{");
+        output.Should().Contain("\"Roots\"");
+        output.Should().Contain("\"NodeCount\"");
+    }
+
+    [Fact]
+    public void CallGraph_ExactMiss_ReturnsErrorExitCode()
+    {
+        var (exit, _, error) = Invoke("callgraph", SampleLibPath, "SampleLib.OrderService", "Proces");
+
+        exit.Should().Be(1);
+        error.Should().Contain("--contains");
+    }
 }
