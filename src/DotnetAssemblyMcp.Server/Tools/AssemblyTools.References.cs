@@ -81,7 +81,7 @@ public sealed partial class AssemblyTools
         IMetadataIndex index,
         [Description(AssemblyToolDescriptions.FindAttributeTargets_AttributeTypeFullName)] string attributeTypeFullName,
         [Description(AssemblyToolDescriptions.Common_ScopeMvidOrPath)] string? mvidOrPath = null,
-        [Description(AssemblyToolDescriptions.FindAttributeTargets_TargetKinds)] string? targetKinds = null,
+        [Description(AssemblyToolDescriptions.FindAttributeTargets_TargetKinds)] string[]? targetKinds = null,
         [Description(AssemblyToolDescriptions.Common_MaxHitsDescription)] int maxHits = 0,
         CancellationToken cancellationToken = default)
     {
@@ -92,18 +92,24 @@ public sealed partial class AssemblyTools
         }
 
         HashSet<AttributeTargetKind>? kindFilter = null;
-        if (!string.IsNullOrWhiteSpace(targetKinds))
+        if (targetKinds is { Length: > 0 })
         {
             kindFilter = new HashSet<AttributeTargetKind>();
-            foreach (var raw in targetKinds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            // Accept both the array shape (["type", "method"]) and a lenient comma-separated
+            // spelling within any single element (["type,method"]).
+            foreach (var element in targetKinds)
             {
-                if (!Enum.TryParse<AttributeTargetKind>(raw, ignoreCase: true, out var k))
+                if (string.IsNullOrWhiteSpace(element)) continue;
+                foreach (var raw in element.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
                 {
-                    var err = new AssemblyError(ErrorKinds.InvalidArgument,
-                        $"unknown targetKind '{raw}'. Allowed: assembly, type, method, parameter, field, property, event.");
-                    return AssemblyResult.Fail<FindAttributeTargetsResult>(err.Message, err);
+                    if (!Enum.TryParse<AttributeTargetKind>(raw, ignoreCase: true, out var k))
+                    {
+                        var err = new AssemblyError(ErrorKinds.InvalidArgument,
+                            $"unknown targetKind '{raw}'. Allowed: assembly, type, method, parameter, field, property, event.");
+                        return AssemblyResult.Fail<FindAttributeTargetsResult>(err.Message, err);
+                    }
+                    kindFilter.Add(k);
                 }
-                kindFilter.Add(k);
             }
         }
 
