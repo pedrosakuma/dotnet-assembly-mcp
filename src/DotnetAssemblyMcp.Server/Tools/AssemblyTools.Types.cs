@@ -15,7 +15,7 @@ public sealed partial class AssemblyTools
         Name = "list_types",
         Title = "List types in a loaded assembly with paging and filtering",
         Destructive = false,
-        ReadOnly = false,
+        ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(AssemblyToolDescriptions.ListTypes_Summary)]
@@ -91,7 +91,7 @@ public sealed partial class AssemblyTools
         Name = "list_assembly_references",
         Title = "List AssemblyRef rows (external dependencies) of a module",
         Destructive = false,
-        ReadOnly = false,
+        ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(AssemblyToolDescriptions.ListAssemblyReferences_Summary)]
@@ -139,7 +139,19 @@ public sealed partial class AssemblyTools
         var summary = p.Resources.Count == 0
             ? "Module declares no ManifestResource rows."
             : $"{p.Resources.Count} resource(s).";
-        return AssemblyResult.Ok(p, summary);
+
+        // Resource bytes are out of scope for this server, so the useful next step is either to
+        // load a satellite assembly that owns forwarded (localized) resources, or to keep
+        // exploring the current module's types.
+        var forwarded = p.Resources.FirstOrDefault(r =>
+            r.Implementation == ResourceImplementationKind.ForwardedToAssembly);
+        NextActionHint hint = forwarded is not null
+            ? new NextActionHint("load_assembly",
+                $"Resource(s) are forwarded to '{forwarded.LinkedAssemblyName}' (e.g. a satellite "
+                + ".resources.dll); locate that assembly on disk and load_assembly it to inspect them.")
+            : new NextActionHint("list_types", "Enumerate the module's types to keep exploring.",
+                new Dictionary<string, object?> { ["mvidOrPath"] = mvid.ToString("D") });
+        return AssemblyResult.Ok(p, summary, hint);
     }
     [McpServerTool(
         Name = "list_attributes",

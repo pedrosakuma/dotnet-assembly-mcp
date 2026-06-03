@@ -1,6 +1,6 @@
 # dotnet-assembly-mcp
 
-> **Status:** 20 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool`, Docker image, and self-contained single-file binaries. Latest release: [`v0.14.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases) — collapsed `find_member_references` (field/property/event in one tool) and `get_method_il(format=raw|text|scan)` (issue #83, breaking).
+> **Status:** 22 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool`, Docker image, and self-contained single-file binaries. Latest release: [`v0.14.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases) — collapsed `find_member_references` (field/property/event in one tool) and `get_method_il(format=raw|text|scan)` (issue #83, breaking).
 
 An **MCP server** for *static* navigation of compiled .NET assemblies — types, methods, attributes, signatures, IL, cross-references, and on-demand decompilation — designed as a **token-efficient alternative to feeding source code into an LLM context**.
 
@@ -146,6 +146,7 @@ All tools share the same response envelope (`summary`, `data`, `hints`, `error`)
 | `load_assembly` | Load a `.dll`/`.exe` from disk (idempotent by MVID) |
 | `list_assemblies` | List currently loaded modules |
 | `list_assembly_references` | Outbound `AssemblyRef` rows for one module |
+| `list_resources` | `ManifestResource` rows (embedded resources) for one module |
 | `import_assembly_manifest` | Bulk-register a list of paths under configured roots |
 
 ### Type & method enumeration (Tier-1)
@@ -165,6 +166,7 @@ All tools share the same response envelope (`summary`, `data`, `hints`, `error`)
 | `get_method` | Resolve `(mvid, token)` to a method summary; accepts `genericTypeArguments` / `genericMethodArguments` for a closed signature view |
 | `get_method_il` | IL reader for a method, dispatched by `format`: `raw` (hex IL bytes + max-stack + counts), `text` (ildasm-style textual dump, capped + LRU-cached), `scan` (structured outbound references — calls, fields, types, strings) |
 | `decompile_method` | C# body via ICSharpCode.Decompiler (hard-capped, LRU-cached) |
+| `decompile_type` | C# decompilation of a whole TypeDef — members in declaration order (hard-capped, LRU-cached) |
 | `get_method_source` | PDB-resolved file/lines plus SourceLink URL (embedded PDB or sibling `.pdb`) |
 
 ### Reverse cross-reference (Tier-4)

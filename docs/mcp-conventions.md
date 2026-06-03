@@ -38,9 +38,9 @@ samples|fixtures/
 
 ### 2.1 Budget: **~10 tools, justify every addition**
 
-Anthropic recommends ≤10 tools per LLM context. This server currently exposes **20**
+Anthropic recommends ≤10 tools per LLM context. This server currently exposes **22**
 because the consumer-side handoff (§3.5) plus the full Tier-4 cross-reference suite
-each earn their slot — but the bar for adding the 21st must stay high. Before
+each earn their slot — but the bar for adding the 23rd must stay high. Before
 adding a new tool, check the alternatives:
 
 1. Extend an existing tool with a parameter, or
@@ -54,13 +54,14 @@ If you still need a new tool, justify it in the PR description: which producer
 hotspot or agent workflow needs it, why a Resource or parameter wouldn't carry the
 same payload, and what the total count will be after the addition.
 
-Current surface (20 tools — keep this table in sync with `AssemblyTools.cs`):
+Current surface (22 tools — keep this table in sync with `AssemblyTools.cs`):
 
 | Tool | Purpose | Tier |
 |---|---|---|
 | `load_assembly` | Register an explicit path outside configured search roots | n/a |
 | `list_assemblies` | Enumerate currently loaded modules (MVID, name) | T1 |
 | `list_assembly_references` | Outbound `AssemblyRef` table for a module | T1 |
+| `list_resources` | Enumerate `ManifestResource` rows (embedded resources) of a module | T1 |
 | `import_assembly_manifest` | Bulk register a producer's path → MVID map | n/a |
 | `list_types` | Enumerate type definitions for a module (paged) | T1 |
 | `get_type` | Type summary by `(MVID, typeToken)` | T1 |
@@ -72,6 +73,7 @@ Current surface (20 tools — keep this table in sync with `AssemblyTools.cs`):
 | `get_method` | Method summary by `(MVID, token)`. Optional `includeNativeBody=true` adds R2R native-body handoff (issue #74). | T1 |
 | `get_method_il` | IL reader, dispatched by `format`: `raw` (hex bytes), `text` (ildasm-style dump), `scan` (structured outbound refs) | T2/T2.5 |
 | `decompile_method` | C# decompilation by `(MVID, token)` | T3 |
+| `decompile_type` | C# decompilation of a whole TypeDef by `(MVID, typeToken)` | T3 |
 | `get_method_source` | PDB second-chance source location | T2 |
 | `find_callers` | Inbound method xref | T4 |
 | `find_type_references` | Inbound type xref | T4 |

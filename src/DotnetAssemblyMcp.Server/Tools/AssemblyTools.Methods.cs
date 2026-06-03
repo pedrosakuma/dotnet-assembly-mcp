@@ -334,7 +334,7 @@ public sealed partial class AssemblyTools
         Name = "list_methods",
         Title = "List methods of a type with paging and name filtering",
         Destructive = false,
-        ReadOnly = false,
+        ReadOnly = true,
         Idempotent = true,
         UseStructuredContent = true)]
     [Description(AssemblyToolDescriptions.ListMethods_Summary)]
