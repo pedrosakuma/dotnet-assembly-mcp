@@ -32,6 +32,11 @@ work tracked in [issue #1](https://github.com/pedrosakuma/dotnet-assembly-mcp/is
 
 - **Never reference MCP packages from `DotnetAssemblyMcp.Core`.** Core is the
   testable domain; the MCP attributes live in `Server`.
+- **Tool orchestration lives in `DotnetAssemblyMcp.Application`, not `Server`.** The
+  parsing / generic-resolution / error-mapping logic is in `AssemblyOperations.*`
+  (static, no MCP). `Server` (MCP tools) and `Cli` (`dotnet-assembly-cli`) are both
+  thin shells over it, wired through `AssemblyEngineFactory`. Keep them in sync — never
+  add logic to one host that the other can't reach.
 - **Never `Assembly.Load`.** We read metadata via `PEReader` / `MetadataReader` only.
   Loading executable code into our own AppDomain would be a sandbox escape vector
   for any malicious assembly we're asked to inspect.
@@ -42,6 +47,8 @@ work tracked in [issue #1](https://github.com/pedrosakuma/dotnet-assembly-mcp/is
 - **Tool surface ~10, justify additions.** Keep the count near 10 and prefer
   Resources / parameters / handle drill-down. Currently shipping 22 — adding the
   23rd requires explicit justification in the PR. See `docs/mcp-conventions.md` §2.1.
+  (This rule is about the **MCP tool** surface only; `Cli` subcommands mirror the same
+  operations 1:1 and do not count against it.)
 - **Mirror the companion** for build conventions (CPM, warnings-as-errors, slnx,
   `net10.0`, SDK 10.0.201 via `global.json`). Don't invent a new convention "because
   it's our repo" — drift between the two repos is the single biggest cost.
@@ -54,6 +61,8 @@ Once the scaffold lands (see #1):
 dotnet build -c Release
 dotnet test -c Release --no-build
 dotnet run --project src/DotnetAssemblyMcp.Server -c Release
+# human-driven CLI front-end (same engine, terminal output):
+dotnet run --project src/DotnetAssemblyMcp.Cli -c Release -- list-types <path-to.dll>
 ```
 
 Until then, the only buildable thing is the spike on the `spike/metadata-lib` branch:

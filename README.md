@@ -178,6 +178,38 @@ All tools share the same response envelope (`summary`, `data`, `hints`, `error`)
 | `find_string_references` | Every method whose IL emits `ldstr` for a given literal (exact / contains / regex) |
 | `find_attribute_targets` | Reverse custom-attribute index: every assembly/type/method/parameter/field/property/event bearing a given attribute |
 
+## CLI (human-driven front-end)
+
+The same engine ships as a standalone terminal tool, **`dotnet-assembly-cli`**, for when *you*
+(not an agent) want to navigate an assembly. It is a thin shell over the same orchestration the
+MCP server uses — every MCP tool has a matching subcommand — but renders human-readable text by
+default instead of an MCP envelope.
+
+```bash
+dotnet tool install -g dotnet-assembly-cli
+
+# Enumerate types in a module
+dotnet-assembly-cli list-types ./bin/Release/net10.0/MyLib.dll
+
+# Resolve + decompile a method (auto-loads the assembly via --assembly)
+dotnet-assembly-cli find-method ./MyLib.dll "Process"
+dotnet-assembly-cli decompile-method <mvid> 0x06000010 --assembly ./MyLib.dll
+
+# Reverse call graph; --load primes the index for handle-based commands
+dotnet-assembly-cli --load ./MyLib.dll find-callers <mvid> 0x06000010
+```
+
+Two global options are honoured by every subcommand:
+
+| Option | Effect |
+|---|---|
+| `--json` | Emit the full `AssemblyResult` envelope as indented JSON (scriptable; identical to the MCP `data`). |
+| `--load <path>` | Load an assembly into the index before the command runs. Repeatable. Because the CLI is one-shot, a handle (`m:<mvid>:0x…`) from a previous run only resolves once its module is reloaded — `--load` (or a path-taking subcommand) is how you do that. |
+
+The architecture: a shared **`DotnetAssemblyMcp.Application`** project holds the tool orchestration;
+the MCP `Server` and the `Cli` are both thin hosts over it, so the two never drift. A non-zero
+exit code (`1`) signals an error result.
+
 ## Companion project
 
 Scope-disjoint from [`pedrosakuma/dotnet-diagnostics-mcp`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp), which performs **dynamic** diagnostics (attach, EventPipe sampling, GC, exceptions) on a running .NET process. Together they form a closed loop:
@@ -223,6 +255,7 @@ This server **does not** replace SourceLink / TraceLog source resolution. It is 
 - [`System.Reflection.Metadata`](https://learn.microsoft.com/dotnet/standard/metadata-and-self-describing-components) — metadata-only reads, never `Assembly.Load`
 - [`ICSharpCode.Decompiler`](https://github.com/icsharpcode/ILSpy) — full decompiler engine used by ILSpy
 - [`ModelContextProtocol`](https://github.com/modelcontextprotocol/csharp-sdk) C# SDK 1.3.0
+- [`System.CommandLine`](https://github.com/dotnet/command-line-api) — argument parsing for the `dotnet-assembly-cli` front-end
 
 ## License
 

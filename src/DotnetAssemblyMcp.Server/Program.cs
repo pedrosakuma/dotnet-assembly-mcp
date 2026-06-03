@@ -103,12 +103,18 @@ return 0;
 
 static void RegisterCoreServices(IServiceCollection services, IConfiguration configuration)
 {
-    services.AddSingleton<IMetadataIndex>(_ =>
-        new MetadataIndex(
-            watchForChanges: configuration.GetValue("AssemblyMcp:WatchForChanges", defaultValue: true),
-            allowedRoots: ReadAllowedRoots(configuration)));
-    services.AddSingleton<IDecompiler, Decompiler>();
-    services.AddSingleton<IIlDisassembler, IlDisassembler>();
+    // Build the engine through a DI factory delegate (not an eager instance) so the container
+    // OWNS the created services and disposes them at host shutdown. Registering pre-created
+    // instances via the AddSingleton(instance) overload would NOT be disposed by DI — the
+    // MetadataIndex (file watchers, PE readers) and IlDisassembler (cached PEFiles) would leak.
+    // allowedRoots threads the untrusted-path-hint allow-list (#150) through the factory so the
+    // enforcement reaches the MetadataIndex the engine actually builds.
+    services.AddSingleton(sp => DotnetAssemblyMcp.Application.AssemblyEngineFactory.Create(
+        watchForChanges: configuration.GetValue("AssemblyMcp:WatchForChanges", defaultValue: true),
+        allowedRoots: ReadAllowedRoots(configuration)));
+    services.AddSingleton(sp => sp.GetRequiredService<DotnetAssemblyMcp.Application.AssemblyEngine>().Index);
+    services.AddSingleton(sp => sp.GetRequiredService<DotnetAssemblyMcp.Application.AssemblyEngine>().Decompiler);
+    services.AddSingleton(sp => sp.GetRequiredService<DotnetAssemblyMcp.Application.AssemblyEngine>().Disassembler);
 }
 
 // Untrusted-path-hint contract (#150): opt-in allow-list of trusted load roots. Sources are the
@@ -130,7 +136,7 @@ static IReadOnlyList<string>? ReadAllowedRoots(IConfiguration configuration)
     }
 
     var fromEnv = Environment.GetEnvironmentVariable("ASSEMBLY_MCP_ALLOWED_ROOTS");
-    if (!string.IsNullOrWhiteSpace(fromEnv))
+    if (fromEnv is not null) // presence is the enforce signal — even "" must fail closed, not open
     {
         present = true;
         configured.AddRange(fromEnv.Split(

@@ -193,4 +193,27 @@ public sealed class PathAllowlistTests : IDisposable
         result.IsSuccess.Should().BeFalse();
         result.Error!.Kind.Should().Be(ErrorKinds.PathNotAllowed);
     }
+
+    // ---- Host wiring: the allow-list must reach the engine the hosts actually build -------------
+
+    [Fact]
+    public void AssemblyEngineFactory_threads_allowedRoots_into_the_index()
+    {
+        // Regression guard (#150 / PR #153 review): both the MCP Server and the CLI construct their
+        // engine through AssemblyEngineFactory.Create. If Create stops forwarding allowedRoots the
+        // enforcement becomes dead code and every load is silently permitted. A factory built with a
+        // single unrelated root must therefore deny a load from outside that root.
+        var engine = DotnetAssemblyMcp.Application.AssemblyEngineFactory.Create(
+            watchForChanges: false, allowedRoots: new[] { _tempDir });
+        try
+        {
+            var result = engine.Index.Load(SampleLibPath);
+            result.IsSuccess.Should().BeFalse();
+            result.Error!.Kind.Should().Be(ErrorKinds.PathNotAllowed);
+        }
+        finally
+        {
+            (engine.Index as IDisposable)?.Dispose();
+        }
+    }
 }

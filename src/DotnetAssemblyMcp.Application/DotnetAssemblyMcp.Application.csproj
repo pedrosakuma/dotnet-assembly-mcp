@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>DotnetAssemblyMcp.Application</RootNamespace>
+    <AssemblyName>DotnetAssemblyMcp.Application</AssemblyName>
+    <Description>Shared tool orchestration over dotnet-assembly-mcp Core. Consumed by both the MCP Server and the CLI front-end; has no MCP dependencies.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotnetAssemblyMcp.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotnetAssemblyMcp.Core\DotnetAssemblyMcp.Core.csproj" />
+  </ItemGroup>
+</Project>

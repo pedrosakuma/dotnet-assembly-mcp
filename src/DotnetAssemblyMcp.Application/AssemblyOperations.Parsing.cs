@@ -1,15 +1,13 @@
-using System.ComponentModel;
 using DotnetAssemblyMcp.Core;
 using DotnetAssemblyMcp.Core.Decompilation;
 using DotnetAssemblyMcp.Core.Errors;
 using DotnetAssemblyMcp.Core.Handles;
 using DotnetAssemblyMcp.Core.Identity;
 using DotnetAssemblyMcp.Core.Metadata;
-using ModelContextProtocol.Server;
 
-namespace DotnetAssemblyMcp.Server.Tools;
+namespace DotnetAssemblyMcp.Application;
 
-public sealed partial class AssemblyTools
+public static partial class AssemblyOperations
 {
     private static bool TryParseAttributeTarget(string target, out AttributeTarget parsed, out AssemblyError? error)
     {
