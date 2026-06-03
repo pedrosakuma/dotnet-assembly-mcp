@@ -39,7 +39,7 @@ internal static class TypeCommands
         }
 
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.ListTypes(engine.Index, pr.GetValue(mvidOrPath)!, pr.GetValue(namespacePrefix), pr.GetValue(nameContains), pr.GetValue(kind), pr.GetValue(cursor), pr.GetValue(pageSize))));
+            AssemblyOperations.ListTypes(engine.Index, CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath))!, pr.GetValue(namespacePrefix), pr.GetValue(nameContains), pr.GetValue(kind), pr.GetValue(cursor), pr.GetValue(pageSize))));
         return command;
     }
 
@@ -49,7 +49,7 @@ internal static class TypeCommands
         var command = new Command("list-assembly-references", "Enumerate the AssemblyRef table of a single module.");
         command.Arguments.Add(mvidOrPath);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.ListAssemblyReferences(engine.Index, pr.GetValue(mvidOrPath)!)));
+            AssemblyOperations.ListAssemblyReferences(engine.Index, CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath))!)));
         return command;
     }
 
@@ -59,7 +59,7 @@ internal static class TypeCommands
         var command = new Command("list-resources", "Enumerate the ManifestResource table of a single module.");
         command.Arguments.Add(mvidOrPath);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.ListResources(engine.Index, pr.GetValue(mvidOrPath)!)));
+            AssemblyOperations.ListResources(engine.Index, CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath))!)));
         return command;
     }
 
@@ -91,7 +91,7 @@ internal static class TypeCommands
         command.Options.Add(mvidOrPath);
         command.Options.Add(typeFullName);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.GetType(engine.Index, pr.GetValue(handle), pr.GetValue(mvidOrPath), pr.GetValue(typeFullName))));
+            AssemblyOperations.GetType(engine.Index, pr.GetValue(handle), CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath)), pr.GetValue(typeFullName))));
         return command;
     }
 
@@ -117,7 +117,7 @@ internal static class TypeCommands
             AssemblyOperations.ListDerivedTypes(
                 engine.Index,
                 pr.GetValue(handle),
-                pr.GetValue(mvidOrPath),
+                CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath)),
                 pr.GetValue(typeFullName),
                 directOnly: !pr.GetValue(transitive),
                 pr.GetValue(cursor),
@@ -152,7 +152,7 @@ internal static class TypeCommands
             }
 
             return CliRun.Execute(context, pr, engine =>
-                AssemblyOperations.ListMembers(engine.Index, pr.GetValue(handle), pr.GetValue(mvidOrPath), pr.GetValue(typeFullName), memberKind, pr.GetValue(namePattern), pr.GetValue(signatureContains), pr.GetValue(cursor), pr.GetValue(pageSize)));
+                AssemblyOperations.ListMembers(engine.Index, pr.GetValue(handle), CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath)), pr.GetValue(typeFullName), memberKind, pr.GetValue(namePattern), pr.GetValue(signatureContains), pr.GetValue(cursor), pr.GetValue(pageSize)));
         });
         return command;
     }

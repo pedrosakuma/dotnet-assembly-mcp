@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DotnetAssemblyMcp.Core;
+using DotnetAssemblyMcp.Core.Errors;
 
 namespace DotnetAssemblyMcp.Cli;
 
@@ -48,6 +49,12 @@ internal static class CliRenderer
                 Console.Error.WriteLine($"detail: {error.Detail}");
             }
 
+            string? hint = CliHintFor(error.Kind);
+            if (hint is not null)
+            {
+                Console.Error.WriteLine($"hint: {hint}");
+            }
+
             return 1;
         }
 
@@ -61,6 +68,23 @@ internal static class CliRenderer
     }
 
     private const int MaxDepth = 16;
+
+    /// <summary>
+    /// Maps a Core <see cref="AssemblyError.Kind"/> to a CLI-appropriate next step. Core's own
+    /// messages are written for the MCP server (they name MCP tools and assume a long-lived index),
+    /// so the CLI adds a terminal-friendly hint for the failures a human is most likely to hit.
+    /// </summary>
+    private static string? CliHintFor(string kind) => kind switch
+    {
+        ErrorKinds.ModuleNotFound =>
+            "the target module isn't loaded in this invocation. The CLI is stateless per-process, so pass the "
+            + "assembly so it can be read — add '--assembly <path>' (method/token commands) or '--load <path>' "
+            + "(any command, e.g. before or after the subcommand), or use a path-based command form.",
+        ErrorKinds.PathMustBeAbsolute =>
+            "the CLI normalizes relative paths and '~' automatically, so this usually means the path doesn't "
+            + "exist or couldn't be resolved. Double-check the path and try again.",
+        _ => null,
+    };
 
     private static void WriteValue(TextWriter writer, string? name, object? value, int indent, int depth)
     {

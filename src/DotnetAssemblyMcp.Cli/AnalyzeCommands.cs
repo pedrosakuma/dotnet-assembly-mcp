@@ -33,7 +33,7 @@ internal static class AnalyzeCommands
         {
             CliRun.Preload(context, pr);
             AssemblyResult<TypeExplanation> result = AssemblyAnalysisOperations.ExplainType(
-                context.Engine.Index, pr.GetValue(mvidOrPath)!, pr.GetValue(typeFullName)!);
+                context.Engine.Index, CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath))!, pr.GetValue(typeFullName)!);
             return Render(result, pr.GetValue(context.JsonOption), ExplainRenderer.WriteType);
         });
         return command;
@@ -61,7 +61,7 @@ internal static class AnalyzeCommands
             AssemblyResult<MethodExplanation> result = AssemblyAnalysisOperations.ExplainMethod(
                 context.Engine.Decompiler,
                 context.Engine.Index,
-                pr.GetValue(mvidOrPath)!,
+                CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath))!,
                 pr.GetValue(typeFullName)!,
                 pr.GetValue(methodName)!,
                 pr.GetValue(contains),
@@ -94,7 +94,7 @@ internal static class AnalyzeCommands
             CliRun.Preload(context, pr);
             AssemblyResult<CallGraph> result = AssemblyAnalysisOperations.BuildCallGraph(
                 context.Engine.Index,
-                pr.GetValue(mvidOrPath)!,
+                CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath))!,
                 pr.GetValue(typeFullName)!,
                 pr.GetValue(methodName)!,
                 pr.GetValue(depth),
@@ -119,8 +119,8 @@ internal static class AnalyzeCommands
             CliRun.Preload(context, pr);
             AssemblyResult<AssemblyDiff> result = AssemblyAnalysisOperations.DiffAssemblies(
                 context.Engine.Index,
-                pr.GetValue(left)!,
-                pr.GetValue(right)!,
+                CliPaths.ResolveMvidOrPath(pr.GetValue(left))!,
+                CliPaths.ResolveMvidOrPath(pr.GetValue(right))!,
                 CancellationToken.None);
             return Render(result, pr.GetValue(context.JsonOption), ExplainRenderer.WriteAssemblyDiff);
         });

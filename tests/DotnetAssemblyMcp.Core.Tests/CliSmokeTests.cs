@@ -137,6 +137,73 @@ public sealed class CliSmokeTests
     }
 
     [Fact]
+    public void Load_AfterSubcommand_PrimesIndex()
+    {
+        var (mvid, tokenHex) = DiscoverMethod("Process");
+
+        // --load is a recursive global option, so it is honoured when placed after the subcommand.
+        var (exit, output, _) = Invoke(
+            "find-callers",
+            mvid.ToString(),
+            tokenHex,
+            "--load", SampleLibPath);
+
+        exit.Should().Be(0);
+        output.Should().Contain("Callers:");
+    }
+
+    [Fact]
+    public void ListTypes_RelativePath_Resolves()
+    {
+        string relative = Path.GetRelativePath(Directory.GetCurrentDirectory(), SampleLibPath);
+        relative.Should().NotBe(SampleLibPath, "the fixture must be reachable by a relative path for this test");
+
+        var (exit, output, _) = Invoke("list-types", relative);
+
+        exit.Should().Be(0);
+        output.Should().Contain("SampleLib.OrderService");
+    }
+
+    [Fact]
+    public void ListAssemblies_Empty_PrintsCliGuidanceNotMcpToolName()
+    {
+        var (exit, output, _) = Invoke("list-assemblies");
+
+        exit.Should().Be(0);
+        output.Should().Contain("stateless");
+        output.Should().NotContain("load_assembly");
+    }
+
+    [Fact]
+    public void ListAssemblies_WithLoad_ListsPrimedModule()
+    {
+        var (exit, output, _) = Invoke("list-assemblies", "--load", SampleLibPath);
+
+        exit.Should().Be(0);
+        output.Should().Contain("SampleLib");
+    }
+
+    [Fact]
+    public void ListAssemblies_Empty_Json_KeepsRawEnvelope()
+    {
+        var (exit, output, _) = Invoke("--json", "list-assemblies");
+
+        exit.Should().Be(0);
+        output.TrimStart().Should().StartWith("{");
+        output.Should().Contain("\"Summary\"");
+    }
+
+    [Fact]
+    public void FindCallers_UnloadedModule_EmitsModuleNotFoundCliHint()
+    {
+        var (exit, _, error) = Invoke("find-callers", Guid.NewGuid().ToString(), "0x06000001");
+
+        exit.Should().Be(1);
+        error.Should().Contain("module_not_found");
+        error.Should().Contain("hint:");
+    }
+
+    [Fact]
     public void ExplainType_Text_RendersGroupedOverview()
     {
         var (exit, output, _) = Invoke("explain-type", SampleLibPath, "SampleLib.OrderService");

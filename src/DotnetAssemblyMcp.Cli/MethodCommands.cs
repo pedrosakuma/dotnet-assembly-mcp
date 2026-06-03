@@ -62,7 +62,7 @@ internal static class MethodCommands
                 pr.GetValue(typeFullName),
                 pr.GetValue(methodName),
                 pr.GetValue(genericArity),
-                pr.GetValue(assembly),
+                CliPaths.ResolvePathOnly(pr.GetValue(assembly)),
                 CliRun.NullIfEmpty(pr.GetValue(genericTypeArgs)),
                 CliRun.NullIfEmpty(pr.GetValue(genericMethodArgs)),
                 pr.GetValue(specMvid),
@@ -85,7 +85,7 @@ internal static class MethodCommands
         command.Options.Add(maxChars);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
             AssemblyOperations.DecompileMethod(
-                engine.Decompiler, engine.Index, pr.GetValue(mvid)!, pr.GetValue(token), pr.GetValue(maxChars), pr.GetValue(assembly), CancellationToken.None)));
+                engine.Decompiler, engine.Index, pr.GetValue(mvid)!, pr.GetValue(token), pr.GetValue(maxChars), CliPaths.ResolvePathOnly(pr.GetValue(assembly)), CancellationToken.None)));
         return command;
     }
 
@@ -103,7 +103,7 @@ internal static class MethodCommands
         command.Options.Add(maxChars);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
             AssemblyOperations.DecompileType(
-                engine.Decompiler, engine.Index, pr.GetValue(mvid)!, pr.GetValue(token), pr.GetValue(maxChars), pr.GetValue(assembly), CancellationToken.None)));
+                engine.Decompiler, engine.Index, pr.GetValue(mvid)!, pr.GetValue(token), pr.GetValue(maxChars), CliPaths.ResolvePathOnly(pr.GetValue(assembly)), CancellationToken.None)));
         return command;
     }
 
@@ -125,7 +125,7 @@ internal static class MethodCommands
         command.Options.Add(maxLines);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
             AssemblyOperations.GetMethodIl(
-                engine.Disassembler, engine.Index, pr.GetValue(mvid)!, pr.GetValue(token), pr.GetValue(format)!, pr.GetValue(maxBytes), pr.GetValue(maxLines), pr.GetValue(assembly), CancellationToken.None)));
+                engine.Disassembler, engine.Index, pr.GetValue(mvid)!, pr.GetValue(token), pr.GetValue(format)!, pr.GetValue(maxBytes), pr.GetValue(maxLines), CliPaths.ResolvePathOnly(pr.GetValue(assembly)), CancellationToken.None)));
         return command;
     }
 
@@ -145,7 +145,7 @@ internal static class MethodCommands
         }
 
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.ListMethods(engine.Index, pr.GetValue(handle), pr.GetValue(mvidOrPath), pr.GetValue(typeFullName), pr.GetValue(namePattern), pr.GetValue(cursor), pr.GetValue(pageSize))));
+            AssemblyOperations.ListMethods(engine.Index, pr.GetValue(handle), CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath)), pr.GetValue(typeFullName), pr.GetValue(namePattern), pr.GetValue(cursor), pr.GetValue(pageSize))));
         return command;
     }
 
@@ -164,7 +164,7 @@ internal static class MethodCommands
         command.Options.Add(cursor);
         command.Options.Add(pageSize);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.FindMethod(engine.Index, pr.GetValue(mvidOrPath)!, pr.GetValue(namePattern)!, pr.GetValue(signatureContains), pr.GetValue(cursor), pr.GetValue(pageSize), CancellationToken.None)));
+            AssemblyOperations.FindMethod(engine.Index, CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath))!, pr.GetValue(namePattern)!, pr.GetValue(signatureContains), pr.GetValue(cursor), pr.GetValue(pageSize), CancellationToken.None)));
         return command;
     }
 
@@ -191,7 +191,7 @@ internal static class MethodCommands
                 engine.Index,
                 pr.GetValue(mvid)!,
                 pr.GetValue(token),
-                pr.GetValue(assembly),
+                CliPaths.ResolvePathOnly(pr.GetValue(assembly)),
                 CliRun.NullIfEmpty(pr.GetValue(genericTypeArgs)),
                 CliRun.NullIfEmpty(pr.GetValue(genericMethodArgs)),
                 pr.GetValue(specMvid),
@@ -211,7 +211,7 @@ internal static class MethodCommands
         command.Arguments.Add(token);
         command.Options.Add(assembly);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.GetMethodSource(engine.Index, pr.GetValue(mvid)!, pr.GetValue(token), pr.GetValue(assembly), CancellationToken.None)));
+            AssemblyOperations.GetMethodSource(engine.Index, pr.GetValue(mvid)!, pr.GetValue(token), CliPaths.ResolvePathOnly(pr.GetValue(assembly)), CancellationToken.None)));
         return command;
     }
 }
