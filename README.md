@@ -194,11 +194,12 @@ dotnet-assembly-cli list-types --help
 ### A worked walkthrough
 
 Start from a path, drill down to a method, then pivot through the call graph — the same
-loop an agent runs, but readable in your terminal. (Paths must be **absolute**; the index
-keys modules by MVID, not by relative path.)
+loop an agent runs, but readable in your terminal. Paths may be **relative or absolute** (and a
+leading `~` is expanded) — the CLI resolves them against your current directory before handing an
+absolute path to the engine.
 
 ```bash
-DLL=$(realpath ./bin/Release/net10.0/MyLib.dll)
+DLL=./bin/Release/net10.0/MyLib.dll   # relative paths are fine
 
 # 1. What's in here? (a path-taking command loads the module for you)
 dotnet-assembly-cli list-types "$DLL"
@@ -219,14 +220,23 @@ dotnet-assembly-cli decompile-method b613bdf8-… 0x0600000D --assembly "$DLL"
 #   Source:
 #     public int Process(int orderId) { _counter++; … }
 
-# 4. Who calls it? --load primes the index so the handle resolves
-dotnet-assembly-cli --load "$DLL" find-callers b613bdf8-… 0x0600000D
+# 4. Who calls it? --load primes the index so the handle resolves. As a
+#    recursive global option it can go before OR after the subcommand.
+dotnet-assembly-cli find-callers b613bdf8-… 0x0600000D --load "$DLL"
 #   1 caller(s) in 1 module (built).
 #     Display: SampleLib.OrderService+<ProcessAsync>d__6.MoveNext
 
 # Pipe any command through --json for the full MCP-shaped envelope
-dotnet-assembly-cli --load "$DLL" find-callers b613bdf8-… 0x0600000D --json | jq '.Data.Callers'
+dotnet-assembly-cli find-callers b613bdf8-… 0x0600000D --load "$DLL" --json | jq '.Data.Callers'
 ```
+
+> **The CLI is stateless per-invocation.** Each run builds a fresh index that is discarded on
+> exit, so a standalone `load` does not carry over to a later `list-assemblies`. Everything must
+> reach the index *within the same command line*: pass a path positional, a method command's
+> `--assembly`, or one or more `--load <path>`. Cross-module queries (`find-callers`,
+> `find-type-references`, `find-string-references`, …) only see the modules you loaded — their
+> output reports the corpus size (`… in N module(s)`) so an empty result over `1 module` is your
+> cue to `--load` the rest of the app.
 
 ### Shortcut: `explain-type` / `explain-method`
 
@@ -294,7 +304,7 @@ Two options are honoured by every subcommand:
 | Option | Effect |
 |---|---|
 | `--json` | Emit the full `AssemblyResult` envelope as indented JSON (scriptable; identical to the MCP `data`). Without it, you get a human-readable rendering of the result. |
-| `--load <path>` | Load an assembly into the index before the command runs. Repeatable. Because the CLI is one-shot, a handle (`m:<mvid>:0x…`) only resolves once its module is loaded — `--load` (or a path-taking subcommand such as `find-method`, or a token command's `--assembly`) is how you do that. |
+| `--load <path>` | Load an assembly (relative or absolute path) into this invocation's index before the command runs. Repeatable, and — being recursive — may appear before or after the subcommand. Because the CLI is one-shot, a handle (`m:<mvid>:0x…`) only resolves once its module is loaded, and cross-module queries only search loaded modules; `--load` (or a path-taking subcommand such as `find-method`, or a token command's `--assembly`) is how you prime the index. |
 
 | Exit code | Meaning |
 |---|---|

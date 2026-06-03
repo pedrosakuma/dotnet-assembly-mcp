@@ -30,7 +30,7 @@ internal static class ReferenceCommands
         command.Options.Add(mvidOrPath);
         command.Options.Add(maxHits);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.FindStringReferences(engine.Index, pr.GetValue(query)!, pr.GetValue(matchMode), pr.GetValue(mvidOrPath), pr.GetValue(maxHits), CancellationToken.None)));
+            AssemblyOperations.FindStringReferences(engine.Index, pr.GetValue(query)!, pr.GetValue(matchMode), CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath)), pr.GetValue(maxHits), CancellationToken.None)));
         return command;
     }
 
@@ -47,7 +47,7 @@ internal static class ReferenceCommands
         command.Options.Add(targetKinds);
         command.Options.Add(maxHits);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.FindAttributeTargets(engine.Index, pr.GetValue(attributeTypeFullName)!, pr.GetValue(mvidOrPath), CliRun.NullIfEmpty(pr.GetValue(targetKinds)), pr.GetValue(maxHits), CancellationToken.None)));
+            AssemblyOperations.FindAttributeTargets(engine.Index, pr.GetValue(attributeTypeFullName)!, CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath)), CliRun.NullIfEmpty(pr.GetValue(targetKinds)), pr.GetValue(maxHits), CancellationToken.None)));
         return command;
     }
 
@@ -79,7 +79,7 @@ internal static class ReferenceCommands
         command.Options.Add(typeFullName);
         command.Options.Add(assembly);
         command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.FindTypeReferences(engine.Index, pr.GetValue(handle), pr.GetValue(mvidOrPath), pr.GetValue(typeFullName), pr.GetValue(assembly), CancellationToken.None)));
+            AssemblyOperations.FindTypeReferences(engine.Index, pr.GetValue(handle), CliPaths.ResolveMvidOrPath(pr.GetValue(mvidOrPath)), pr.GetValue(typeFullName), CliPaths.ResolvePathOnly(pr.GetValue(assembly)), CancellationToken.None)));
         return command;
     }
 }

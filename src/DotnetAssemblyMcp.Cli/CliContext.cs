@@ -54,7 +54,8 @@ internal static class CliRun
 
         foreach (var path in paths)
         {
-            AssemblyResult<ModuleSummary> loaded = AssemblyOperations.LoadAssembly(context.Engine.Index, path);
+            string resolved = CliPaths.ResolvePathOnly(path)!;
+            AssemblyResult<ModuleSummary> loaded = AssemblyOperations.LoadAssembly(context.Engine.Index, resolved);
             if (loaded.IsError)
             {
                 Console.Error.WriteLine($"warning: --load '{path}': {loaded.Summary}");
