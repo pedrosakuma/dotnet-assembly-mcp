@@ -194,6 +194,157 @@ public sealed class PathAllowlistTests : IDisposable
         result.Error!.Kind.Should().Be(ErrorKinds.PathNotAllowed);
     }
 
+    // ---- Post-open ancestor-directory TOCTOU verification (#156) --------------------------------
+
+    [Fact]
+    public void PostOpen_fd_realpath_escaping_root_via_ancestor_symlink_is_rejected()
+    {
+        if (OperatingSystem.IsWindows()) return; // directory symlink creation is privilege-gated
+
+        // outside/<lib> is a REAL file outside the root. Inside the root, 'link' is a directory
+        // symlink -> outside. Opening root/link/<lib> succeeds (O_NOFOLLOW only guards the LEAF, not
+        // the 'link' ancestor), so this models the post-canonicalisation ancestor swap: the leaf is
+        // real, the ancestor redirects out of the root. The post-open fd-real-path check must reject.
+        var outside = Path.Combine(_tempDir, "outside");
+        Directory.CreateDirectory(outside);
+        var realFile = Path.Combine(outside, Path.GetFileName(SampleLibPath));
+        File.Copy(SampleLibPath, realFile);
+
+        var root = Path.Combine(_tempDir, "root");
+        Directory.CreateDirectory(root);
+        var link = Path.Combine(root, "link");
+        Directory.CreateSymbolicLink(link, outside);
+        var viaAncestor = Path.Combine(link, Path.GetFileName(SampleLibPath));
+
+        var canonicalRoots = new[] { PathPolicy.CanonicalizeRealPath(root)! };
+        var result = SafeFileOpener.ReadAllBytes(
+            viaAncestor, SafeFileOpener.DefaultMaxAssemblyBytes,
+            verifyOpenedRealPath: rp => PathPolicy.RequireRealPathWithinRoots(rp, canonicalRoots));
+
+        result.IsSuccess.Should().BeFalse("the opened descriptor's real path resolves outside the root");
+        result.Error!.Kind.Should().Be(ErrorKinds.PathNotAllowed);
+    }
+
+    [Fact]
+    public void PostOpen_fd_realpath_inside_root_passes_verification()
+    {
+        var copied = Path.Combine(_tempDir, Path.GetFileName(SampleLibPath));
+        File.Copy(SampleLibPath, copied);
+
+        var canonicalRoots = new[] { PathPolicy.CanonicalizeRealPath(_tempDir)! };
+        var result = SafeFileOpener.ReadAllBytes(
+            copied, SafeFileOpener.DefaultMaxAssemblyBytes,
+            verifyOpenedRealPath: rp => PathPolicy.RequireRealPathWithinRoots(rp, canonicalRoots));
+
+        result.IsSuccess.Should().BeTrue();
+        result.Bytes.Should().NotBeNullOrEmpty();
+    }
+
+    [Fact]
+    public void PostOpen_unresolvable_fd_realpath_fails_closed()
+    {
+        var copied = Path.Combine(_tempDir, Path.GetFileName(SampleLibPath));
+        File.Copy(SampleLibPath, copied);
+
+        // Simulate a platform/configuration where the descriptor's real path cannot be resolved
+        // (e.g. /proc not mounted): enforcement must deny rather than read an unverifiable file.
+        var prev = SafeFileOpener.DescriptorRealPathResolverOverride;
+        SafeFileOpener.DescriptorRealPathResolverOverride = _ => null;
+        try
+        {
+            var result = SafeFileOpener.ReadAllBytes(
+                copied, SafeFileOpener.DefaultMaxAssemblyBytes,
+                verifyOpenedRealPath: _ => null);
+            result.IsSuccess.Should().BeFalse();
+            result.Error!.Kind.Should().Be(ErrorKinds.PathRejected);
+        }
+        finally
+        {
+            SafeFileOpener.DescriptorRealPathResolverOverride = prev;
+        }
+    }
+
+    [Fact]
+    public void PostOpen_verification_uses_containment_not_exact_equality()
+    {
+        // The fd real path differs from the opened path but is still inside an allowed root — the
+        // contract is containment, not byte-equality, so this must succeed (guards against an
+        // over-strict equality check that the rubber-duck review flagged as false-positive prone).
+        var copied = Path.Combine(_tempDir, Path.GetFileName(SampleLibPath));
+        File.Copy(SampleLibPath, copied);
+        var inRootButDifferent = Path.Combine(_tempDir, "sibling.dll");
+
+        var canonicalRoots = new[] { PathPolicy.CanonicalizeRealPath(_tempDir)! };
+        var prev = SafeFileOpener.DescriptorRealPathResolverOverride;
+        SafeFileOpener.DescriptorRealPathResolverOverride = _ => inRootButDifferent;
+        try
+        {
+            var result = SafeFileOpener.ReadAllBytes(
+                copied, SafeFileOpener.DefaultMaxAssemblyBytes,
+                verifyOpenedRealPath: rp => PathPolicy.RequireRealPathWithinRoots(rp, canonicalRoots));
+            result.IsSuccess.Should().BeTrue();
+        }
+        finally
+        {
+            SafeFileOpener.DescriptorRealPathResolverOverride = prev;
+        }
+    }
+
+    [Fact]
+    public void MetadataIndex_exposes_canonical_allowed_roots_for_reopen_paths()
+    {
+        using var index = new MetadataIndex(watchForChanges: false, allowedRoots: new[] { _tempDir });
+        index.AllowedRoots.Should().NotBeNull();
+        index.AllowedRoots!.Should().ContainSingle()
+            .Which.Should().Be(PathPolicy.CanonicalizeRealPath(_tempDir));
+    }
+
+    [Fact]
+    public void MetadataIndex_exposes_null_allowed_roots_when_enforcement_disabled()
+    {
+        using var index = new MetadataIndex();
+        index.AllowedRoots.Should().BeNull();
+    }
+
+    [Fact]
+    public void Reopen_for_disassembly_re_checks_post_open_fd_realpath_after_ancestor_swap()
+    {
+        if (OperatingSystem.IsWindows()) return; // directory symlink creation is privilege-gated
+
+        // The Tier-2+ reopen paths (IL / decompile) must apply the same post-open fd verification
+        // as the initial load (#156). Load succeeds while the ancestor dir is real; then the ancestor
+        // is swapped for an out-of-root symlink. The first IL open reopens the stored canonical path,
+        // O_NOFOLLOW traverses the swapped ancestor, and the fd-real-path check must reject the read.
+        var root = Path.Combine(_tempDir, "root");
+        var realDir = Path.Combine(root, "sub");
+        Directory.CreateDirectory(realDir);
+        var libName = Path.GetFileName(SampleLibPath);
+        var loadedPath = Path.Combine(realDir, libName);
+        File.Copy(SampleLibPath, loadedPath);
+
+        using var index = new MetadataIndex(
+            watchForChanges: false,
+            allowedRoots: new[] { PathPolicy.CanonicalizeRealPath(root)! });
+        var load = index.Load(loadedPath);
+        load.IsSuccess.Should().BeTrue("the module is inside the allowed root at load time");
+
+        using var disasm = new DotnetAssemblyMcp.Core.Decompilation.IlDisassembler(index);
+
+        // Swap the 'sub' ancestor for a symlink pointing outside the root, keeping the leaf real.
+        var outside = Path.Combine(_tempDir, "outside");
+        Directory.CreateDirectory(outside);
+        File.Copy(SampleLibPath, Path.Combine(outside, libName));
+        Directory.Delete(realDir, recursive: true);
+        Directory.CreateSymbolicLink(realDir, outside);
+
+        var mi = typeof(SampleLib.Dog).GetMethod(
+            "Speak", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)!;
+        var result = disasm.Disassemble(
+            new DotnetAssemblyMcp.Core.Identity.MethodIdentity(mi.Module.ModuleVersionId, mi.MetadataToken));
+
+        result.IsSuccess.Should().BeFalse("the reopened descriptor resolves outside the allowed root");
+    }
+
     // ---- Host wiring: the allow-list must reach the engine the hosts actually build -------------
 
     [Fact]

@@ -136,8 +136,9 @@ Every path-shaped argument — `load_assembly(path)`, `import_assembly_manifest(
 
 1. **Absolute-path requirement** (`path_must_be_absolute`) — relative paths are rejected, never canonicalised against the server CWD.
 2. **Symlink / reparse-point rejection** + kernel `O_NOFOLLOW` (Unix) and a 64 MiB size cap (`path_rejected`).
-3. **Allowed-root containment** (`path_not_allowed`) — *opt-in*. The candidate is canonicalised to its **real** on-disk path (every component's symlinks resolved, including ancestors) and must be contained in one of the operator-configured trusted roots.
-4. **MVID verification** before caching (`mvid_mismatch`) — the path is a hint, never an override.
+3. **Allowed-root containment** (`path_not_allowed`) — *opt-in*. The candidate is canonicalised to its **real** on-disk path (every component's symlinks resolved, including ancestors) and must be contained in one of the operator-configured trusted roots. The file is then opened at that **canonical** path, not the original.
+4. **Post-open descriptor re-verification** (`path_not_allowed` / `path_rejected`) — closes the ancestor-directory TOCTOU window (`O_NOFOLLOW` only guards the leaf). After the file is open, the kernel's real path for the *descriptor* (Linux `/proc/self/fd`, macOS `F_GETPATH`, Windows `GetFinalPathNameByHandle`) is re-checked for containment in a trusted root. An ancestor directory swapped for an out-of-root symlink between canonicalisation and open is caught here; if the descriptor's real path cannot be resolved under active enforcement, the load **fails closed**.
+5. **MVID verification** before caching (`mvid_mismatch`) — the path is a hint, never an override.
 
 The allow-list is configured by the operator, not the agent:
 
@@ -152,7 +153,7 @@ Semantics:
 | One or more valid roots | Enforcement **active** — a load whose canonical real path is not contained in a root returns `path_not_allowed`. |
 | Configured but every root invalid/relative | **Fail closed** — every load is denied. (A non-absolute root is also warned about on stderr at startup.) |
 
-Because canonicalisation resolves ancestor symlinks, a directory symlink planted *inside* an allowed root that points outside it is rejected; and a canonicalisation failure under active enforcement fails closed.
+Because canonicalisation resolves ancestor symlinks, a directory symlink planted *inside* an allowed root that points outside it is rejected; and a canonicalisation failure under active enforcement fails closed. The post-open descriptor re-check (step 4) additionally defeats a directory swapped *after* canonicalisation but *before* the open (a TOCTOU race). The allow-list is symlink/reparse/ancestor-race hardening — **not** a mount-namespace confinement mechanism: a bind mount inside an allowed root that exposes out-of-root content is out of scope (creating one requires elevated privilege).
 
 ### 3.2 `import_assembly_manifest` — bulk handshake from a sidecar producer
 

@@ -47,8 +47,16 @@ public static class SafeFileOpener
     /// sibling-PDB lookup to prevent an attacker-controlled directory layout from escaping
     /// the assembly's directory via a symlink to e.g. <c>/etc/shadow.pdb</c>.
     /// </param>
+    /// <param name="verifyOpenedRealPath">
+    /// Optional post-open verifier closing the ancestor-directory TOCTOU window (#156). When
+    /// supplied, the kernel-reported real path of the <em>open</em> descriptor is resolved and
+    /// passed to this callback; a non-null return rejects the read. If the descriptor's real path
+    /// cannot be resolved on this platform/configuration the read fails closed. <c>null</c> skips
+    /// the check entirely (back-compatible).
+    /// </param>
     /// <returns>The raw bytes on success; an <see cref="AssemblyError"/> on rejection.</returns>
-    public static ReadResult ReadAllBytes(string path, long maxBytes, string? expectedParentDirectory = null)
+    public static ReadResult ReadAllBytes(string path, long maxBytes, string? expectedParentDirectory = null,
+        Func<string, AssemblyError?>? verifyOpenedRealPath = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxBytes);
@@ -120,6 +128,23 @@ public static class SafeFileOpener
 
         using (fs)
         {
+            // Post-open ancestor-TOCTOU verification (#156). O_NOFOLLOW only guards the leaf, so an
+            // ancestor directory swapped for an out-of-root symlink AFTER pre-open canonicalisation
+            // could redirect this open. We ask the kernel for the real path of the now-open
+            // descriptor and let the caller re-check containment. Fail closed if it can't be resolved.
+            if (verifyOpenedRealPath is not null)
+            {
+                var realPath = TryResolveDescriptorRealPath(fs.SafeFileHandle);
+                if (realPath is null)
+                {
+                    return ReadResult.Fail(new AssemblyError(
+                        ErrorKinds.PathRejected,
+                        $"cannot verify opened descriptor's real path on this platform: {ErrorRedactor.RedactPath(path)}"));
+                }
+                var verifyErr = verifyOpenedRealPath(realPath);
+                if (verifyErr is not null) return ReadResult.Fail(verifyErr);
+            }
+
             // Sibling-PDB / containment check. Verifies the OS-canonical parent of the open
             // file is the directory the caller expected — defeats a 'pdb is a symlink that
             // escapes the assembly directory' attack.
@@ -189,7 +214,7 @@ public static class SafeFileOpener
 
     /// <summary>
     /// Reads <paramref name="path"/> through the same TOCTOU-safe pipeline as
-    /// <see cref="ReadAllBytes(string,long,string?)"/> but returns the result as a
+    /// <see cref="ReadAllBytes(string,long,string?,Func{string,AssemblyError?})"/> but returns the result as a
     /// non-writable <see cref="MemoryStream"/> ready to hand off to libraries (e.g.
     /// ICSharpCode.Decompiler's <c>PEFile</c>) that insist on a <see cref="Stream"/> input.
     /// </summary>
@@ -200,14 +225,15 @@ public static class SafeFileOpener
     /// memory profile of <c>ModuleStore</c>. Callers retain the bytes only for as
     /// long as they hold the returned stream.
     /// </remarks>
-    public static StreamResult OpenReadAsStream(string path, long maxBytes, string? expectedParentDirectory = null)
+    public static StreamResult OpenReadAsStream(string path, long maxBytes, string? expectedParentDirectory = null,
+        Func<string, AssemblyError?>? verifyOpenedRealPath = null)
     {
-        var read = ReadAllBytes(path, maxBytes, expectedParentDirectory);
+        var read = ReadAllBytes(path, maxBytes, expectedParentDirectory, verifyOpenedRealPath);
         if (!read.IsSuccess) return StreamResult.Fail(read.Error!);
         return StreamResult.Ok(new MemoryStream(read.Bytes!, writable: false));
     }
 
-    /// <summary>Result envelope for <see cref="OpenReadAsStream(string,long,string?)"/>.</summary>
+    /// <summary>Result envelope for <see cref="OpenReadAsStream(string,long,string?,Func{string,AssemblyError?})"/>.</summary>
     public readonly record struct StreamResult(bool IsSuccess, MemoryStream? Stream, AssemblyError? Error)
     {
         public static StreamResult Ok(MemoryStream stream) => new(true, stream, null);
@@ -364,6 +390,99 @@ public static class SafeFileOpener
 
     [DllImport("libc", EntryPoint = "open", SetLastError = true, CharSet = CharSet.Ansi, BestFitMapping = false, ThrowOnUnmappableChar = true)]
     private static extern int NativeOpen(string pathname, int flags, int mode);
+
+    // ---- Descriptor real-path resolution (#156) -----------------------------
+    //
+    // Resolves the kernel's authoritative real path for an OPEN descriptor, so the allow-list can
+    // be re-checked against where the file actually landed — defeating an ancestor-directory symlink
+    // swapped in after pre-open canonicalisation. fd-based (not path-based) so it cannot itself race.
+    //   * Linux: readlink(/proc/self/fd/N). A "(deleted)" suffix (unlinked file) fails closed.
+    //   * macOS: fcntl(fd, F_GETPATH).
+    //   * Windows: GetFinalPathNameByHandle (FILE_NAME_NORMALIZED | VOLUME_NAME_DOS), \\?\ stripped.
+    //   * anything else (incl. unverified Unix): null → caller fails closed.
+
+    /// <summary>
+    /// Test-only seam: when set, overrides kernel descriptor-path resolution so the ancestor-TOCTOU
+    /// rejection can be exercised deterministically without a real filesystem race.
+    /// </summary>
+    internal static Func<SafeFileHandle, string?>? DescriptorRealPathResolverOverride;
+
+    internal static string? TryResolveDescriptorRealPath(SafeFileHandle handle)
+    {
+        if (DescriptorRealPathResolverOverride is not null)
+            return DescriptorRealPathResolverOverride(handle);
+        if (handle.IsInvalid || handle.IsClosed) return null;
+
+        try
+        {
+            if (OperatingSystem.IsWindows()) return ResolveWindows(handle);
+            if (OperatingSystem.IsLinux()) return ResolveLinux(handle);
+            if (OperatingSystem.IsMacOS()) return ResolveMacOs(handle);
+            return null; // unverified platform — fail closed
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ResolveLinux(SafeFileHandle handle)
+    {
+        var fd = checked((int)handle.DangerousGetHandle());
+        var buf = new byte[4096];
+        var n = NativeReadlink($"/proc/self/fd/{fd}", buf, (nint)buf.Length);
+        if (n <= 0 || n >= buf.Length) return null;
+        var link = System.Text.Encoding.UTF8.GetString(buf, 0, (int)n);
+        // An unlinked file reads back as "<path> (deleted)" — cannot be trusted; fail closed.
+        if (link.EndsWith(" (deleted)", StringComparison.Ordinal)) return null;
+        return Path.IsPathFullyQualified(link) ? link : null;
+    }
+
+    private static string? ResolveMacOs(SafeFileHandle handle)
+    {
+        var fd = checked((int)handle.DangerousGetHandle());
+        var buf = new byte[1024]; // MAXPATHLEN on Darwin
+        if (NativeFcntl(fd, F_GETPATH_MACOS, buf) != 0) return null;
+        var end = Array.IndexOf(buf, (byte)0);
+        if (end <= 0) return null;
+        var path = System.Text.Encoding.UTF8.GetString(buf, 0, end);
+        return Path.IsPathFullyQualified(path) ? path : null;
+    }
+
+    private static string? ResolveWindows(SafeFileHandle handle)
+    {
+        var len = GetFinalPathNameByHandle(handle, null, 0, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (len == 0) return null;
+        var buf = new char[len];
+        var written = GetFinalPathNameByHandle(handle, buf, len, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (written == 0 || written >= len) return null;
+        var raw = new string(buf, 0, (int)written);
+        return StripExtendedPrefix(raw);
+    }
+
+    private static string StripExtendedPrefix(string path)
+    {
+        const string uncPrefix = @"\\?\UNC\";
+        const string devPrefix = @"\\?\";
+        if (path.StartsWith(uncPrefix, StringComparison.Ordinal))
+            return string.Concat(@"\\", path.AsSpan(uncPrefix.Length));
+        if (path.StartsWith(devPrefix, StringComparison.Ordinal))
+            return path.Substring(devPrefix.Length);
+        return path;
+    }
+
+    [DllImport("libc", EntryPoint = "readlink", SetLastError = true, CharSet = CharSet.Ansi, BestFitMapping = false, ThrowOnUnmappableChar = true)]
+    private static extern nint NativeReadlink(string pathname, byte[] buf, nint bufsiz);
+
+    [DllImport("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int NativeFcntl(int fd, int cmd, byte[] buf);
+
+    [DllImport("kernel32.dll", EntryPoint = "GetFinalPathNameByHandleW", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern uint GetFinalPathNameByHandle(SafeFileHandle hFile, char[]? lpszFilePath, uint cchFilePath, uint dwFlags);
+
+    private const int F_GETPATH_MACOS = 50;
+    private const uint FILE_NAME_NORMALIZED = 0x0;
+    private const uint VOLUME_NAME_DOS = 0x0;
 
     private const int O_RDONLY = 0;
     private const int O_NOFOLLOW_LINUX = 0x20000;

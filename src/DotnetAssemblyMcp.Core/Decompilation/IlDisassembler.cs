@@ -174,7 +174,8 @@ public sealed class IlDisassembler : IIlDisassembler, IDisposable
         // the path directly without honoring O_NOFOLLOW / size cap. A file loaded safely via
         // ModuleStore but replaced with a symlink between load and first disassembly call
         // would otherwise bypass the file-IO defense.
-        var streamResult = IO.SafeFileOpener.OpenReadAsStream(modulePath, IO.SafeFileOpener.DefaultMaxAssemblyBytes);
+        var streamResult = IO.SafeFileOpener.OpenReadAsStream(modulePath, IO.SafeFileOpener.DefaultMaxAssemblyBytes,
+            verifyOpenedRealPath: IO.PathPolicy.BuildRealPathVerifier(_index.AllowedRoots));
         if (!streamResult.IsSuccess)
             return new FileResult(null, streamResult.Error);
 
