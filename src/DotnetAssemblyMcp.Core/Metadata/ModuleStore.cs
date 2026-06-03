@@ -253,7 +253,7 @@ internal sealed class ModuleStore : IDisposable
             // swap, deterministic rebuilds that preserve the MVID would silently serve stale IL.
             if (string.Equals(existing.Path, fullPath, StringComparison.OrdinalIgnoreCase))
             {
-                var replacement = new ModuleHandle(mvid, fullPath, opened.PE!, opened.MD!);
+                var replacement = new ModuleHandle(mvid, fullPath, opened.PE!, opened.MD!, opened.Module!.RealDirectory);
                 if (_modules.TryUpdate(mvid, replacement, existing))
                 {
                     // Defer disposal of the old PE — in-flight requests on other threads
@@ -322,7 +322,11 @@ internal sealed class ModuleStore : IDisposable
             }
             var md = pe.GetMetadataReader();
             var mvid = md.GetGuid(md.GetModuleDefinition().Mvid);
-            return new OpenedModule(new ModuleHandle(mvid, openPath, pe, md), pe, md, null);
+            // Anchor the descriptor's real directory captured at load (#156 follow-up). Sibling-PDB
+            // reads compare their opened real parent against this value WITHOUT re-canonicalising,
+            // so an ancestor directory swapped for a symlink after load cannot redirect the read.
+            var realDirectory = readResult.OpenedRealPath is { } orp ? Path.GetDirectoryName(orp) : null;
+            return new OpenedModule(new ModuleHandle(mvid, openPath, pe, md, realDirectory), pe, md, null);
         }
         catch (BadImageFormatException ex)
         {
@@ -422,4 +426,4 @@ internal sealed class ModuleStore : IDisposable
 /// other components consume it as an input parameter and must not dispose its
 /// <see cref="PEReader"/> directly.
 /// </summary>
-internal sealed record ModuleHandle(Guid Mvid, string Path, PEReader PE, MetadataReader MD);
+internal sealed record ModuleHandle(Guid Mvid, string Path, PEReader PE, MetadataReader MD, string? RealDirectory = null);
