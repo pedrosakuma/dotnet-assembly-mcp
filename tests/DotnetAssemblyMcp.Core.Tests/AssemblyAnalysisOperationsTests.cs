@@ -176,4 +176,122 @@ public sealed class AssemblyAnalysisOperationsTests
         result.IsError.Should().BeTrue();
         result.Error!.Kind.Should().Be(ErrorKinds.InvalidArgument);
     }
+
+    [Fact]
+    public void BuildCallGraph_returns_transitive_callers()
+    {
+        var (index, _) = NewSubject();
+        using var _index = index;
+
+        var result = AssemblyAnalysisOperations.BuildCallGraph(index, SampleLibPath, "SampleLib.OrderService", "Compute", depth: 3);
+
+        result.IsError.Should().BeFalse();
+        var graph = result.Data!;
+        graph.Roots.Should().ContainSingle();
+        var root = graph.Roots[0];
+        root.Display.Should().Contain("Compute");
+        // Compute <- Process <- ProcessAsync state machine.
+        root.Callers.Should().ContainSingle(c => c.Display.Contains("Process"));
+        root.Callers[0].Callers.Should().Contain(c => c.Display.Contains("MoveNext"));
+        graph.NodeCount.Should().Be(3);
+        graph.Truncated.Should().BeFalse();
+        graph.Warnings.Should().BeNull();
+    }
+
+    [Fact]
+    public void BuildCallGraph_marks_depth_limited_nodes()
+    {
+        var (index, _) = NewSubject();
+        using var _index = index;
+
+        var result = AssemblyAnalysisOperations.BuildCallGraph(index, SampleLibPath, "SampleLib.OrderService", "Compute", depth: 1);
+
+        result.IsError.Should().BeFalse();
+        var root = result.Data!.Roots[0];
+        var process = root.Callers.Should().ContainSingle().Subject;
+        process.DepthLimited.Should().BeTrue();
+        process.Callers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void BuildCallGraph_builds_one_root_per_overload()
+    {
+        var (index, _) = NewSubject();
+        using var _index = index;
+
+        var result = AssemblyAnalysisOperations.BuildCallGraph(index, SampleLibPath, "SampleLib.OrderService", "Process", depth: 2);
+
+        result.IsError.Should().BeFalse();
+        // Process(int) and Process(string) are both roots.
+        result.Data!.Roots.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void BuildCallGraph_honours_max_nodes_budget()
+    {
+        var (index, _) = NewSubject();
+        using var _index = index;
+
+        var result = AssemblyAnalysisOperations.BuildCallGraph(index, SampleLibPath, "SampleLib.OrderService", "Compute", depth: 3, maxNodes: 1);
+
+        result.IsError.Should().BeFalse();
+        var graph = result.Data!;
+        graph.NodeCount.Should().Be(1);
+        graph.Truncated.Should().BeTrue();
+        graph.Roots[0].Callers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void BuildCallGraph_warns_when_overload_roots_omitted()
+    {
+        var (index, _) = NewSubject();
+        using var _index = index;
+
+        // Two overloads but a budget for a single node: the second root cannot be emitted.
+        var result = AssemblyAnalysisOperations.BuildCallGraph(index, SampleLibPath, "SampleLib.OrderService", "Process", depth: 1, maxNodes: 1);
+
+        result.IsError.Should().BeFalse();
+        var graph = result.Data!;
+        graph.Roots.Should().ContainSingle();
+        graph.Truncated.Should().BeTrue();
+        graph.Warnings.Should().NotBeNull();
+        graph.Warnings.Should().Contain(w => w.Contains("overload root", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void BuildCallGraph_exact_miss_fails_like_explain_method()
+    {
+        var (index, _) = NewSubject();
+        using var _index = index;
+
+        var result = AssemblyAnalysisOperations.BuildCallGraph(index, SampleLibPath, "SampleLib.OrderService", "Proces");
+
+        result.IsError.Should().BeTrue();
+        result.Error!.Kind.Should().Be(ErrorKinds.InvalidArgument);
+        result.Summary.Should().Contain("--contains");
+    }
+
+    [Fact]
+    public void BuildCallGraph_negative_depth_is_rejected()
+    {
+        var (index, _) = NewSubject();
+        using var _index = index;
+
+        var result = AssemblyAnalysisOperations.BuildCallGraph(index, SampleLibPath, "SampleLib.OrderService", "Compute", depth: -1);
+
+        result.IsError.Should().BeTrue();
+        result.Error!.Kind.Should().Be(ErrorKinds.InvalidArgument);
+    }
+
+    [Fact]
+    public void BuildCallGraph_blank_name_is_rejected()
+    {
+        var (index, _) = NewSubject();
+        using var _index = index;
+
+        var result = AssemblyAnalysisOperations.BuildCallGraph(index, SampleLibPath, "SampleLib.OrderService", "  ");
+
+        result.IsError.Should().BeTrue();
+        result.Error!.Kind.Should().Be(ErrorKinds.InvalidArgument);
+    }
 }

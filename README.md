@@ -243,15 +243,24 @@ dotnet-assembly-cli explain-method "$DLL" SampleLib.OrderService Process
 
 # Add --decompile to print the C# body under each overload.
 dotnet-assembly-cli explain-method "$DLL" SampleLib.OrderService Compute --decompile
+
+# Who transitively calls a method? A recursive caller tree, resolved by name.
+dotnet-assembly-cli callgraph "$DLL" SampleLib.OrderService Compute --depth 3
 ```
 
 `explain-method` matches the method name **exactly** by default (and lists near-misses if there
 is none); pass `--contains` for substring matching. Both honour the global `--json` flag, which
 emits the full `AssemblyResult` envelope instead of the human text view.
 
+`callgraph` builds one tree per matched overload, drawing each method's (transitive) callers
+across all loaded modules. Bound it with `--depth` (caller levels, default 3) and `--max-nodes`
+(total nodes, default 200); nodes are marked `[cycle]` for recursion and `[more callers not
+shown]` when the depth limit is reached. It is a MethodDef/IL call-path tree, so generic methods
+appear once (not per closed instantiation).
+
 ### Subcommands
 
-The 22 MCP tools each have a matching 1:1 subcommand, plus two human-oriented composed commands:
+The 22 MCP tools each have a matching 1:1 subcommand, plus three human-oriented composed commands:
 
 | Group | Commands |
 |---|---|
@@ -259,7 +268,7 @@ The 22 MCP tools each have a matching 1:1 subcommand, plus two human-oriented co
 | **Methods** | `get-method`, `decompile-method`, `decompile-type`, `get-method-il`, `list-methods`, `find-method`, `find-callers`, `get-method-source` |
 | **Types** | `list-types`, `list-assembly-references`, `list-resources`, `list-attributes`, `get-type`, `list-derived-types`, `list-members` |
 | **References** | `find-string-references`, `find-attribute-targets`, `find-member-references`, `find-type-references` |
-| **Analysis (composed)** | `explain-type`, `explain-method` |
+| **Analysis (composed)** | `explain-type`, `explain-method`, `callgraph` |
 
 Run `dotnet-assembly-cli <command> --help` for each command's arguments and options.
 

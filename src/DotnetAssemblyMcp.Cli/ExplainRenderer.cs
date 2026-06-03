@@ -103,6 +103,54 @@ internal static class ExplainRenderer
         WriteWarnings(w, e.Warnings);
     }
 
+    public static void WriteCallGraph(TextWriter w, CallGraph g)
+    {
+        ArgumentNullException.ThrowIfNull(w);
+        ArgumentNullException.ThrowIfNull(g);
+
+        w.WriteLine();
+        w.WriteLine($"Call graph: {g.TargetDisplay}   (depth {g.Depth.ToString(CultureInfo.InvariantCulture)}, {Count(g.NodeCount)} node(s){(g.Truncated ? ", truncated" : string.Empty)})");
+
+        if (g.Roots.Count == 0)
+        {
+            w.WriteLine("  (no matching roots)");
+        }
+
+        for (var i = 0; i < g.Roots.Count; i++)
+        {
+            w.WriteLine();
+            WriteCallGraphNode(w, g.Roots[i], prefix: string.Empty, isRoot: true, isLast: i == g.Roots.Count - 1);
+        }
+
+        WriteWarnings(w, g.Warnings);
+    }
+
+    private static void WriteCallGraphNode(TextWriter w, CallGraphNode node, string prefix, bool isRoot, bool isLast)
+    {
+        string marker = node.Cycle ? "  [cycle]" : node.DepthLimited ? "  [more callers not shown]" : string.Empty;
+
+        if (isRoot)
+        {
+            w.WriteLine($"{node.Display}{marker}");
+        }
+        else
+        {
+            string connector = isLast ? "└─ " : "├─ ";
+            w.WriteLine($"{prefix}{connector}{node.Display}{marker}");
+        }
+
+        if (node.Callers.Count == 0)
+        {
+            return;
+        }
+
+        string childPrefix = isRoot ? string.Empty : prefix + (isLast ? "   " : "│  ");
+        for (var i = 0; i < node.Callers.Count; i++)
+        {
+            WriteCallGraphNode(w, node.Callers[i], childPrefix, isRoot: false, isLast: i == node.Callers.Count - 1);
+        }
+    }
+
     private static void WriteMemberGroup(TextWriter w, string label, IReadOnlyList<MemberSummary> members, MemberKind kind, bool truncated)
     {
         var group = members.Where(m => m.Kind == kind).ToList();

@@ -17,6 +17,7 @@ internal static class AnalyzeCommands
     {
         root.Subcommands.Add(BuildExplainType(context));
         root.Subcommands.Add(BuildExplainMethod(context));
+        root.Subcommands.Add(BuildCallGraph(context));
     }
 
     private static Command BuildExplainType(CliContext context)
@@ -67,6 +68,39 @@ internal static class AnalyzeCommands
                 pr.GetValue(maxChars),
                 CancellationToken.None);
             return Render(result, pr.GetValue(context.JsonOption), ExplainRenderer.WriteMethod);
+        });
+        return command;
+    }
+
+    private static Command BuildCallGraph(CliContext context)
+    {
+        var mvidOrPath = new Argument<string>("mvid-or-path") { Description = "Module MVID or absolute path to the assembly." };
+        var typeFullName = new Argument<string>("type-full-name") { Description = "Full declaring type name ('+'-joined for nested types)." };
+        var methodName = new Argument<string>("method-name") { Description = "Method name to resolve (exact by default)." };
+        var depth = new Option<int>("--depth") { Description = "Maximum caller levels below each root (root = level 0). Default 3.", DefaultValueFactory = _ => 3 };
+        var maxNodes = new Option<int>("--max-nodes") { Description = "Hard cap on total rendered nodes across the whole forest. Default 200.", DefaultValueFactory = _ => 200 };
+        var contains = new Option<bool>("--contains") { Description = "Match the method name by case-insensitive substring instead of exact." };
+
+        var command = new Command("callgraph", "Show who transitively calls a method: a recursive caller tree resolved by name.");
+        command.Arguments.Add(mvidOrPath);
+        command.Arguments.Add(typeFullName);
+        command.Arguments.Add(methodName);
+        command.Options.Add(depth);
+        command.Options.Add(maxNodes);
+        command.Options.Add(contains);
+        command.SetAction(pr =>
+        {
+            CliRun.Preload(context, pr);
+            AssemblyResult<CallGraph> result = AssemblyAnalysisOperations.BuildCallGraph(
+                context.Engine.Index,
+                pr.GetValue(mvidOrPath)!,
+                pr.GetValue(typeFullName)!,
+                pr.GetValue(methodName)!,
+                pr.GetValue(depth),
+                pr.GetValue(maxNodes),
+                pr.GetValue(contains),
+                CancellationToken.None);
+            return Render(result, pr.GetValue(context.JsonOption), ExplainRenderer.WriteCallGraph);
         });
         return command;
     }
