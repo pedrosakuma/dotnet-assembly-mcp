@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>DotnetAssemblyMcp.Cli</RootNamespace>
+    <AssemblyName>DotnetAssemblyMcp.Cli</AssemblyName>
+    <Description>Human-driven CLI front-end for static .NET assembly navigation. Shares the same engine as the MCP server (dotnet-assembly-mcp) but is intended for direct terminal use rather than LLM-driven MCP calls.</Description>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackAsTool>true</PackAsTool>
+    <IsPackable>true</IsPackable>
+    <ToolCommandName>dotnet-assembly-cli</ToolCommandName>
+    <PackageId>dotnet-assembly-cli</PackageId>
+    <PackageTags>dotnet;assembly;metadata;decompiler;cli;reverse-engineering</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/pedrosakuma/dotnet-assembly-mcp</PackageProjectUrl>
+    <IncludeBuildOutput>true</IncludeBuildOutput>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="DotnetAssemblyMcp.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.CommandLine" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DotnetAssemblyMcp.Application\DotnetAssemblyMcp.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>

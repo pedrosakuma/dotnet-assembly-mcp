@@ -35,6 +35,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DotnetAssemblyMcp.Core\DotnetAssemblyMcp.Core.csproj" />
+    <ProjectReference Include="..\DotnetAssemblyMcp.Application\DotnetAssemblyMcp.Application.csproj" />
   </ItemGroup>
 
   <ItemGroup>

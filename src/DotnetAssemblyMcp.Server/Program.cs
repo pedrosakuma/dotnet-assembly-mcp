@@ -103,11 +103,15 @@ return 0;
 
 static void RegisterCoreServices(IServiceCollection services, IConfiguration configuration)
 {
-    services.AddSingleton<IMetadataIndex>(_ =>
-        new MetadataIndex(watchForChanges:
-            configuration.GetValue("AssemblyMcp:WatchForChanges", defaultValue: true)));
-    services.AddSingleton<IDecompiler, Decompiler>();
-    services.AddSingleton<IIlDisassembler, IlDisassembler>();
+    // Build the engine through a DI factory delegate (not an eager instance) so the container
+    // OWNS the created services and disposes them at host shutdown. Registering pre-created
+    // instances via the AddSingleton(instance) overload would NOT be disposed by DI — the
+    // MetadataIndex (file watchers, PE readers) and IlDisassembler (cached PEFiles) would leak.
+    services.AddSingleton(sp => DotnetAssemblyMcp.Application.AssemblyEngineFactory.Create(
+        watchForChanges: configuration.GetValue("AssemblyMcp:WatchForChanges", defaultValue: true)));
+    services.AddSingleton(sp => sp.GetRequiredService<DotnetAssemblyMcp.Application.AssemblyEngine>().Index);
+    services.AddSingleton(sp => sp.GetRequiredService<DotnetAssemblyMcp.Application.AssemblyEngine>().Decompiler);
+    services.AddSingleton(sp => sp.GetRequiredService<DotnetAssemblyMcp.Application.AssemblyEngine>().Disassembler);
 }
 
 static Microsoft.Extensions.DependencyInjection.IMcpServerBuilder ConfigureMcpServer(IServiceCollection services) =>

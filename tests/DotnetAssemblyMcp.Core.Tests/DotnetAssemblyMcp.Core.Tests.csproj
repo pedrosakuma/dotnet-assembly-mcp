@@ -19,6 +19,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\DotnetAssemblyMcp.Core\DotnetAssemblyMcp.Core.csproj" />
     <ProjectReference Include="..\..\src\DotnetAssemblyMcp.Server\DotnetAssemblyMcp.Server.csproj" />
+    <ProjectReference Include="..\..\src\DotnetAssemblyMcp.Cli\DotnetAssemblyMcp.Cli.csproj" />
     <ProjectReference Include="..\fixtures\SampleLib\SampleLib.csproj" />
     <ProjectReference Include="..\fixtures\SampleConsumer\SampleConsumer.csproj" />
   </ItemGroup>
