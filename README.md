@@ -187,28 +187,77 @@ default instead of an MCP envelope.
 
 ```bash
 dotnet tool install -g dotnet-assembly-cli
-
-# Enumerate types in a module
-dotnet-assembly-cli list-types ./bin/Release/net10.0/MyLib.dll
-
-# Resolve + decompile a method (auto-loads the assembly via --assembly)
-dotnet-assembly-cli find-method ./MyLib.dll "Process"
-dotnet-assembly-cli decompile-method <mvid> 0x06000010 --assembly ./MyLib.dll
-
-# Reverse call graph; --load primes the index for handle-based commands
-dotnet-assembly-cli --load ./MyLib.dll find-callers <mvid> 0x06000010
+dotnet-assembly-cli --help        # list every subcommand
+dotnet-assembly-cli list-types --help
 ```
 
-Two global options are honoured by every subcommand:
+### A worked walkthrough
+
+Start from a path, drill down to a method, then pivot through the call graph — the same
+loop an agent runs, but readable in your terminal. (Paths must be **absolute**; the index
+keys modules by MVID, not by relative path.)
+
+```bash
+DLL=$(realpath ./bin/Release/net10.0/MyLib.dll)
+
+# 1. What's in here? (a path-taking command loads the module for you)
+dotnet-assembly-cli list-types "$DLL"
+#   25 type(s).
+#   ...
+#     FullName: SampleLib.OrderService
+#     Handle:   t:b613bdf8-…:0x02000007
+
+# 2. Find a method by name regex — gives you its (mvid, token) + handle
+dotnet-assembly-cli find-method "$DLL" "Process"
+#   3 match(es) for /Process/.
+#     Handle:    m:b613bdf8-…:0x0600000D
+#     Signature: int SampleLib.OrderService.Process(int)
+
+# 3. Decompile it (--assembly loads the module before resolving the token)
+dotnet-assembly-cli decompile-method b613bdf8-… 0x0600000D --assembly "$DLL"
+#   SampleLib.OrderService.Process — 240 chars of C#.
+#   Source:
+#     public int Process(int orderId) { _counter++; … }
+
+# 4. Who calls it? --load primes the index so the handle resolves
+dotnet-assembly-cli --load "$DLL" find-callers b613bdf8-… 0x0600000D
+#   1 caller(s) in 1 module (built).
+#     Display: SampleLib.OrderService+<ProcessAsync>d__6.MoveNext
+
+# Pipe any command through --json for the full MCP-shaped envelope
+dotnet-assembly-cli --load "$DLL" find-callers b613bdf8-… 0x0600000D --json | jq '.Data.Callers'
+```
+
+### Subcommands
+
+Every MCP tool has a matching subcommand. They fall into four groups:
+
+| Group | Commands |
+|---|---|
+| **Lifecycle** | `load`, `list-assemblies`, `import-manifest` |
+| **Methods** | `get-method`, `decompile-method`, `decompile-type`, `get-method-il`, `list-methods`, `find-method`, `find-callers`, `get-method-source` |
+| **Types** | `list-types`, `list-assembly-references`, `list-resources`, `list-attributes`, `get-type`, `list-derived-types`, `list-members` |
+| **References** | `find-string-references`, `find-attribute-targets`, `find-member-references`, `find-type-references` |
+
+Run `dotnet-assembly-cli <command> --help` for each command's arguments and options.
+
+### Global options & exit codes
+
+Two options are honoured by every subcommand:
 
 | Option | Effect |
 |---|---|
-| `--json` | Emit the full `AssemblyResult` envelope as indented JSON (scriptable; identical to the MCP `data`). |
-| `--load <path>` | Load an assembly into the index before the command runs. Repeatable. Because the CLI is one-shot, a handle (`m:<mvid>:0x…`) from a previous run only resolves once its module is reloaded — `--load` (or a path-taking subcommand) is how you do that. |
+| `--json` | Emit the full `AssemblyResult` envelope as indented JSON (scriptable; identical to the MCP `data`). Without it, you get a human-readable rendering of the result. |
+| `--load <path>` | Load an assembly into the index before the command runs. Repeatable. Because the CLI is one-shot, a handle (`m:<mvid>:0x…`) only resolves once its module is loaded — `--load` (or a path-taking subcommand such as `find-method`, or a token command's `--assembly`) is how you do that. |
+
+| Exit code | Meaning |
+|---|---|
+| `0` | Success. |
+| `1` | The operation returned an error result (e.g. unknown MVID, absolute-path violation), or no command/an unknown command was given. The error message is printed to **stderr**. |
+| `2` | Invalid argument value (e.g. an unparseable `--kind` / `--mode`). |
 
 The architecture: a shared **`DotnetAssemblyMcp.Application`** project holds the tool orchestration;
-the MCP `Server` and the `Cli` are both thin hosts over it, so the two never drift. A non-zero
-exit code (`1`) signals an error result.
+the MCP `Server` and the `Cli` are both thin hosts over it, so the two never drift.
 
 ## Companion project
 
