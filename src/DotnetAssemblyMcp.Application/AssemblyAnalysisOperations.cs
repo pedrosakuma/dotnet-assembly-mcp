@@ -421,6 +421,16 @@ public static class AssemblyAnalysisOperations
             }
 
             IReadOnlyList<CallerRef> callers = result.Data!.Callers;
+
+            // An oversized loaded module can be skipped while building the xref index, which
+            // would otherwise silently hide cross-module callers. Surface that the result for
+            // this node is partial and flag the whole graph as incomplete.
+            if (result.Data!.SkippedOverBudgetModules is { Count: > 0 } skipped)
+            {
+                _warnings.Add($"callers of '{display}' are partial: {skipped.Count} oversized module(s) skipped.");
+                Truncated = true;
+            }
+
             if (callers.Count == 0)
             {
                 return new CallGraphNode(mvid, token, handle, display, Array.Empty<CallGraphNode>());
