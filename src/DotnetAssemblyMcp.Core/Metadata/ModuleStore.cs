@@ -29,6 +29,7 @@ internal sealed class ModuleStore : IDisposable
     private readonly ConcurrentDictionary<string, DateTime> _pendingReloads =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly bool _watch;
+    private readonly IReadOnlyList<string>? _allowedRoots;
     private int _disposed;
 
     // PEReader graveyard: holds readers we logically evicted (same-MVID reload, MVID change)
@@ -49,7 +50,35 @@ internal sealed class ModuleStore : IDisposable
     /// <summary>Raised after any module mutation: load, reload (same/changed MVID), or load-failure on reload.</summary>
     public event EventHandler<ModuleReloadedEventArgs>? ModuleReloaded;
 
-    public ModuleStore(bool watchForChanges) => _watch = watchForChanges;
+    public ModuleStore(bool watchForChanges) : this(watchForChanges, allowedRoots: null) { }
+
+    /// <param name="watchForChanges">Install per-directory file watchers with debounced reload.</param>
+    /// <param name="allowedRoots">
+    /// Operator-configured trusted roots for the untrusted-path-hint contract (#150).
+    /// <c>null</c> disables enforcement (any absolute path may be loaded, subject to the existing
+    /// symlink/size/MVID defenses). A non-null list activates enforcement; an empty list (e.g. all
+    /// configured roots were invalid) fails closed and denies every load.
+    /// </param>
+    public ModuleStore(bool watchForChanges, IReadOnlyList<string>? allowedRoots)
+    {
+        _watch = watchForChanges;
+        _allowedRoots = CanonicalizeRoots(allowedRoots);
+    }
+
+    private static List<string>? CanonicalizeRoots(IReadOnlyList<string>? roots)
+    {
+        if (roots is null) return null; // enforcement disabled
+        var canonical = new List<string>(roots.Count);
+        foreach (var r in roots)
+        {
+            if (string.IsNullOrWhiteSpace(r) || !Path.IsPathFullyQualified(r)) continue;
+            var real = PathPolicy.CanonicalizeRealPath(r);
+            if (real is not null) canonical.Add(real);
+        }
+        // Non-null even when empty: an operator who configured roots that all dropped out gets
+        // fail-closed behaviour (deny all) rather than a silent revert to allow-all.
+        return canonical;
+    }
 
     public int Count => _modules.Count;
 
@@ -139,10 +168,8 @@ internal sealed class ModuleStore : IDisposable
         }
     }
 
-#pragma warning disable CA1822 // Mark members as static — Probe is logically instance-scoped (lives next to Load).
     public ProbeResult Probe(string path)
     {
-#pragma warning restore CA1822
         var absErr = PathPolicy.RequireAbsolute(path);
         if (absErr is not null) return ProbeResult.Fail(absErr);
         if (!File.Exists(path))
@@ -255,15 +282,22 @@ internal sealed class ModuleStore : IDisposable
     private readonly record struct OpenedModule(
         ModuleHandle? Module, PEReader? PE, MetadataReader? MD, AssemblyError? Error);
 
-    private static OpenedModule OpenModule(string fullPath)
+    private OpenedModule OpenModule(string fullPath)
     {
+        // Allow-list gate (#150). When enforcement is active, open the canonical real path that
+        // passed containment — NOT the original fullPath — so an ancestor symlink retargeted
+        // between this check and the read cannot redirect the open outside an allowed root.
+        // When enforcement is disabled, ResolveWithinRoots echoes fullPath unchanged.
+        var (resolvedPath, rootErr) = PathPolicy.ResolveWithinRoots(fullPath, _allowedRoots);
+        if (rootErr is not null) return new OpenedModule(null, null, null, rootErr);
+        var openPath = resolvedPath!;
         try
         {
             // SafeFileOpener enforces size cap and reparse-point rejection before allocation.
             // The PEReader is backed by a MemoryStream so the file on disk stays unlocked —
             // required for the Tier-1 watcher to observe rewrites on Windows where
             // File.Move(overwrite: true) needs the destination free of open writable handles.
-            var readResult = SafeFileOpener.ReadAllBytes(fullPath, SafeFileOpener.DefaultMaxAssemblyBytes);
+            var readResult = SafeFileOpener.ReadAllBytes(openPath, SafeFileOpener.DefaultMaxAssemblyBytes);
             if (!readResult.IsSuccess)
             {
                 return new OpenedModule(null, null, null, readResult.Error);
@@ -273,11 +307,11 @@ internal sealed class ModuleStore : IDisposable
             {
                 pe.Dispose();
                 return new OpenedModule(null, null, null,
-                    new AssemblyError(ErrorKinds.ModuleLoadFailed, $"not a managed PE: {ErrorRedactor.RedactPath(fullPath)}"));
+                    new AssemblyError(ErrorKinds.ModuleLoadFailed, $"not a managed PE: {ErrorRedactor.RedactPath(openPath)}"));
             }
             var md = pe.GetMetadataReader();
             var mvid = md.GetGuid(md.GetModuleDefinition().Mvid);
-            return new OpenedModule(new ModuleHandle(mvid, fullPath, pe, md), pe, md, null);
+            return new OpenedModule(new ModuleHandle(mvid, openPath, pe, md), pe, md, null);
         }
         catch (BadImageFormatException ex)
         {

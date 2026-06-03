@@ -60,9 +60,18 @@ public sealed partial class MetadataIndex : IMetadataIndex, IDisposable
 
     /// <summary>Creates an index, optionally installing per-directory file watchers.</summary>
     /// <param name="watchForChanges">When true, reloads modules on disk changes and invalidates the old MVID.</param>
-    public MetadataIndex(bool watchForChanges)
+    public MetadataIndex(bool watchForChanges) : this(watchForChanges, allowedRoots: null) { }
+
+    /// <summary>Creates an index with watcher and untrusted-path allow-list configuration.</summary>
+    /// <param name="watchForChanges">When true, reloads modules on disk changes and invalidates the old MVID.</param>
+    /// <param name="allowedRoots">
+    /// Operator-configured trusted roots for the untrusted-path-hint contract (#150). <c>null</c>
+    /// disables enforcement (back-compatible default); a non-null list restricts every filesystem
+    /// load to paths whose canonical real location is contained in one of the roots.
+    /// </param>
+    public MetadataIndex(bool watchForChanges, IReadOnlyList<string>? allowedRoots)
     {
-        _store = new ModuleStore(watchForChanges);
+        _store = new ModuleStore(watchForChanges, allowedRoots);
 
         _xrefIndex = new XrefIndex(_xrefCacheDir);
         _stringIndex = new StringIndex(_store);

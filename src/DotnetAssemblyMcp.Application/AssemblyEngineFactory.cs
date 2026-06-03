@@ -24,10 +24,14 @@ public static class AssemblyEngineFactory
     /// Builds an <see cref="AssemblyEngine"/>. <paramref name="watchForChanges"/> installs the
     /// per-directory file watchers that reload modules on disk changes — appropriate for a
     /// long-lived server, and harmless (just unused) for a one-shot CLI invocation.
+    /// <paramref name="allowedRoots"/> carries the untrusted-path-hint allow-list (#150): <c>null</c>
+    /// disables enforcement (back-compatible default); a non-null list restricts every filesystem
+    /// load to paths whose canonical real location is contained in one of the roots.
     /// </summary>
-    public static AssemblyEngine Create(bool watchForChanges = false)
+    public static AssemblyEngine Create(
+        bool watchForChanges = false, IReadOnlyList<string>? allowedRoots = null)
     {
-        var index = new MetadataIndex(watchForChanges);
+        var index = new MetadataIndex(watchForChanges, allowedRoots);
         return new AssemblyEngine(index, new Decompiler(index), new IlDisassembler(index));
     }
 }
