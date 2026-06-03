@@ -231,12 +231,12 @@ dotnet-assembly-cli find-callers b613bdf8-… 0x0600000D --load "$DLL" --json | 
 ```
 
 > **The CLI is stateless per-invocation.** Each run builds a fresh index that is discarded on
-> exit, so a standalone `load` does not carry over to a later `list-assemblies`. Everything must
-> reach the index *within the same command line*: pass a path positional, a method command's
-> `--assembly`, or one or more `--load <path>`. Cross-module queries (`find-callers`,
-> `find-type-references`, `find-string-references`, …) only see the modules you loaded — their
-> output reports the corpus size (`… in N module(s)`) so an empty result over `1 module` is your
-> cue to `--load` the rest of the app.
+> exit. There is therefore no standalone `load` or `list-assemblies` subcommand — they would have
+> no meaning across processes — and everything must reach the index *within the same command line*:
+> pass a path positional, a method command's `--assembly`, or one or more `--load <path>`.
+> Cross-module queries (`find-callers`, `find-type-references`, `find-string-references`, …) only
+> see the modules you loaded — their output reports the corpus size (`… in N module(s)`) so an
+> empty result over `1 module` is your cue to `--load` the rest of the app.
 
 ### Shortcut: `explain-type` / `explain-method`
 
@@ -285,11 +285,14 @@ dependency version swap or type forward — is not flagged as a change.
 
 ### Subcommands
 
-The 22 MCP tools each have a matching 1:1 subcommand, plus four human-oriented composed commands:
+The CLI exposes 20 of the 22 MCP tools as 1:1 subcommands, plus four human-oriented composed
+commands. The two stateful lifecycle tools (`load_assembly`, `list_assemblies`) are intentionally
+omitted: in a one-shot CLI they have no standalone meaning (use the global `--load <path>` option
+to prime the index instead).
 
 | Group | Commands |
 |---|---|
-| **Lifecycle** | `load`, `list-assemblies`, `import-manifest` |
+| **Lifecycle** | `import-manifest` |
 | **Methods** | `get-method`, `decompile-method`, `decompile-type`, `get-method-il`, `list-methods`, `find-method`, `find-callers`, `get-method-source` |
 | **Types** | `list-types`, `list-assembly-references`, `list-resources`, `list-attributes`, `get-type`, `list-derived-types`, `list-members` |
 | **References** | `find-string-references`, `find-attribute-targets`, `find-member-references`, `find-type-references` |

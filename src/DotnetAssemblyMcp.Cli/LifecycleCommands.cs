@@ -5,53 +5,18 @@ using DotnetAssemblyMcp.Core.Metadata;
 
 namespace DotnetAssemblyMcp.Cli;
 
-/// <summary>Lifecycle subcommands: <c>load</c>, <c>list-assemblies</c>, <c>import-manifest</c>.</summary>
+/// <summary>Lifecycle subcommands: <c>import-manifest</c>.</summary>
+/// <remarks>
+/// The stateful MCP <c>load_assembly</c> / <c>list_assemblies</c> tools have no standalone meaning
+/// in a one-shot CLI (each invocation builds and discards its own index), so they are intentionally
+/// not exposed as subcommands. Prime the index with the global <c>--load &lt;path&gt;</c> option, or
+/// pass a path directly to a path-taking command instead.
+/// </remarks>
 internal static class LifecycleCommands
 {
     public static void Register(RootCommand root, CliContext context)
     {
-        root.Subcommands.Add(BuildLoad(context));
-        root.Subcommands.Add(BuildListAssemblies(context));
         root.Subcommands.Add(BuildImportManifest(context));
-    }
-
-    private static Command BuildLoad(CliContext context)
-    {
-        var pathArg = new Argument<string>("path") { Description = "Path (relative or absolute) to a managed PE assembly (.dll / .exe)." };
-        var command = new Command(
-            "load",
-            "Load a managed assembly and print its module summary. The CLI is stateless per-invocation, "
-            + "so a separate 'list-assemblies' run won't see it; to prime modules for another command, pass "
-            + "that command a '--load <path>' instead.");
-        command.Arguments.Add(pathArg);
-        command.SetAction(pr => CliRun.Execute(context, pr, engine =>
-            AssemblyOperations.LoadAssembly(engine.Index, CliPaths.ResolvePathOnly(pr.GetValue(pathArg))!)));
-        return command;
-    }
-
-    private static Command BuildListAssemblies(CliContext context)
-    {
-        var command = new Command(
-            "list-assemblies",
-            "List modules loaded in THIS invocation. The CLI is stateless, so this only shows modules primed "
-            + "on the same command line via '--load' (e.g. 'list-assemblies --load a.dll --load b.dll').");
-        command.SetAction(pr =>
-        {
-            CliRun.Preload(context, pr);
-            var result = AssemblyOperations.ListAssemblies(context.Engine.Index);
-            bool json = pr.GetValue(context.JsonOption);
-            if (!json && !result.IsError && result.Data is { Count: 0 })
-            {
-                Console.WriteLine(
-                    "No assemblies loaded in this invocation. The CLI is stateless per-process: pass one or more "
-                    + "'--load <path>' on the same command line (e.g. 'list-assemblies --load /path/to/your.dll'), "
-                    + "or use a path-based command such as 'list-types <path>'.");
-                return 0;
-            }
-
-            return CliRenderer.Render(result, json);
-        });
-        return command;
     }
 
     private static Command BuildImportManifest(CliContext context)
