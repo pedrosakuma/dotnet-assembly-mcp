@@ -146,6 +146,7 @@ public static class AssemblyAnalysisOperations
         // mode below so the choice between exact / substring is made on the complete candidate set.
         var candidates = new List<MethodSummary>();
         int? cursor = 0;
+        var paginationExhausted = false;
         for (var page = 0; page < MaxOverloadPages; page++)
         {
             AssemblyResult<ListMethodsPage> methodsResult = AssemblyOperations.ListMethods(
@@ -160,10 +161,21 @@ public static class AssemblyAnalysisOperations
             candidates.AddRange(methodsPage.Methods);
             if (methodsPage.NextCursor is null)
             {
+                paginationExhausted = true;
                 break;
             }
 
             cursor = methodsPage.NextCursor;
+        }
+
+        if (!paginationExhausted)
+        {
+            // We hit the page cap with more matches still pending. Returning here would risk
+            // reporting an exact miss (or a partial --contains set) over an incomplete candidate
+            // list, so fail loudly and ask the caller to narrow the query instead.
+            return AssemblyResult.Fail<MethodExplanation>(
+                $"Too many methods matching '{methodName}' on '{typeFullName}' to enumerate ({candidates.Count}+ across {MaxOverloadPages} pages). Narrow the method name.",
+                new AssemblyError(ErrorKinds.PatternTooBroad, $"Overload enumeration exceeded {MaxOverloadPages} pages for '{methodName}' on '{typeFullName}'."));
         }
 
         List<MethodSummary> exact = candidates
