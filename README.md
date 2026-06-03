@@ -269,6 +269,9 @@ return-type, visibility or modifier (`static` / `virtual` / `abstract` / `sealed
 `const`) change on the same signature is reported as a change rather than an add + remove.
 Property / event accessors appear as their `get_` / `set_` / `add_` / `remove_` methods. Finding
 differences still exits 0 (a diff is not an error); only an unreadable input assembly exits 1.
+Type identity is compared by full name (signatures render type references by full name without
+assembly identity), so a type that keeps its full name but moves to a different assembly — e.g. a
+dependency version swap or type forward — is not flagged as a change.
 
 ### Subcommands
 

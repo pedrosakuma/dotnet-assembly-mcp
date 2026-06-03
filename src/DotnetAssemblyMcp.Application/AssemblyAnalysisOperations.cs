@@ -496,6 +496,11 @@ public static class AssemblyAnalysisOperations
     /// change rather than an add+remove. A visible type whose surface cannot be read is excluded
     /// and flagged via <see cref="AssemblyDiff.Incomplete"/> + a warning rather than diffed against
     /// an empty surface.
+    /// <para>
+    /// Known limitation: type references are compared by full name only (signatures render type
+    /// references without assembly identity), so a type that keeps its full name but moves to a
+    /// different assembly — e.g. a dependency version swap or a type forward — is not flagged.
+    /// </para>
     /// </summary>
     /// <param name="index">The metadata index.</param>
     /// <param name="left">Baseline module MVID or filesystem path (auto-loaded).</param>
