@@ -10,8 +10,8 @@ internal static class AssemblyToolDescriptions
     internal const string Common_MvidOrPathModule = """MVID GUID or absolute path of the module; only used when typeHandle is omitted.""";
     internal const string Common_PaginationCursor = """Pagination cursor returned by the previous call. Pass 0 or omit for the first page.""";
     internal const string Common_TypeFullNameDescription = """Full type name (case-sensitive, '+'-joined for nested types); only used when typeHandle is omitted.""";
-    internal const string Common_MetadataToken = """Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001).""";
-    internal const string Common_ModuleVersionId = """ModuleVersionId GUID of the assembly the method belongs to, as a string ('D' format).""";
+    internal const string Common_MetadataToken = """Method definition metadata token (table 0x06). Accepts decimal or hex (0x06000001). Required with a GUID moduleVersionId; optional (and cross-checked) when moduleVersionId is a full 'm:<mvid>:0x<token>' method handle.""";
+    internal const string Common_ModuleVersionId = """ModuleVersionId GUID of the assembly the method belongs to ('D' format) — the canonical handoff anchor emitted by dotnet-diagnostics-mcp. As an intra-server convenience it also accepts a full method handle 'm:<mvid>:0x<token>' (as returned by list_methods / find_method); when a handle is supplied, metadataToken may be omitted.""";
     internal const string Common_AssemblyPathHint = """Optional absolute path the producer observed for this assembly (see get_method for semantics).""";
     internal const string Common_MaxHitsDescription = """Optional cap on returned hits (default 1000, hard cap 10000). Pass 0 for default.""";
     internal const string Common_TypeHandle = """Type handle 't:<mvid>:0x<typeToken>' as returned by list_types. Pass null/empty if using mvidOrPath+typeFullName instead.""";
@@ -48,6 +48,8 @@ internal static class AssemblyToolDescriptions
     internal const string DecompileMethod_MaxChars = """Optional cap on returned characters. Pass 0 to use the server default (16 KiB).""";
 
     internal const string DecompileType_Summary = """Returns the C# source of an entire TypeDef (table 0x02) via ICSharpCode.Decompiler — members in declaration order with attributes, properties, events, and nested types. Replaces N decompile_method round-trips for the common 'audit this whole class' task. Output is hard-capped by maxChars (default 64 KiB — four times decompile_method's default since a type aggregates multiple method bodies) and LRU-cached keyed by (mvid, typeToken, maxChars) in a budget independent from decompile_method's cache. Pass a TypeRef / TypeSpec / MethodDef token and the call fails with identity_malformed — use get_type / list_types to resolve a TypeDef first. Generic types are emitted in their open form.""";
+    internal const string DecompileType_ModuleVersionId = """ModuleVersionId GUID of the module that owns the type ('D' format). As an intra-server convenience it also accepts a full type handle 't:<mvid>:0x<typeToken>' (as returned by list_types / get_type); when a handle is supplied, metadataToken may be omitted.""";
+    internal const string DecompileType_MetadataToken = """TypeDef metadata token (table 0x02). Accepts decimal or hex. Required with a GUID moduleVersionId; optional (and cross-checked) when moduleVersionId is a full 't:<mvid>:0x<typeToken>' type handle.""";
     internal const string DecompileType_MaxChars = """Optional cap on returned characters. Pass 0 to use the server default (64 KiB).""";
 
     // GetMethodIl.
@@ -88,7 +90,7 @@ internal static class AssemblyToolDescriptions
     internal const string ListMethods_PageSize = """Max methods per page (default 50, capped at 500).""";
 
     // FindMethod.
-    internal const string FindMethod_Summary = """Module-wide method search. Matches every MethodDef whose short name matches the supplied regular expression (case-insensitive) and, optionally, whose signature contains a substring. Returns hits with the canonical 'm:<mvid>:0x<token>' handle ready to feed into get_method / decompile_method / find_callers. Use this when you do not yet have a type in mind; otherwise prefer list_methods which is cheaper.""";
+    internal const string FindMethod_Summary = """Module-wide method search. Matches every MethodDef whose short name matches the supplied regular expression (case-insensitive) and, optionally, whose signature contains a substring. Each hit carries both the canonical 'm:<mvid>:0x<token>' handle and the raw (moduleVersionId, metadataToken) pair — either form feeds straight into get_method / decompile_method / find_callers (paste the handle into moduleVersionId, or pass the pair). Use this when you do not yet have a type in mind; otherwise prefer list_methods which is cheaper.""";
     internal const string FindMethod_MvidOrPath = """Either the MVID GUID ('D' format) of a previously loaded module, or an absolute path to a managed PE assembly (will be loaded on demand).""";
     internal const string FindMethod_NamePattern = """Regular expression matched (case-insensitive) against each method's short name.""";
     internal const string FindMethod_SignatureContains = """Optional case-insensitive substring filter on the decoded signature (e.g. 'CancellationToken').""";
@@ -97,8 +99,8 @@ internal static class AssemblyToolDescriptions
 
     // FindCallers.
     internal const string FindCallers_Summary = """Returns every method whose IL emits a direct call to the requested callee — within the callee's own module via MethodDef tokens, and across any other loaded module via MemberRef signature matching (assembly name + type fullname + method name + parameter signature + generic arity). The reverse index is built lazily per module and cached at ~/.cache/dotnet-assembly-mcp/<mvid>.xref so subsequent queries are O(callers).""";
-    internal const string FindCallers_ModuleVersionId = """ModuleVersionId GUID of the callee, as a string ('D' format).""";
-    internal const string FindCallers_MetadataToken = """Callee MethodDef metadata token (table 0x06). Accepts decimal or hex.""";
+    internal const string FindCallers_ModuleVersionId = """ModuleVersionId GUID of the callee, as a string ('D' format). Also accepts a full method handle 'm:<mvid>:0x<token>' (then metadataToken may be omitted). This convenience applies only to this parameter — not to methodSpecModuleVersionId, which addresses a MethodSpec (table 0x2B) row.""";
+    internal const string FindCallers_MetadataToken = """Callee MethodDef metadata token (table 0x06). Accepts decimal or hex. Optional (and cross-checked) when moduleVersionId is a full 'm:<mvid>:0x<token>' method handle.""";
     internal const string FindCallers_GenericTypeArguments = """Optional CLR reflection-style full names for the declaring type's generic arguments (see get_method).""";
     internal const string FindCallers_GenericMethodArguments = """Optional CLR reflection-style full names for the method's generic arguments. When supplied, the caller list is narrowed to call sites whose MethodSpec.Instantiation matches element-wise (docs/handoff-contract.md §3.5).""";
     internal const string FindCallers_MethodSpecModuleVersionId = """Optional fast-path (§3.5): ModuleVersionId of a MethodSpec row. Paired with methodSpecMetadataToken.""";

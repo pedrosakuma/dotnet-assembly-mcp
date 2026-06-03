@@ -59,6 +59,12 @@ Every diagnostic primitive that references a method MUST embed a `method` object
 
 `(moduleVersionId, metadataToken)` together are sufficient to resolve a method. Everything else in §2.2 is for display and best-effort fallback.
 
+> **Note (consumer convenience, non-normative):** the `dotnet-assembly-mcp` MCP tools may
+> additionally accept a single opaque handle (`m:<mvid>:0x<token>`) in place of the pair as an
+> intra-server navigation shortcut. This does **not** relax the contract: producers MUST still
+> emit the canonical `(moduleVersionId, metadataToken)` pair, and every consumer tool continues
+> to accept it unchanged.
+
 ### 2.2 Optional fields (producer SHOULD emit when known, consumer MUST NOT require)
 
 | Field          | Type      | Meaning |
