@@ -75,6 +75,7 @@ internal static class CliApplication
         MethodCommands.Register(root, context);
         TypeCommands.Register(root, context);
         ReferenceCommands.Register(root, context);
+        AnalyzeCommands.Register(root, context);
 
         return root;
     }

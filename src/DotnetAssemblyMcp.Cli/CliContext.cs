@@ -40,7 +40,11 @@ internal static class CliRun
         return CliRenderer.Render(result, parseResult.GetValue(context.JsonOption));
     }
 
-    private static void Preload(CliContext context, ParseResult parseResult)
+    /// <summary>
+    /// Loads every <c>--load</c> path into the index (best-effort; failures are warned to stderr).
+    /// Exposed so composed commands that bypass <see cref="Execute{T}"/> still honour the global option.
+    /// </summary>
+    public static void Preload(CliContext context, ParseResult parseResult)
     {
         string[]? paths = parseResult.GetValue(context.LoadOption);
         if (paths is null)

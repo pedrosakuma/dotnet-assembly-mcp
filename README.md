@@ -228,9 +228,30 @@ dotnet-assembly-cli --load "$DLL" find-callers b613bdf8-… 0x0600000D
 dotnet-assembly-cli --load "$DLL" find-callers b613bdf8-… 0x0600000D --json | jq '.Data.Callers'
 ```
 
+### Shortcut: `explain-type` / `explain-method`
+
+Steps 1–3 above chase a handle and a token by hand — fine for an agent, tedious for a human.
+The two **composed** commands collapse that loop: give them an assembly plus a **type name**
+(and optionally a **method name**) and they resolve everything internally.
+
+```bash
+# Whole-type overview in one shot: summary, attributes, members and methods grouped.
+dotnet-assembly-cli explain-type "$DLL" SampleLib.OrderService
+
+# A method by name — every overload, each with its source location (file:line via PDB).
+dotnet-assembly-cli explain-method "$DLL" SampleLib.OrderService Process
+
+# Add --decompile to print the C# body under each overload.
+dotnet-assembly-cli explain-method "$DLL" SampleLib.OrderService Compute --decompile
+```
+
+`explain-method` matches the method name **exactly** by default (and lists near-misses if there
+is none); pass `--contains` for substring matching. Both honour the global `--json` flag, which
+emits the full `AssemblyResult` envelope instead of the human text view.
+
 ### Subcommands
 
-Every MCP tool has a matching subcommand. They fall into four groups:
+The 22 MCP tools each have a matching 1:1 subcommand, plus two human-oriented composed commands:
 
 | Group | Commands |
 |---|---|
@@ -238,6 +259,7 @@ Every MCP tool has a matching subcommand. They fall into four groups:
 | **Methods** | `get-method`, `decompile-method`, `decompile-type`, `get-method-il`, `list-methods`, `find-method`, `find-callers`, `get-method-source` |
 | **Types** | `list-types`, `list-assembly-references`, `list-resources`, `list-attributes`, `get-type`, `list-derived-types`, `list-members` |
 | **References** | `find-string-references`, `find-attribute-targets`, `find-member-references`, `find-type-references` |
+| **Analysis (composed)** | `explain-type`, `explain-method` |
 
 Run `dotnet-assembly-cli <command> --help` for each command's arguments and options.
 
