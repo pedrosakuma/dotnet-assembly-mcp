@@ -59,7 +59,7 @@ public sealed class GetMethodIncludeNativeBodyTests
 
         result.IsError.Should().BeFalse(result.Summary);
         result.Data!.NativeBody.Should().BeNull();
-        result.Hints.Should().Contain(h => h.NextTool == "dotnet-diagnostics-mcp.capture_method_disasm");
+        result.Hints.Should().Contain(h => h.NextTool == "dotnet-diagnostics-mcp.capture_method_bytes");
     }
 
     [Fact]
@@ -75,7 +75,7 @@ public sealed class GetMethodIncludeNativeBodyTests
         result.IsError.Should().BeFalse(result.Summary);
         result.Data!.NativeBody.Should().BeNull();
         result.Hints.Should().NotContain(h => h.NextTool == "dotnet-native-mcp.disassemble");
-        result.Hints.Should().NotContain(h => h.NextTool == "dotnet-diagnostics-mcp.capture_method_disasm");
+        result.Hints.Should().NotContain(h => h.NextTool == "dotnet-diagnostics-mcp.capture_method_bytes");
     }
 
     private static string? FindSharedCoreLib()
