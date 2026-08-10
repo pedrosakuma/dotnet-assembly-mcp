@@ -17,22 +17,29 @@ When in doubt, mirror the companion. Don't invent a new pattern.
 
 ## 1. Project layout
 
-Two projects, one solution:
+Four projects, one solution:
 
 ```
 src/
-  DotnetAssemblyMcp.Core/      ← domain logic, NO MCP package references
-  DotnetAssemblyMcp.Server/    ← MCP tools, transport, auth; thin wrapper over Core
+  DotnetAssemblyMcp.Core/         ← domain logic, NO MCP package references
+  DotnetAssemblyMcp.Application/  ← tool orchestration (parsing, generic-resolution,
+                                     error-mapping) shared by Server and Cli; no MCP refs
+  DotnetAssemblyMcp.Server/       ← MCP tools, transport, auth; thin wrapper over Application
+  DotnetAssemblyMcp.Cli/          ← dotnet-assembly-cli, thin wrapper over Application
 tests/
-  DotnetAssemblyMcp.Core.Tests/
-  DotnetAssemblyMcp.Server.IntegrationTests/
-samples|fixtures/
-  SampleLib/                   ← already exists on spike/metadata-lib
+  DotnetAssemblyMcp.Core.Tests/   ← unit + integration tests (see Integration/ subfolder)
+  fixtures/
+    SampleLib/, SampleLibV2/, SampleLibR2R/, SampleConsumer/  ← fixture assemblies built at test time
 ```
 
 - **Core is testable in isolation.** Anything that needs MCP attribute decoration
   belongs in `Server`.
-- **Server SDK** is `Microsoft.NET.Sdk.Web` (we expose HTTP). `Core` is plain `Microsoft.NET.Sdk`.
+- **Application holds tool orchestration, not Server.** `Server` (MCP tools) and `Cli`
+  (`dotnet-assembly-cli`) are both thin hosts over `Application`, wired through
+  `AssemblyEngineFactory` — never add logic to one host that the other can't reach.
+  See [`AGENTS.md`](../AGENTS.md).
+- **Server SDK** is `Microsoft.NET.Sdk.Web` (we expose HTTP). `Core`, `Application`, and
+  `Cli` are plain `Microsoft.NET.Sdk`.
 
 ## 2. Tool design
 
@@ -89,22 +96,34 @@ attributes. Anything missing here costs the LLM discoverability points:
 ```csharp
 [McpServerTool(
     Name = "get_method",              // snake_case
-    Title = "Get method summary",      // human, sentence case
+    Title = "Resolve a MethodIdentity to a method summary",  // human, sentence case
     Destructive = false,
     ReadOnly = true,
     Idempotent = true,
     UseStructuredContent = true)]      // surfaces outputSchema
-[Description(
-    "Returns a method summary (signature, attributes, IL size, declaring type) " +
-    "resolved deterministically from its (moduleVersionId, metadataToken) handoff " +
-    "identity. The first tool to call after receiving a frame from dotnet-diagnostics-mcp.")]
+[Description(AssemblyToolDescriptions.GetMethod_Summary)]
 public static AssemblyResult<MethodSummary> GetMethod(
     IMetadataIndex index,
-    [Description("Module GUID (PE MVID) from the handoff contract. Lowercase 8-4-4-4-12.")] string moduleVersionId,
-    [Description("Method metadata token (MethodDef row in single-int form).")] int metadataToken,
-    CancellationToken cancellationToken)
-{ … }
+    [Description(AssemblyToolDescriptions.Common_ModuleVersionId)] string moduleVersionId,
+    [Description(AssemblyToolDescriptions.Common_MetadataToken)] string? metadataToken = null,
+    [Description(AssemblyToolDescriptions.GetMethod_TypeFullName)] string? typeFullName = null,
+    [Description(AssemblyToolDescriptions.GetMethod_MethodName)] string? methodName = null,
+    /* … remaining optional params … */)
+    => AssemblyOperations.GetMethod(index, moduleVersionId, metadataToken, typeFullName, methodName, …);
 ```
+
+Notes on the real pattern (see `AssemblyTools.Methods.cs` / `AssemblyToolDescriptions.cs`):
+
+- **Descriptions are constants**, not inline string literals — every `[Description(...)]` points at a
+  `public const string` field on `AssemblyToolDescriptions`. Several tools share the same parameter
+  shape (`moduleVersionId`, `metadataToken`, `assemblyPathHint`, …), so centralizing the text keeps
+  wording consistent and avoids re-typing near-identical descriptions across a dozen tool methods.
+  Add new descriptions there, not inline.
+- **`metadataToken` is `string?`, not `int`.** It accepts decimal or hex (`0x06000142`) and is optional —
+  many tools can resolve by `typeFullName`/`methodName` alone when the caller doesn't have a token yet.
+- **`CancellationToken` is not mandatory on every tool.** Add it only when the underlying operation is
+  actually cancellable (xref walks, decompilation); DI services still come first, then user args, then
+  `CancellationToken` last when present.
 
 Rules:
 

@@ -81,8 +81,8 @@ public static partial class AssemblyOperations
             else if (nbResult.IsSuccess)
             {
                 hints.Add(new NextActionHint(
-                    "dotnet-diagnostics-mcp.capture_method_disasm",
-                    "No precompiled native body found in the PE (the method is JIT-only, generic-open, or this module is not R2R-compiled). To inspect actual generated code, attach to a running process with dotnet-diagnostics-mcp.",
+                    "dotnet-diagnostics-mcp.capture_method_bytes",
+                    "No precompiled native body found in the PE (the method is JIT-only, generic-open, or this module is not R2R-compiled). To inspect actual generated code, attach to a running process with dotnet-diagnostics-mcp.capture_method_bytes, which reads the JIT code-heap and hands off to dotnet-native-mcp.disassemble(rawBlob=true).",
                     new Dictionary<string, object?>
                     {
                         ["moduleVersionId"] = m.ModuleVersionId.ToString("D"),

@@ -14,8 +14,11 @@ Companion: [`dotnet-diagnostics-mcp`](https://github.com/pedrosakuma/dotnet-diag
 does the *dynamic* side (live process attach, EventPipe). The two compose via the
 handoff contract defined in [`docs/handoff-contract.md`](./docs/handoff-contract.md).
 
-**Status:** design + spike phase. No production code on `main` yet. Active scaffold
-work tracked in [issue #1](https://github.com/pedrosakuma/dotnet-assembly-mcp/issues/1).
+**Status:** 22 tools shipped, dual transport (stdio + HTTP), packaged as a
+`dotnet tool`, Docker image, and self-contained single-file binaries. Also ships
+`dotnet-assembly-cli`, a human-driven CLI front-end sharing the same
+`DotnetAssemblyMcp.Application` engine. See the [README](./README.md) for the
+latest release and the current tool table.
 
 ## Read before contributing
 
@@ -25,7 +28,10 @@ work tracked in [issue #1](https://github.com/pedrosakuma/dotnet-assembly-mcp/is
 2. [`docs/mcp-conventions.md`](./docs/mcp-conventions.md) — how MCP tools, resources,
    responses, errors, and bootstrap are structured here. Mirrors the companion repo;
    drift is what we are actively trying to prevent.
-3. The companion repo's `AGENTS.md` and `src/DotnetDiagnosticsMcp.Server/Program.cs`
+3. [`docs/cli-usage.md`](./docs/cli-usage.md) — `dotnet-assembly-cli` subcommands, the
+   composed `explain-*`/`callgraph`/`diff-assemblies` commands, and global options. Keep
+   in sync with `AssemblyEngineFactory` — every MCP tool needs a matching subcommand.
+4. The companion repo's `AGENTS.md` and `src/DotnetDiagnosticsMcp.Server/Program.cs`
    — the single most important piece of prior art for this codebase.
 
 ## Critical rules (easy to violate, costly to fix)
@@ -57,8 +63,6 @@ work tracked in [issue #1](https://github.com/pedrosakuma/dotnet-assembly-mcp/is
 
 ## Build, test, run
 
-Once the scaffold lands (see #1):
-
 ```bash
 dotnet build -c Release
 dotnet test -c Release --no-build
@@ -67,7 +71,7 @@ dotnet run --project src/DotnetAssemblyMcp.Server -c Release
 dotnet run --project src/DotnetAssemblyMcp.Cli -c Release -- list-types <path-to.dll>
 ```
 
-Until then, the only buildable thing is the spike on the `spike/metadata-lib` branch:
+The original spike lives on the `spike/metadata-lib` branch for historical reference:
 
 ```bash
 git checkout spike/metadata-lib

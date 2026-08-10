@@ -1,6 +1,6 @@
 # Handoff contract: `MethodIdentity`
 
-> **Status:** Consumer side fully implemented in this repo since v0.3.0; §3.5 generic instantiations + MethodSpec fast-path shipped in v0.5.0. Producer side tracked at [`pedrosakuma/dotnet-diagnostics-mcp#18`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/18).
+> **Status:** Shipped on both sides. Consumer side fully implemented in this repo since v0.3.0; §3.5 generic instantiations + MethodSpec fast-path shipped in v0.5.0. Producer side shipped in [`pedrosakuma/dotnet-diagnostics-mcp#18`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/18) (closed) — the companion server's own copy of this contract additionally documents `NativeFrame`, `TypeIdentity`, and the untrusted-path-hint threat model shared with `dotnet-native-mcp`; see that repo's `docs/handoff-contract.md` for the producer-side superset.
 
 This document defines the wire format that [`dotnet-diagnostics-mcp`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp) emits alongside every method reference in its diagnostic output (CPU samples, exception stacks, GC events, …) and that [`dotnet-assembly-mcp`](https://github.com/pedrosakuma/dotnet-assembly-mcp) consumes to deterministically resolve a method.
 
@@ -235,7 +235,7 @@ Semantics:
 
 ### 3.5 Generic instantiations (`MethodSpec` handoff) — `genericTypeArguments`
 
-> **Status:** Shipped in v0.5.0. Producer counterpart: [`dotnet-diagnostics-mcp#21`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/21).
+> **Status:** Shipped in v0.5.0. Producer counterpart shipped in [`dotnet-diagnostics-mcp#21`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/21) (closed).
 
 The base `MethodIdentity` (§2) resolves to the **open** `MethodDef`. Runtime hotspots, however, are almost always **closed** generic instantiations: `List<int>.Add`, not `List<T>.Add`. Collapsing both into the same identity loses exactly the signal a perf agent cares about — *which* instantiation is hot. This section extends the contract to carry instantiations end-to-end without losing the `(MVID, token)` anchor.
 
@@ -346,7 +346,9 @@ The handoff is a single optional flag on the existing `get_method` tool — no n
 - Bounds are sorted by `nativeOffset` ascending; consumers can binary-search.
 - Empty array `[]` is valid (compiler-generated body with no source mapping); `null` means the PE has no DebugInfo section.
 
-The same shape will be reused by `dotnet-diagnostics-mcp.capture_method_bytes` (issue #81) when surfacing JIT-emitted bodies' ICorDebugInfo bounds — keeping a single consumer schema across R2R and live JIT.
+The same shape is reused by `dotnet-diagnostics-mcp.capture_method_bytes` (shipped in
+[`dotnet-diagnostics-mcp#81`](https://github.com/pedrosakuma/dotnet-diagnostics-mcp/issues/81), closed)
+when surfacing JIT-emitted bodies' ICorDebugInfo bounds — keeping a single consumer schema across R2R and live JIT.
 
 When `nativeBody` is populated, asm-mcp also appends a `NextActionHint` to the response envelope pointing at `dotnet-native-mcp.disassemble` with the three primitives pre-filled:
 
@@ -355,7 +357,7 @@ When `nativeBody` is populated, asm-mcp also appends a `NextActionHint` to the r
   "suggestedArguments": { "imagePath": "/.../System.Private.CoreLib.dll", "rva": 1404576, "size": 12, "architecture": "X64" } }
 ```
 
-When the flag is set but no precompiled body exists (JIT-only module, generic-open method, or an unsupported architecture — V1 ships X64 only) the response stays valid (`nativeBody: null`) and a fallback hint suggests `dotnet-diagnostics-mcp.capture_method_disasm` for live process attach.
+When the flag is set but no precompiled body exists (JIT-only module, generic-open method, or an unsupported architecture — V1 ships X64 only) the response stays valid (`nativeBody: null`) and a fallback hint suggests `dotnet-diagnostics-mcp.capture_method_bytes` for live process attach (the JIT code-heap has no R2R body to fall back to on NativeAOT/pure-R2R targets — see that repo's `docs/aot-coverage.md`).
 
 **Out of scope for asm-mcp (V1):**
 
@@ -386,6 +388,10 @@ When resolution fails, the consumer MUST return a structured error with one of t
 | `generic_instantiation_ambiguous`    | A type-arg name in `genericTypeArguments` (§3.5) resolved in 2+ modules with conflicting MVIDs. Error echoes candidate MVIDs; producer should qualify or consumer should narrow the manifest. |
 | `generic_instantiation_open`         | A type-arg referenced an open type parameter (`!0` / `!!0`). Instantiations on the wire MUST be closed. |
 | `generic_instantiation_mismatch`     | (a) Both `methodSpec*` and `genericTypeArguments` (§3.5) were supplied and they decode to different instantiations, OR (b) the `methodSpec.Method` does not resolve to the requested open `MethodDef`. |
+| `pattern_too_broad`  | A pattern argument (regex / substring, e.g. an overload search on `find_method`) would match more results than the server is willing to return in a single call. Recovery: narrow the pattern or paginate. |
+| `path_must_be_absolute` | A path-shaped argument (`load_assembly`, `import_assembly_manifest`, `assemblyPathHint`, …) was not absolute per `Path.IsPathFullyQualified`. Relative paths are rejected outright — they'd resolve against the server's working directory, which is meaningless in HTTP / container deployments. |
+| `path_rejected`      | A path survived the absolute-path check but was rejected by the file-IO hardening layer before any read: too large (>64 MiB), a symlink / reparse point, or outside an expected sibling-lookup containment directory. See [§3.1.1](#311-untrusted-path-hints--the-allowed-root-allow-list). |
+| `module_too_large`   | Building a per-module index (cross-reference graph, string-literal index) for the requested module would exceed the server's per-module budget. The partial index is discarded; nothing is cached. Recovery: narrow scope via `mvidOrPath` to a smaller assembly, or analyse the on-disk PE offline. |
 
 Errors SHOULD include the offending identity (echoed back) to help the agent debug without a second round trip.
 
@@ -393,7 +399,7 @@ Errors SHOULD include the offending identity (echoed back) to help the agent deb
 
 ## 5. Worked example
 
-Producer (`dotnet-diagnostics-mcp.collect_cpu_sample`) emits a hotspot:
+Producer (`dotnet-diagnostics-mcp.collect_sample(kind="cpu")`) emits a hotspot:
 
 ```jsonc
 {
@@ -414,10 +420,9 @@ Producer (`dotnet-diagnostics-mcp.collect_cpu_sample`) emits a hotspot:
 }
 ```
 
-Agent forwards the `method` object to this server:
+Agent forwards the `method` object to this server (shipped, not hypothetical — see §2.1 / §3.1):
 
 ```jsonc
-// hypothetical tool call (surface TBD)
 get_method({
   "moduleVersionId": "8f3a1c2d-9b4e-4a7f-b1c0-2d6e5f8a9b10",
   "metadataToken":   100663400
