@@ -91,7 +91,7 @@ public sealed class HardenedErrorPathTests
                     if (r.IsSuccess) ok++;
                 }
                 return ok;
-            }, cts.Token);
+            });
 
             // Writer thread: keep triggering same-MVID reloads.
             var writer = Task.Run(() =>
@@ -104,7 +104,7 @@ public sealed class HardenedErrorPathTests
                     if (r.IsSuccess) reloads++;
                 }
                 return reloads;
-            }, cts.Token);
+            });
 
             // Either an uncaught exception escapes (failure) or both tasks complete cleanly.
             var resolves = await reader;
