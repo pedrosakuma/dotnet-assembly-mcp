@@ -236,7 +236,7 @@ This server **does not** replace SourceLink / TraceLog source resolution. It is 
 
 - [`System.Reflection.Metadata`](https://learn.microsoft.com/dotnet/standard/metadata-and-self-describing-components) — metadata-only reads, never `Assembly.Load`
 - [`ICSharpCode.Decompiler`](https://github.com/icsharpcode/ILSpy) — full decompiler engine used by ILSpy
-- [`ModelContextProtocol`](https://github.com/modelcontextprotocol/csharp-sdk) C# SDK 1.3.0
+- [`ModelContextProtocol`](https://github.com/modelcontextprotocol/csharp-sdk) C# SDK 2.2.0
 - [`System.CommandLine`](https://github.com/dotnet/command-line-api) — argument parsing for the `dotnet-assembly-cli` front-end
 
 ## License
