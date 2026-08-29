@@ -8,7 +8,7 @@
 Source-of-truth references (in priority order):
 
 1. The MCP specification, currently [2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18).
-2. The [`ModelContextProtocol` C# SDK](https://github.com/modelcontextprotocol/csharp-sdk) (v1.3.0+).
+2. The [`ModelContextProtocol` C# SDK](https://github.com/modelcontextprotocol/csharp-sdk) (v2.2.0+).
 3. The companion repo's actual server code, especially `Program.cs`, `DiagnosticTools.cs`, and `DiagnosticResult.cs`.
 
 When in doubt, mirror the companion. Don't invent a new pattern.
@@ -194,8 +194,11 @@ The server is an ASP.NET Core app. Three pieces are mandatory:
   exists. Recommended call order, how to control cost, when to use which tool.
   Aim for ≤ 30 lines.
 - **`ProtocolVersion`** — pin explicitly to the spec version we have validated against
-  (currently `"2025-11-25"`, the latest the SDK 1.3.0 negotiates). The SDK negotiates
-  down for older clients.
+  (currently `"2025-11-25"`). This is the newest revision the SDK's classic `initialize`
+  handshake supports — `2026-07-28` and later removed `initialize` in favor of
+  `server/discover` and default to stateless sessions (SEP-2567/2575); adopting those
+  requires an architecture change, not just a version bump. The SDK negotiates down for
+  older clients.
 
 Transport: both stdio (default for `WithStdioServerTransport`) and HTTP. We use
 `WithHttpTransport()` + `MapMcp("/mcp")`. Also expose `/health` for ops.

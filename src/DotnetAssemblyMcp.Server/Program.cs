@@ -161,8 +161,13 @@ static Microsoft.Extensions.DependencyInjection.IMcpServerBuilder ConfigureMcpSe
     services
         .AddMcpServer(options =>
         {
-            // Advertise the latest spec version we have validated against.
-            // SDK 1.3.0 supports negotiation back to 2024-11-05 if the client is older.
+            // Advertise the latest spec version we have validated against. SDK 2.2.0's
+            // classic `initialize` handshake (the stateful Streamable HTTP / stdio flow this
+            // server still uses) is a back-compat-only escape hatch for 2025-11-25 and earlier
+            // — the current revision (2026-07-28) removed `initialize` entirely in favor of
+            // `server/discover` (SEP-2575) and defaults to stateless sessions (SEP-2567).
+            // Advertising 2026-07-28 here throws UnsupportedProtocolVersionException at startup;
+            // adopting it requires the stateless/MRTR redesign, out of scope for this bump.
             options.ProtocolVersion = "2025-11-25";
 
             options.ServerInfo = new ModelContextProtocol.Protocol.Implementation
