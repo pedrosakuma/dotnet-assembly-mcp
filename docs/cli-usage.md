@@ -127,7 +127,7 @@ Two options are honoured by every subcommand:
 | Option | Effect |
 |---|---|
 | `--json` | Emit the full `AssemblyResult` envelope as indented JSON (scriptable; identical to the MCP `data`). Without it, you get a human-readable rendering of the result. |
-| `--load <path>` | Load an assembly (relative or absolute path) into this invocation's index before the command runs. Repeatable, and — being recursive — may appear before or after the subcommand. Because the CLI is one-shot, a handle (`m:<mvid>:0x…`) only resolves once its module is loaded, and cross-module queries only search loaded modules; `--load` (or a path-taking subcommand such as `find-method`, or a token command's `--assembly`) is how you prime the index. |
+| `--load <path>` | Load an assembly (relative or absolute path) into this invocation's index before the command runs. Repeatable, and — being recursive — may appear before or after the subcommand. Because the CLI is one-shot, a handle (`m:<mvid>:0x…`) only resolves once its module is loaded, and cross-module queries only search loaded modules; `--load` (or a path-taking subcommand such as `find-method`, or a token command's `--assembly`) is how you prime the index. Each value may also be a **directory** (walked recursively for `*.dll`/`*.exe`) or a **glob pattern** (`*`, `?`, `**`, e.g. `--load "bin/Release/**/*.dll"`) — useful for priming the index from a whole solution's build output in one shot. Expanded paths are deduplicated by (file name, file size) before loading, so redundant copies of the same assembly that MSBuild scatters across multiple projects' `bin/` output don't each pay the full load cost; skipped duplicates are reported as `warning:` lines on stderr. |
 
 | Exit code | Meaning |
 |---|---|

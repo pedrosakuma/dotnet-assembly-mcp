@@ -21,7 +21,9 @@ internal sealed class CliContext
     /// Global repeatable <c>--load &lt;path&gt;</c> option. Because the CLI is one-shot, a handle
     /// returned by an earlier invocation is meaningless unless the owning assembly is reloaded.
     /// Every path supplied here is loaded into the metadata index before the subcommand runs,
-    /// which also primes cross-module reference queries.
+    /// which also primes cross-module reference queries. Each value may also be a directory
+    /// (walked recursively for <c>*.dll</c>/<c>*.exe</c>) or a glob pattern (<c>*</c>, <c>?</c>,
+    /// <c>**</c>); see <see cref="CliLoadResolver"/> for expansion and same-name/size dedup.
     /// </summary>
     public required Option<string[]> LoadOption { get; init; }
 }
@@ -52,10 +54,13 @@ internal static class CliRun
             return;
         }
 
-        foreach (var path in paths)
+        // Expands globs/directories and drops redundant same-name/same-size copies (MSBuild's
+        // per-project bin/ output duplication) before anything reaches the expensive Load path.
+        IReadOnlyList<string> resolvedPaths = CliLoadResolver.Resolve(paths, Console.Error);
+
+        foreach (var path in resolvedPaths)
         {
-            string resolved = CliPaths.ResolvePathOnly(path)!;
-            AssemblyResult<ModuleSummary> loaded = AssemblyOperations.LoadAssembly(context.Engine.Index, resolved);
+            AssemblyResult<ModuleSummary> loaded = AssemblyOperations.LoadAssembly(context.Engine.Index, path);
             if (loaded.IsError)
             {
                 Console.Error.WriteLine($"warning: --load '{path}': {loaded.Summary}");
