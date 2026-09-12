@@ -15,10 +15,12 @@ namespace DotnetAssemblyMcp.Cli;
 /// PE-open + metadata-parse cost even though only the first occurrence is ever kept by the
 /// underlying module store. This resolver removes that overhead up front:
 /// <list type="number">
-/// <item>Each raw value is expanded: a glob pattern (containing <c>*</c>, <c>?</c> or <c>[</c>)
-/// is matched against disk, an existing directory is walked recursively for <c>*.dll</c>/<c>*.exe</c>
-/// files, and anything else is treated as a literal path (unchanged — including paths that don't
-/// exist, so the existing per-path load error/warning still surfaces downstream).</item>
+/// <item>Each raw value is expanded: a <c>.sln</c>/<c>.slnx</c> solution file is resolved to its
+/// referenced projects' build-output globs (see <see cref="SolutionProjectResolver"/>), a glob
+/// pattern (containing <c>*</c>, <c>?</c> or <c>[</c>) is matched against disk, an existing
+/// directory is walked recursively for <c>*.dll</c>/<c>*.exe</c> files, and anything else is
+/// treated as a literal path (unchanged — including paths that don't exist, so the existing
+/// per-path load error/warning still surfaces downstream).</item>
 /// <item>The flattened list is deduplicated by (file name, file length) — a cheap, read-free
 /// heuristic that reliably collapses MSBuild's redundant same-content copies without opening a
 /// single PE. Skips are reported to the caller-supplied writer so the operator can see what was
@@ -30,12 +32,15 @@ internal static class CliLoadResolver
     /// <summary>Glob/wildcard metacharacters that mark a raw <c>--load</c> value as a pattern rather than a literal path.</summary>
     private static readonly char[] GlobChars = ['*', '?', '['];
 
-    public static IReadOnlyList<string> Resolve(IEnumerable<string> rawValues, TextWriter warnings)
+    /// <summary>Solution file extensions whose <c>--load</c> value expands to project build outputs.</summary>
+    private static readonly string[] SolutionExtensions = [".sln", ".slnx"];
+
+    public static IReadOnlyList<string> Resolve(IEnumerable<string> rawValues, TextWriter warnings, string? configuration = null)
     {
         var expanded = new List<(string Raw, string Path)>();
         foreach (var raw in rawValues)
         {
-            foreach (var path in ExpandOne(raw))
+            foreach (var path in ExpandOne(raw, configuration, warnings))
             {
                 expanded.Add((raw, path));
             }
@@ -44,7 +49,7 @@ internal static class CliLoadResolver
         return Dedupe(expanded, warnings);
     }
 
-    private static IEnumerable<string> ExpandOne(string raw)
+    private static IEnumerable<string> ExpandOne(string raw, string? configuration, TextWriter warnings)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -52,7 +57,8 @@ internal static class CliLoadResolver
             yield break;
         }
 
-        if (raw.IndexOfAny(GlobChars) >= 0)
+        bool isGlob = raw.IndexOfAny(GlobChars) >= 0;
+        if (isGlob)
         {
             foreach (var match in ExpandGlob(raw))
             {
@@ -62,6 +68,19 @@ internal static class CliLoadResolver
         }
 
         string resolved = CliPaths.ResolvePathOnly(raw)!;
+        if (SolutionExtensions.Contains(Path.GetExtension(resolved), StringComparer.OrdinalIgnoreCase)
+            && File.Exists(resolved))
+        {
+            foreach (var glob in SolutionProjectResolver.ResolveOutputGlobs(resolved, configuration, warnings))
+            {
+                foreach (var match in ExpandGlob(glob))
+                {
+                    yield return match;
+                }
+            }
+            yield break;
+        }
+
         if (Directory.Exists(resolved))
         {
             foreach (var file in EnumerateAssemblies(resolved))

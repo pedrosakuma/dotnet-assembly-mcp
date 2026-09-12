@@ -447,4 +447,84 @@ public sealed class CliSmokeTests
             Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [Fact]
+    public void Load_ClassicSlnFile_ResolvesProjectBuildOutputs()
+    {
+        string tempDir = Directory.CreateTempSubdirectory("cli-load-sln-").FullName;
+        try
+        {
+            string projectDir = Directory.CreateDirectory(Path.Combine(tempDir, "MyProject")).FullName;
+            string outputDir = Directory.CreateDirectory(Path.Combine(projectDir, "bin", "Release", "net10.0")).FullName;
+            string assemblyFileName = Path.GetFileName(SampleLibPath);
+            string projectName = Path.GetFileNameWithoutExtension(assemblyFileName);
+            File.Copy(SampleLibPath, Path.Combine(outputDir, assemblyFileName));
+            File.WriteAllText(
+                Path.Combine(projectDir, projectName + ".csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+
+            string projectGuid1 = Guid.NewGuid().ToString();
+            string projectGuid2 = Guid.NewGuid().ToString();
+            string slnPath = Path.Combine(tempDir, "MySolution.sln");
+            string slnContent = "Microsoft Visual Studio Solution File, Format Version 12.00\n"
+                + $"Project(\"{{{projectGuid1}}}\") = \"{projectName}\", \"MyProject\\{projectName}.csproj\", \"{{{projectGuid2}}}\"\n"
+                + "EndProject\n";
+            File.WriteAllText(slnPath, slnContent);
+
+            var (mvid, tokenHex) = DiscoverMethod("Process");
+
+            var (exit, output, _) = Invoke(
+                "--load", slnPath,
+                "--configuration", "Release",
+                "find-callers",
+                mvid.ToString(),
+                tokenHex);
+
+            exit.Should().Be(0);
+            output.Should().Contain("Callers:");
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Load_SlnxFile_ResolvesProjectBuildOutputs()
+    {
+        string tempDir = Directory.CreateTempSubdirectory("cli-load-slnx-").FullName;
+        try
+        {
+            string projectDir = Directory.CreateDirectory(Path.Combine(tempDir, "MyProject")).FullName;
+            string outputDir = Directory.CreateDirectory(Path.Combine(projectDir, "bin", "Release", "net10.0")).FullName;
+            string assemblyFileName = Path.GetFileName(SampleLibPath);
+            string projectName = Path.GetFileNameWithoutExtension(assemblyFileName);
+            File.Copy(SampleLibPath, Path.Combine(outputDir, assemblyFileName));
+            File.WriteAllText(
+                Path.Combine(projectDir, projectName + ".csproj"),
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+
+            string slnxPath = Path.Combine(tempDir, "MySolution.slnx");
+            File.WriteAllText(slnxPath, $"""
+                <Solution>
+                  <Project Path="MyProject/{projectName}.csproj" />
+                </Solution>
+                """);
+
+            var (mvid, tokenHex) = DiscoverMethod("Process");
+
+            var (exit, output, _) = Invoke(
+                "--load", slnxPath,
+                "find-callers",
+                mvid.ToString(),
+                tokenHex);
+
+            exit.Should().Be(0);
+            output.Should().Contain("Callers:");
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
 }
