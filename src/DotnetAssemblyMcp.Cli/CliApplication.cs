@@ -57,18 +57,30 @@ internal static class CliApplication
         };
         var loadOption = new Option<string[]>("--load")
         {
-            Description = "Load an assembly into the index before the command runs. Repeatable.",
+            Description = "Load an assembly into the index before the command runs. Repeatable. " +
+                "Accepts a file, a directory (recursed for *.dll/*.exe), a glob pattern " +
+                "(*, ?, **), or a .sln/.slnx solution file (its projects' build outputs are " +
+                "resolved and loaded — see --configuration).",
+            Recursive = true,
+        };
+        var configurationOption = new Option<string?>("--configuration")
+        {
+            Description = "Build configuration (e.g. Release, Debug) used to narrow which build " +
+                "output is loaded when a --load value is a .sln/.slnx solution file. Without it, " +
+                "every configuration/target-framework output found is loaded.",
             Recursive = true,
         };
 
         root.Options.Add(jsonOption);
         root.Options.Add(loadOption);
+        root.Options.Add(configurationOption);
 
         var context = new CliContext
         {
             Engine = engine,
             JsonOption = jsonOption,
             LoadOption = loadOption,
+            ConfigurationOption = configurationOption,
         };
 
         LifecycleCommands.Register(root, context);

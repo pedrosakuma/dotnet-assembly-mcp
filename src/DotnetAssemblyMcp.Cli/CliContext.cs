@@ -26,6 +26,12 @@ internal sealed class CliContext
     /// <c>**</c>); see <see cref="CliLoadResolver"/> for expansion and same-name/size dedup.
     /// </summary>
     public required Option<string[]> LoadOption { get; init; }
+
+    /// <summary>
+    /// Global <c>--configuration &lt;name&gt;</c> option: narrows which build output is loaded
+    /// when a <c>--load</c> value is a <c>.sln</c>/<c>.slnx</c> solution file (e.g. <c>Release</c>).
+    /// </summary>
+    public required Option<string?> ConfigurationOption { get; init; }
 }
 
 /// <summary>Shared plumbing for binding subcommand actions to <see cref="AssemblyOperations"/>.</summary>
@@ -54,9 +60,11 @@ internal static class CliRun
             return;
         }
 
-        // Expands globs/directories and drops redundant same-name/same-size copies (MSBuild's
-        // per-project bin/ output duplication) before anything reaches the expensive Load path.
-        IReadOnlyList<string> resolvedPaths = CliLoadResolver.Resolve(paths, Console.Error);
+        // Expands globs/directories/solutions and drops redundant same-name/same-size copies
+        // (MSBuild's per-project bin/ output duplication) before anything reaches the expensive
+        // Load path.
+        string? configuration = parseResult.GetValue(context.ConfigurationOption);
+        IReadOnlyList<string> resolvedPaths = CliLoadResolver.Resolve(paths, Console.Error, configuration);
 
         foreach (var path in resolvedPaths)
         {
