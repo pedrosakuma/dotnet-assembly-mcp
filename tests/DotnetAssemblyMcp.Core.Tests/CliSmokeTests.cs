@@ -360,4 +360,91 @@ public sealed class CliSmokeTests
 
         exit.Should().Be(1);
     }
+
+    [Fact]
+    public void Load_DuplicateNameAndSizeCopies_DedupesAndWarns()
+    {
+        // Simulate MSBuild's per-project bin/ output duplication: two on-disk copies of the
+        // same DLL (same file name, same bytes) reachable under different directories.
+        string tempDir = Directory.CreateTempSubdirectory("cli-load-dedup-").FullName;
+        try
+        {
+            string copyDirA = Directory.CreateDirectory(Path.Combine(tempDir, "ProjectA", "bin")).FullName;
+            string copyDirB = Directory.CreateDirectory(Path.Combine(tempDir, "ProjectB", "bin")).FullName;
+            string copyA = Path.Combine(copyDirA, Path.GetFileName(SampleLibPath));
+            string copyB = Path.Combine(copyDirB, Path.GetFileName(SampleLibPath));
+            File.Copy(SampleLibPath, copyA);
+            File.Copy(SampleLibPath, copyB);
+
+            var (mvid, tokenHex) = DiscoverMethod("Process");
+
+            var (exit, output, error) = Invoke(
+                "--load", copyA,
+                "--load", copyB,
+                "find-callers",
+                mvid.ToString(),
+                tokenHex);
+
+            exit.Should().Be(0);
+            output.Should().Contain("Callers:");
+            error.Should().Contain("duplicate of");
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Load_DirectoryValue_RecursivelyLoadsAssemblies()
+    {
+        string tempDir = Directory.CreateTempSubdirectory("cli-load-dir-").FullName;
+        try
+        {
+            string nested = Directory.CreateDirectory(Path.Combine(tempDir, "nested")).FullName;
+            File.Copy(SampleLibPath, Path.Combine(nested, Path.GetFileName(SampleLibPath)));
+
+            var (mvid, tokenHex) = DiscoverMethod("Process");
+
+            var (exit, output, _) = Invoke(
+                "--load", tempDir,
+                "find-callers",
+                mvid.ToString(),
+                tokenHex);
+
+            exit.Should().Be(0);
+            output.Should().Contain("Callers:");
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Load_GlobPattern_ExpandsAndLoadsMatches()
+    {
+        string tempDir = Directory.CreateTempSubdirectory("cli-load-glob-").FullName;
+        try
+        {
+            string nested = Directory.CreateDirectory(Path.Combine(tempDir, "ProjectC", "bin", "Release")).FullName;
+            File.Copy(SampleLibPath, Path.Combine(nested, Path.GetFileName(SampleLibPath)));
+
+            var (mvid, tokenHex) = DiscoverMethod("Process");
+            string pattern = Path.Combine(tempDir, "**", "*.dll");
+
+            var (exit, output, _) = Invoke(
+                "--load", pattern,
+                "find-callers",
+                mvid.ToString(),
+                tokenHex);
+
+            exit.Should().Be(0);
+            output.Should().Contain("Callers:");
+        }
+        finally
+        {
+            Directory.Delete(tempDir, recursive: true);
+        }
+    }
 }
