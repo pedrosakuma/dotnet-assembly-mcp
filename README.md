@@ -1,6 +1,6 @@
 # dotnet-assembly-mcp
 
-> **Status:** 22 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool`, Docker image, and self-contained single-file binaries. Latest release: [`v0.14.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases) — collapsed `find_member_references` (field/property/event in one tool) and `get_method_il(format=raw|text|scan)` (issue #83, breaking).
+> **Status:** 22 tools shipped, dual transport (stdio + HTTP), packaged as `dotnet tool`, Docker image, and self-contained single-file binaries. Latest release: [`v0.23.0`](https://github.com/pedrosakuma/dotnet-assembly-mcp/releases) — `dotnet-assembly-cli --load` now accepts directories, glob patterns, and `.sln`/`.slnx` solution files, with automatic dedup of redundant MSBuild `bin/` copies (issues #172, #173, #174).
 
 An **MCP server** for *static* navigation of compiled .NET assemblies — types, methods, attributes, signatures, IL, cross-references, and on-demand decompilation — designed as a **token-efficient alternative to feeding source code into an LLM context**.
 
